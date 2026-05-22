@@ -1,12 +1,13 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, globalShortcut } from 'electron';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { PtyManager, getDisplayName } from './pty-manager';
-import { SnapshotManager } from './snapshot-manager';
 import { AIConfigManager } from './ai-config';
-import { setAIConfig, aiDiffSummary, aiSummarize, aiSessionSummarize } from './ollama';
 import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd } from './remote-server';
+import { CloudflaredManager } from './cloudflared-manager';
+import { ChatSessionManager } from './chat-session-manager';
+import { WindsurfProxyManager } from './windsurf-proxy-manager';
 
 // macOS: 设置为普通应用模式，显示在 Dock 和 Command+Tab 切换器中
 if (process.platform === 'darwin') {
@@ -21,14 +22,7 @@ import * as os from 'os';
 
 const PASTE_IMAGE_DIR = path.join(os.tmpdir(), 'duocli-paste');
 
-// 会话历史目录
-const SESSION_HISTORY_DIR = path.join(app.getPath('userData'), 'session-history');
-const MAX_HISTORY_FILES = 50;
-// 内存 buffer：sessionId → 待写入数据
-const historyBuffers: Map<string, string> = new Map();
-// sessionId → 文件路径映射
-const historyFilePaths: Map<string, string> = new Map();
-const sessionOutputTail: Map<string, string> = new Map();
+// 会话通知状态
 const sessionLastInputAt: Map<string, number> = new Map();
 const sessionArmedForNotify: Set<string> = new Set();
 const sessionLastNotifyAt: Map<string, number> = new Map();
@@ -41,33 +35,15 @@ const IMESSAGE_SERVICE = ((process.env.DUOCLI_IMESSAGE_SERVICE || 'iMessage').tr
   ? 'SMS'
   : 'iMessage';
 
-function ensureHistoryDir(): void {
-  if (!fs.existsSync(SESSION_HISTORY_DIR)) {
-    fs.mkdirSync(SESSION_HISTORY_DIR, { recursive: true });
-  }
-}
-
-function sanitizeFilename(name: string): string {
-  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').substring(0, 80);
-}
-
-function cleanupOldHistory(): void {
-  try {
-    const files = fs.readdirSync(SESSION_HISTORY_DIR)
-      .filter(f => f.endsWith('.txt'))
-      .map(f => ({ name: f, time: fs.statSync(path.join(SESSION_HISTORY_DIR, f)).mtimeMs }))
-      .sort((a, b) => b.time - a.time);
-    if (files.length > MAX_HISTORY_FILES) {
-      for (const f of files.slice(MAX_HISTORY_FILES)) {
-        fs.unlinkSync(path.join(SESSION_HISTORY_DIR, f.name));
-      }
-    }
-  } catch { /* ignore */ }
-}
-
-// AI 偏好持久化
+const sessionOutputTail: Map<string, string> = new Map();
 function getPreferencePath(): string {
   return path.join(app.getPath('userData'), 'ai-preference.json');
+}
+
+interface AiPreferenceData {
+  providerId: string | null;
+  model: string | null;
+  manualConfig?: { apiFormat: string; baseUrl: string; apiKey: string; model: string };
 }
 
 function saveAiPreference(providerId: string, model?: string): void {
@@ -75,6 +51,7 @@ function saveAiPreference(providerId: string, model?: string): void {
     const existing = loadAiPreferenceData();
     const data = { providerId, model: model || existing.model || '' };
     fs.writeFileSync(getPreferencePath(), JSON.stringify(data));
+    aiPreferenceCache = null;
   } catch { /* ignore */ }
 }
 
@@ -82,11 +59,24 @@ function loadAiPreference(): string | null {
   return loadAiPreferenceData().providerId;
 }
 
-function loadAiPreferenceData(): { providerId: string | null; model: string | null } {
+let aiPreferenceCache: AiPreferenceData | null = null;
+function loadAiPreferenceData(): AiPreferenceData {
+  if (aiPreferenceCache) return aiPreferenceCache;
   try {
     const data = JSON.parse(fs.readFileSync(getPreferencePath(), 'utf-8'));
-    return { providerId: data.providerId || null, model: data.model || null };
-  } catch { return { providerId: null, model: null }; }
+    aiPreferenceCache = {
+      providerId: data.providerId || null,
+      model: data.model || null,
+      manualConfig: data.manualConfig || undefined,
+    };
+  } catch {
+    aiPreferenceCache = { providerId: null, model: null };
+  }
+  return aiPreferenceCache;
+}
+
+function invalidateAiPreferenceCache(): void {
+  aiPreferenceCache = null;
 }
 
 // 编辑器偏好持久化
@@ -209,36 +199,31 @@ function parseShellExports(content: string): Map<string, string> {
 
 let mainWindow: BrowserWindow | null = null;
 let ptyManager: PtyManager;
-const snapshotManager = new SnapshotManager();
 const aiConfigManager = new AIConfigManager();
+let cloudflaredManager: CloudflaredManager | null = null;
+let chatSessionManager: ChatSessionManager | null = null;
+let windsurfProxyManager: WindsurfProxyManager | null = null;
+let cachedRemoteServerInfo: any = null;
 
-function createWindow(): void {
-  // 项目路径含中文/特殊字符时 nativeImage.createFromPath 可能失败，
-  // 先复制图标到临时目录再加载；优先用 png（兼容性更好）
-  const os = require('os');
-  const iconCandidates = [
+function loadAppIcon(): Electron.NativeImage | undefined {
+  // macOS 打包后用 .icns，开发模式用 .png
+  const candidates = [
     path.join(__dirname, '../../build/icon.png'),
     path.join(__dirname, '../../build/icon.icns'),
-    path.join(__dirname, '../../icon.png'),
+    path.join(app.getAppPath(), 'build', 'icon.png'),
+    path.join(app.getAppPath(), 'build', 'icon.icns'),
   ];
-  let appIcon: Electron.NativeImage | undefined;
-  for (const iconPath of iconCandidates) {
+  for (const iconPath of candidates) {
     try {
       if (!fs.existsSync(iconPath)) continue;
-      const tmpIcon = path.join(os.tmpdir(), 'duocli-icon' + path.extname(iconPath));
-      fs.copyFileSync(iconPath, tmpIcon);
-      const icon = nativeImage.createFromPath(tmpIcon);
-      if (!icon.isEmpty()) {
-        appIcon = icon;
-        break;
-      }
-    } catch (_e) {
-      // 继续尝试下一个候选
-    }
+      const icon = nativeImage.createFromPath(iconPath);
+      if (!icon.isEmpty()) return icon;
+    } catch { /* next */ }
   }
-  if (appIcon && process.platform === 'darwin' && app.dock) {
-    app.dock.setIcon(appIcon);
-  }
+  return undefined;
+}
+
+function createWindow(appIcon?: Electron.NativeImage): void {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -254,6 +239,12 @@ function createWindow(): void {
   });
 
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+
+  // 拦截 Command+R (macOS) 和 Ctrl+R (Windows/Linux) 防止刷新窗口
+  const refreshKey = process.platform === 'darwin' ? 'Command+R' : 'Ctrl+R';
+  globalShortcut.register(refreshKey, () => {
+    // 不做任何操作，阻止默认刷新行为
+  });
 
   // 关闭窗口时，如果有活跃终端则弹确认
   mainWindow.on('close', (e) => {
@@ -371,8 +362,8 @@ function setupPtyManager(): void {
     },
     onExit: (id) => {
       // 用户主动关闭的会话不发通知
+      const session = ptyManager.getSession(id);
       if (!sessionUserClosed.has(id)) {
-        const session = ptyManager.getSession(id);
         const title = session?.title || '终端';
         sendUserNotification(id, '会话已结束', title);
       }
@@ -387,24 +378,8 @@ function setupPtyManager(): void {
     onPasteInput: (id, cwd) => {
       sessionLastInputAt.set(id, Date.now());
       sessionArmedForNotify.add(id);
-      snapshotManager.createSnapshot(cwd, '快照中...').then(async (commitId) => {
-        if (commitId) {
-          safeSend('snapshot:created', commitId);
-          // 异步用 AI 生成快照标题
-          try {
-            const diff = await snapshotManager.getSnapshotDiff(cwd, commitId);
-            if (diff) {
-              const summary = await aiDiffSummary(diff);
-              if (summary) {
-                await snapshotManager.updateMessage(cwd, commitId, summary);
-                safeSend('snapshot:created', commitId);
-              }
-            }
-          } catch { /* 静默失败 */ }
-        }
-      }).catch(() => { /* 静默失败 */ });
     },
-  });
+  }, () => loadAiPreferenceData().manualConfig || null);
 }
 
 function registerIPC(): void {
@@ -476,6 +451,11 @@ function registerIPC(): void {
     ptyManager.rename(id, title);
   });
 
+  // 重新用 AI 生成标题
+  ipcMain.handle('pty:regenerate-title', async (_e, id: string) => {
+    await ptyManager.regenerateTitle(id);
+  });
+
   // 获取所有会话信息
   ipcMain.handle('pty:sessions', () => {
     return ptyManager.getAllSessions().map((s) => ({
@@ -529,50 +509,6 @@ function registerIPC(): void {
   ipcMain.handle('remote:add-recent-cwd', (_e, cwd: string) => {
     try { addRemoteRecentCwd(cwd); } catch { /* ignore */ }
     return true;
-  });
-
-  // ========== 快照 IPC ==========
-
-  ipcMain.handle('snapshot:check-repo', async (_e, cwd: string) => {
-    return snapshotManager.isGitRepo(cwd);
-  });
-
-  ipcMain.handle('snapshot:create', async (_e, cwd: string, message?: string) => {
-    return snapshotManager.createSnapshot(cwd, message);
-  });
-
-  ipcMain.handle('snapshot:list', async (_e, cwd: string) => {
-    return snapshotManager.listSnapshots(cwd);
-  });
-
-  ipcMain.handle('snapshot:files', async (_e, cwd: string, commitId: string) => {
-    return snapshotManager.getSnapshotFiles(cwd, commitId);
-  });
-
-  ipcMain.handle('snapshot:rollback', async (_e, cwd: string, commitId: string, files: string[]) => {
-    await snapshotManager.rollbackFiles(cwd, commitId, files);
-  });
-
-  ipcMain.handle('snapshot:rollback-all', async (_e, cwd: string, commitId: string) => {
-    return snapshotManager.rollbackAll(cwd, commitId);
-  });
-
-  ipcMain.handle('snapshot:file-diff', async (_e, cwd: string, commitId: string, filePath: string) => {
-    return snapshotManager.getFileDiff(cwd, commitId, filePath);
-  });
-
-  ipcMain.handle('snapshot:diff', async (_e, cwd: string, commitId: string) => {
-    return snapshotManager.getSnapshotDiff(cwd, commitId);
-  });
-
-  ipcMain.handle('snapshot:restore-to', async (_e, cwd: string, commitId: string) => {
-    return snapshotManager.restoreToSnapshot(cwd, commitId);
-  });
-
-  ipcMain.handle('snapshot:summarize', async (_e, cwd: string, commitId: string) => {
-    const diff = await snapshotManager.getSnapshotDiff(cwd, commitId);
-    if (!diff) return '无变更内容';
-    return aiDiffSummary(diff);
   });
 
   // ========== 剪贴板图片 IPC ==========
@@ -760,69 +696,31 @@ function registerIPC(): void {
 
   // ========== AI 配置 IPC ==========
 
-  ipcMain.handle('ai:scan', async () => {
-    const providers = await aiConfigManager.scan();
-    return providers.map(p => ({
-      ...p,
-      apiKey: AIConfigManager.maskKey(p.apiKey),
-    }));
+  // 直接应用手动配置（保存偏好，不再调用已移除的 AI 服务）
+  ipcMain.handle('ai:apply-config', (_e, config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => {
+    try {
+      fs.writeFileSync(getPreferencePath(), JSON.stringify({
+        providerId: '__manual__',
+        model: config.model,
+        manualConfig: config,
+      }));
+      invalidateAiPreferenceCache();
+    } catch { /* ignore */ }
+    return true;
   });
 
-  ipcMain.handle('ai:test-all', async () => {
-    const providers = await aiConfigManager.testAll();
-    return providers.map(p => ({
-      ...p,
-      apiKey: AIConfigManager.maskKey(p.apiKey),
-    }));
-  });
-
-  ipcMain.handle('ai:get-providers', () => {
-    return aiConfigManager.getProviders().map(p => ({
-      ...p,
-      apiKey: AIConfigManager.maskKey(p.apiKey),
-    }));
-  });
-
-  ipcMain.handle('ai:select', (_e, providerId: string) => {
-    const providers = aiConfigManager.getProviders();
-    const selected = providers.find(p => p.id === providerId);
-    if (selected && selected.status === 'ok') {
-      // 恢复之前保存的模型选择
-      const pref = loadAiPreferenceData();
-      if (pref.providerId === providerId && pref.model && selected.availableModels.includes(pref.model)) {
-        selected.model = pref.model;
-      }
-      setAIConfig({
-        apiFormat: selected.apiFormat,
-        baseUrl: selected.baseUrl,
-        apiKey: selected.apiKey,
-        model: selected.model,
-      });
-      saveAiPreference(providerId, selected.model);
-      return true;
+  // 获取当前保存的配置
+  ipcMain.handle('ai:get-current-config', () => {
+    const pref = loadAiPreferenceData();
+    if (pref.manualConfig) {
+      return { ...pref.manualConfig, providerId: pref.providerId };
     }
-    return false;
+    return null;
   });
 
-  ipcMain.handle('ai:set-model', (_e, providerId: string, model: string) => {
-    const providers = aiConfigManager.getProviders();
-    const selected = providers.find(p => p.id === providerId);
-    if (selected && selected.availableModels.includes(model)) {
-      selected.model = model;
-      setAIConfig({
-        apiFormat: selected.apiFormat,
-        baseUrl: selected.baseUrl,
-        apiKey: selected.apiKey,
-        model,
-      });
-      saveAiPreference(providerId, model);
-      return true;
-    }
-    return false;
-  });
-
-  ipcMain.handle('ai:get-selected', () => {
-    return loadAiPreferenceData();
+  // 测试 AI 配置连通性
+  ipcMain.handle('ai:test-config', async (_e, _config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => {
+    return { ok: false, error: 'AI 功能已移除' };
   });
 
   // 获取 CLI 实际使用的模型提供商
@@ -917,6 +815,9 @@ function registerIPC(): void {
     return true;
   });
 
+  // 渲染进程主动获取远程服务器信息（解决 IPC 消息早于渲染进程加载的竞态问题）
+  ipcMain.handle('remote:get-server-info', () => cachedRemoteServerInfo);
+
   // ========== 催工配置中转 IPC ==========
   // main 进程作为中转：remote-server API → renderer 的 sessionAutoContinue
 
@@ -959,99 +860,125 @@ function registerIPC(): void {
     (global as any).__sessionStatuses = statuses;
   });
 
-  // ========== 会话历史 IPC ==========
+  // ========== Chat Session IPC ==========
 
-  ipcMain.handle('session-history:init', (_e, sessionId: string, title: string) => {
-    ensureHistoryDir();
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    const safeName = sanitizeFilename(title);
-    const filename = `${safeName}_${ts}.txt`;
-    const filePath = path.join(SESSION_HISTORY_DIR, filename);
-    historyFilePaths.set(sessionId, filePath);
-    historyBuffers.set(sessionId, '');
-    return filename;
+  ipcMain.handle('chat:create', (_e, opts: { workspace: string; model?: string }) => {
+    if (!chatSessionManager) return null;
+    const session = chatSessionManager.create(opts.workspace, opts.model);
+    return { id: session.id, title: session.title, model: session.model, workspace: session.workspace, createdAt: session.createdAt };
   });
 
-  ipcMain.on('session-history:append', (_e, sessionId: string, data: string) => {
-    // 剥离 ANSI 转义序列，保存干净文本
-    const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-    const existing = historyBuffers.get(sessionId) || '';
-    historyBuffers.set(sessionId, existing + clean);
+  ipcMain.handle('chat:send', (_e, sessionId: string, content: string) => {
+    if (!chatSessionManager) return;
+    chatSessionManager.sendMessage(sessionId, content).catch(() => {});
   });
 
-  ipcMain.handle('session-history:flush', (_e, sessionId: string) => {
-    const buf = historyBuffers.get(sessionId);
-    const filePath = historyFilePaths.get(sessionId);
-    if (!buf || !filePath) return;
-    try {
-      fs.appendFileSync(filePath, buf);
-      historyBuffers.set(sessionId, '');
-    } catch { /* ignore */ }
+  ipcMain.handle('chat:list', () => {
+    if (!chatSessionManager) return [];
+    return chatSessionManager.getAllSessions().map(s => ({
+      id: s.id,
+      title: s.title,
+      model: s.model,
+      workspace: s.workspace,
+      createdAt: s.createdAt,
+      messageCount: s.messages.length,
+    }));
   });
 
-  ipcMain.handle('session-history:finish', (_e, sessionId: string) => {
-    const buf = historyBuffers.get(sessionId);
-    const filePath = historyFilePaths.get(sessionId);
-    if (buf && filePath) {
-      try { fs.appendFileSync(filePath, buf); } catch { /* ignore */ }
-    }
-    historyBuffers.delete(sessionId);
-    historyFilePaths.delete(sessionId);
-    cleanupOldHistory();
+  ipcMain.handle('chat:messages', (_e, sessionId: string) => {
+    if (!chatSessionManager) return [];
+    return chatSessionManager.getSession(sessionId)?.messages || [];
   });
 
-  ipcMain.handle('session-history:rename', (_e, sessionId: string, newTitle: string) => {
-    const oldPath = historyFilePaths.get(sessionId);
-    if (!oldPath || !fs.existsSync(oldPath)) return;
-    const oldName = path.basename(oldPath);
-    const tsPart = oldName.substring(oldName.lastIndexOf('_'));
-    const safeName = sanitizeFilename(newTitle);
-    const newFilename = `${safeName}${tsPart}`;
-    const newPath = path.join(SESSION_HISTORY_DIR, newFilename);
-    try {
-      fs.renameSync(oldPath, newPath);
-      historyFilePaths.set(sessionId, newPath);
-    } catch { /* ignore */ }
+  ipcMain.handle('chat:destroy', (_e, sessionId: string) => {
+    chatSessionManager?.destroy(sessionId);
+    return true;
   });
 
-  ipcMain.handle('session-history:list', () => {
-    ensureHistoryDir();
-    try {
-      return fs.readdirSync(SESSION_HISTORY_DIR)
-        .filter(f => f.endsWith('.txt'))
-        .map(f => {
-          const stat = fs.statSync(path.join(SESSION_HISTORY_DIR, f));
-          return { filename: f, size: stat.size, mtime: stat.mtimeMs };
-        })
-        .sort((a, b) => b.mtime - a.mtime);
-    } catch { return []; }
+  ipcMain.handle('chat:abort', (_e, sessionId: string) => {
+    chatSessionManager?.abortStream(sessionId);
+    return true;
   });
 
-  ipcMain.handle('session-history:read', (_e, filename: string) => {
-    const filePath = path.join(SESSION_HISTORY_DIR, filename);
-    try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
+  ipcMain.handle('chat:rename', (_e, sessionId: string, title: string) => {
+    chatSessionManager?.rename(sessionId, title);
+    return true;
   });
 
-  ipcMain.handle('session-history:delete', (_e, filename: string) => {
-    const filePath = path.join(SESSION_HISTORY_DIR, filename);
-    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+  ipcMain.handle('chat:health', async () => {
+    if (!chatSessionManager) return { ok: false, error: 'Chat manager not ready' };
+    const health = await chatSessionManager.healthCheck();
+    return {
+      ...health,
+      autoManaged: windsurfProxyManager?.isAvailable() ?? false,
+      proxyDir: windsurfProxyManager?.getProxyDir() ?? null,
+    };
   });
 
-  ipcMain.handle('session-history:summarize', async (_e, filename: string) => {
-    const filePath = path.join(SESSION_HISTORY_DIR, filename);
-    try {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      if (!raw.trim()) return '(空会话)';
-      const summary = await aiSessionSummarize(raw);
-      return summary || '(无法生成总结)';
-    } catch { return '(读取失败)'; }
+  ipcMain.handle('chat:proxy-start', async () => {
+    if (!windsurfProxyManager) return { ok: false, error: 'Proxy manager not available' };
+    return windsurfProxyManager.start();
+  });
+
+  ipcMain.handle('chat:models', async () => {
+    if (!chatSessionManager) return [];
+    return chatSessionManager.listModels();
   });
 }
 
 app.whenReady().then(async () => {
   setupPtyManager();
+
+  // macOS Dock 图标 — 在窗口创建前设置
+  const appIcon = loadAppIcon();
+  if (appIcon) {
+    if (process.platform === 'darwin' && app.dock) {
+      app.dock.setIcon(appIcon);
+    }
+  }
+
+  // 自动启动 Windsurf 代理
+  windsurfProxyManager = new WindsurfProxyManager((running, error) => {
+    if (running) {
+      console.log('[Main] Windsurf proxy is ready');
+    } else {
+      console.log('[Main] Windsurf proxy down:', error || 'unknown');
+    }
+  });
+  if (windsurfProxyManager.isAvailable()) {
+    console.log('[Main] Auto-starting Windsurf proxy...');
+    windsurfProxyManager.start().then((result) => {
+      console.log('[Main] Windsurf proxy start result:', result.ok ? 'OK' : result.error);
+    });
+  } else {
+    console.log('[Main] Windsurf proxy directory not found, chat features will be unavailable');
+  }
+
+  // 挂到 global 上供 remote-server 和 chat-session-manager 使用
+  (global as any).__windsurfProxyManager = windsurfProxyManager;
+
+  // 初始化 Chat Session Manager
+  chatSessionManager = new ChatSessionManager({
+    onDelta: (sessionId, text) => {
+      safeSend('chat:delta', sessionId, text);
+    },
+    onDone: (sessionId, content) => {
+      safeSend('chat:done', sessionId, content);
+    },
+    onError: (sessionId, error) => {
+      safeSend('chat:error', sessionId, error);
+    },
+    onTitleUpdate: (sessionId, title) => {
+      safeSend('chat:title-update', sessionId, title);
+    },
+  }, () => loadAiPreferenceData().manualConfig || null);
+
+  // 挂到 global 上供 remote-server 使用
+  (global as any).__chatSessionManager = chatSessionManager;
+
   registerIPC();
-  createWindow();
+  cloudflaredManager = new CloudflaredManager(path.join(__dirname, '../..'));
+  createWindow(appIcon);
 
   // 启动远程访问服务器（手机端）
   startRemoteServer(ptyManager, (sessionInfo) => {
@@ -1062,33 +989,18 @@ app.whenReady().then(async () => {
     safeSend('pty:exit', id);
   }, (info) => {
     // 服务器启动后，把连接信息发送给渲染进程显示
-    safeSend('remote:server-info', info);
+    const tunnel = cloudflaredManager?.start();
+    const serverInfo = {
+      ...info,
+      publicUrl: tunnel?.running ? tunnel.url : undefined,
+      tunnel,
+    };
+    cachedRemoteServerInfo = serverInfo;
+    safeSend('remote:server-info', serverInfo);
   });
 
-  // 自动扫描并选择 AI 服务
-  try {
-    await aiConfigManager.scan();
-    await aiConfigManager.testAll();
-    const providers = aiConfigManager.getProviders();
-    const pref = loadAiPreferenceData();
-    const savedId = pref.providerId;
-    // 优先用上次保存的选择
-    const preferred = savedId ? providers.find(p => p.id === savedId && p.status === 'ok') : null;
-    const ok = preferred || providers.find(p => p.status === 'ok');
-    if (ok) {
-      // 恢复保存的模型
-      if (pref.model && ok.availableModels.includes(pref.model)) {
-        ok.model = pref.model;
-      }
-      setAIConfig({
-        apiFormat: ok.apiFormat,
-        baseUrl: ok.baseUrl,
-        apiKey: ok.apiKey,
-        model: ok.model,
-      });
-      saveAiPreference(ok.id, ok.model);
-    }
-  } catch { /* 静默失败，不影响启动 */ }
+  // AI 配置已保存在偏好文件中，无需额外恢复
+
 });
 
 app.on('window-all-closed', () => {
@@ -1099,4 +1011,10 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+app.on('before-quit', async () => {
+  globalShortcut.unregisterAll();
+  cloudflaredManager?.stopOwnedProcess();
+  windsurfProxyManager?.destroy();
 });

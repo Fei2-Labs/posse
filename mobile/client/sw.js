@@ -1,6 +1,6 @@
 // DuoCLI Mobile - Service Worker
 
-const CACHE_NAME = 'duocli-v1';
+const CACHE_NAME = 'duocli-v10';
 const ASSETS = [
   '/',
   '/index.html',
@@ -32,6 +32,8 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   // API 请求和 SSE 不缓存
   if (url.pathname.startsWith('/api/')) return;
+  // 局域网探针：永远走网络，避免 SW 缓存导致误判 + 缓存条目无限累积
+  if (url.pathname === '/ping.png') return;
 
   e.respondWith(
     caches.match(e.request).then(cached => {

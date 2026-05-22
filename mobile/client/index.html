@@ -30,10 +30,12 @@
     <header id="header">
       <div class="header-left">
         <h2>DuoCLI</h2>
+        <button id="net-mode-btn" class="net-mode-btn" style="display:none;" title="切换网络模式"></button>
       </div>
       <div class="header-right">
         <button id="device-console-btn" class="icon-btn" title="手机设备">📱</button>
         <button id="new-session-btn" class="icon-btn" title="新建会话">＋</button>
+        <button id="new-chat-btn" class="icon-btn" title="新建聊天" style="font-size:14px;">💬</button>
       </div>
     </header>
     <div id="session-list" class="session-list"></div>
@@ -84,6 +86,30 @@
       <textarea id="msg-input" rows="1" placeholder="输入消息..." enterkeyhint="send" autocomplete="off"></textarea>
       <button id="send-btn">发送</button>
     </div>
+
+    <!-- 快捷命令栏 -->
+    <div id="quick-commands"></div>
+  </div>
+
+  <!-- Chat 详情页 -->
+  <div id="chat-detail-page" class="page">
+    <header id="chat-detail-header">
+      <button id="chat-back-btn" class="icon-btn">←</button>
+      <div class="detail-title">
+        <span id="chat-detail-name">Chat</span>
+      </div>
+      <button id="chat-delete-btn" class="icon-btn danger" title="删除对话">✕</button>
+    </header>
+
+    <!-- Chat 消息区域 -->
+    <div id="chat-messages" class="chat-messages-mobile"></div>
+
+    <!-- Chat 输入区域 -->
+    <div id="chat-input-area-mobile" class="chat-input-area-mobile">
+      <textarea id="chat-msg-input" rows="1" placeholder="输入消息或 / 命令..." enterkeyhint="send" autocomplete="off"></textarea>
+      <button id="chat-send-btn">发送</button>
+    </div>
+    <div class="chat-slash-hint-mobile">/auto-login /health /models /clear</div>
   </div>
 
   <!-- 新建会话弹窗 -->
@@ -94,17 +120,25 @@
       <select id="new-cwd">
         <option value="">~ (默认)</option>
       </select>
-      <label>预设命令</label>
+      <div class="preset-label-row">
+        <label>预设命令</label>
+        <div class="preset-actions">
+          <button id="preset-add-btn" class="preset-action-btn" title="添加自定义预设">＋</button>
+          <button id="preset-manage-btn" class="preset-action-btn" title="管理自定义预设">⚙</button>
+        </div>
+      </div>
       <select id="new-preset">
-        <option value="">纯终端 (shell)</option>
-        <option value="claude" selected>Claude Code</option>
-        <option value="claude --dangerously-skip-permissions">Claude 全自动</option>
-        <option value="codex">Codex</option>
-        <option value="codex -c sandbox_mode=&quot;danger-full-access&quot; -c approval=&quot;never&quot; -c network=&quot;enabled&quot;">Codex 全自动</option>
-        <option value="gemini">Gemini</option>
-        <option value="gemini --yolo">Gemini 全自动</option>
-        <option value="kimi">Kimi</option>
-        <option value="kimi --yolo">Kimi 全自动</option>
+        <!-- 由 JS 动态渲染 -->
+      </select>
+      <label>配色</label>
+      <select id="new-theme">
+        <option value="default">默认</option>
+        <option value="vscode-dark">VS Code Dark</option>
+        <option value="monokai">Monokai</option>
+        <option value="dracula">Dracula</option>
+        <option value="solarized-dark">Solarized Dark</option>
+        <option value="one-dark">One Dark</option>
+        <option value="nord">Nord</option>
       </select>
       <div class="modal-actions">
         <button id="modal-cancel" class="btn-secondary">取消</button>
@@ -113,17 +147,23 @@
     </div>
   </div>
 
-  <!-- 催工配置弹窗 -->
+  <!-- 循环配置弹窗 -->
   <div id="auto-continue-modal" class="modal">
     <div class="modal-content">
       <div class="modal-header">
-        <h3>催工配置</h3>
+        <h3>循环配置</h3>
         <button id="ac-cancel" class="modal-close">✕</button>
       </div>
-      <label>自动发送的内容</label>
-      <input type="text" id="ac-message" placeholder="请输入自动发送的内容" />
-      <label>间隔时间（分钟）</label>
+      <label>命令列表（每行一条）</label>
+      <textarea id="ac-message" rows="3" placeholder="每行一条命令，按顺序发送"></textarea>
+      <label>循环间隔（分钟）</label>
       <input type="number" id="ac-interval" min="1" placeholder="分钟" />
+      <label>命令间隔（秒）</label>
+      <input type="number" id="ac-cmd-interval" min="0" value="2" placeholder="秒" />
+      <label>发送延迟（秒）</label>
+      <input type="number" id="ac-send-delay" min="0" value="2" placeholder="秒" />
+      <label>最大持续时间（分钟）</label>
+      <input type="number" id="ac-max-duration" min="0" value="0" placeholder="0 表示不限制" />
       <div style="margin-top: 14px;">
         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0;">
           <input type="checkbox" id="ac-auto-agree" checked style="width: auto;" />
@@ -135,7 +175,7 @@
         <input type="number" id="ac-agree-delay" min="0" value="5" placeholder="秒" />
       </div>
       <div class="modal-actions">
-        <button id="ac-stop" class="btn-danger" style="display:none;">关闭催工</button>
+        <button id="ac-stop" class="btn-danger" style="display:none;">关闭循环</button>
         <button id="ac-save" class="btn-primary">保存并开启</button>
       </div>
     </div>
@@ -165,17 +205,13 @@
   <!-- 全屏截图 overlay -->
   <div id="fullscreen-overlay" style="display:none;position:fixed;inset:0;z-index:200;background:#000;flex-direction:column;">
     <button id="fullscreen-back-btn" style="position:absolute;top:calc(12px + env(safe-area-inset-top,0px));left:12px;z-index:201;width:40px;height:40px;border:none;border-radius:10px;background:rgba(0,0,0,0.5);color:#fff;font-size:20px;cursor:pointer;">←</button>
-    <button id="fullscreen-text-btn" style="position:absolute;bottom:calc(12px + env(safe-area-inset-bottom,0px));right:12px;z-index:201;width:44px;height:44px;border:none;border-radius:50%;background:rgba(0,0,0,0.5);color:#fff;font-size:22px;cursor:pointer;">⌨️</button>
     <div style="position:absolute;top:calc(12px + env(safe-area-inset-top,0px));right:12px;z-index:201;display:flex;align-items:center;gap:6px;">
-      <select id="fullscreen-interval" style="padding:4px 8px;border-radius:8px;border:none;background:rgba(0,0,0,0.5);color:#fff;font-size:13px;outline:none;">
-        <option value="3">3秒</option>
-        <option value="5" selected>5秒</option>
-        <option value="10">10秒</option>
-        <option value="30">30秒</option>
-      </select>
-      <button id="fullscreen-auto-btn" style="padding:4px 10px;border:none;border-radius:8px;background:rgba(0,0,0,0.5);color:#fff;font-size:13px;cursor:pointer;">自动刷新</button>
+      <button id="fullscreen-auto-btn" style="padding:4px 10px;border:none;border-radius:8px;background:rgba(0,0,0,0.5);color:#fff;font-size:13px;cursor:pointer;">停止刷新</button>
     </div>
-    <img id="fullscreen-preview" style="width:100%;height:100%;object-fit:contain;" />
+    <img id="fullscreen-preview" style="flex:1;min-height:0;width:100%;object-fit:contain;" />
+    <div id="fullscreen-toolbar" style="display:flex;align-items:center;justify-content:center;gap:16px;padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom,0px));background:#111;">
+      <button id="fullscreen-text-btn" style="width:44px;height:44px;border:none;border-radius:50%;background:#333;color:#fff;font-size:22px;cursor:pointer;">⌨️</button>
+    </div>
   </div>
 
   <!-- Shell 命令弹窗 -->
@@ -208,6 +244,8 @@
   </div>
   <script src="xterm.js"></script>
   <script src="addon-fit.js"></script>
+  <script src="addon-unicode11.js"></script>
+  <script src="chat-helpers.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

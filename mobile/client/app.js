@@ -1,6 +1,15 @@
 // DuoCLI Mobile PWA - 客户端逻辑 (xterm.js + WebSocket)
 
 const API = location.origin;
+
+// 从 URL 参数读取 token（支持带 token 直接访问）
+const urlParams = new URLSearchParams(location.search);
+const urlToken = urlParams.get('token');
+if (urlToken) {
+  localStorage.setItem('duocli_token', urlToken);
+  // 清除 URL 参数，避免暴露 token
+  history.replaceState({}, '', location.pathname);
+}
 let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
@@ -10,16 +19,137 @@ let term = null;
 let fitAddon = null;
 let ws = null;
 let wsHeartbeat = null;
+let wsReconnectTimer = null;
+let wsReconnectAttempt = 0;
+let wsConnectTimeoutTimer = null;
+let wsLastPongAt = 0;
 let copyToastTimer = null;
 let isUserScrolling = false;
 let scrollToBottomTimer = null;
+let userScrollReleaseTimer = null;
+let sseReconnectTimer = null;
+let sseReconnectAttempt = 0;
+const WEAK_NETWORK_STORAGE_KEY = 'duocli_weak_network_mode';
+const MOBILE_LAST_CWD_KEY = 'duocli_mobile_last_cwd';
+const MOBILE_LAST_PRESET_KEY = 'duocli_mobile_last_preset';
+let weakNetworkMode = localStorage.getItem(WEAK_NETWORK_STORAGE_KEY) === '1';
+const chatHelpers = globalThis.DuoChatHelpers || {
+  ensureApiSuccess(ok, status, payload) {
+    if (!ok) {
+      const message = payload && typeof payload.error === 'string' && payload.error.trim()
+        ? payload.error.trim()
+        : `请求失败 (${status})`;
+      throw new Error(message);
+    }
+    return payload;
+  },
+  mergePendingMessages(history, pendingMessages) {
+    return {
+      messages: Array.isArray(history) ? history : [],
+      pendingMessages: Array.isArray(pendingMessages) ? pendingMessages : [],
+    };
+  },
+  getResumeAgentLabel(agent) {
+    if (agent === 'codex') return 'Codex';
+    if (agent === 'claude') return 'Claude Code';
+    return 'Agent';
+  },
+};
 
-// ========== 催工（自动继续）==========
+// ========== 循环（自动继续）==========
 // 手机端只做 UI，实际配置存在桌面端，通过 API 读写
 
 // ========== 工具函数 ==========
 
 function $(id) { return document.getElementById(id); }
+
+function getNetworkProfile() {
+  if (weakNetworkMode) {
+    return {
+      wsConnectTimeoutMs: 18000,
+      wsPingIntervalMs: 20000,
+      wsStaleTimeoutMs: 90000,
+      wsRetryBaseMs: 2000,
+      wsRetryMaxMs: 45000,
+      sseRetryBaseMs: 4000,
+      sseRetryMaxMs: 45000,
+    };
+  }
+  return {
+    wsConnectTimeoutMs: 8000,
+    wsPingIntervalMs: 15000,
+    wsStaleTimeoutMs: 45000,
+    wsRetryBaseMs: 1000,
+    wsRetryMaxMs: 15000,
+    sseRetryBaseMs: 2000,
+    sseRetryMaxMs: 15000,
+  };
+}
+
+function setWeakNetworkMode(enabled) {
+  weakNetworkMode = enabled;
+  localStorage.setItem(WEAK_NETWORK_STORAGE_KEY, weakNetworkMode ? '1' : '0');
+}
+
+function ensureWeakNetworkPrompt() {
+  const existed = $('weak-network-prompt');
+  if (existed) return existed;
+  const container = $('terminal-container');
+  if (!container) return null;
+
+  const prompt = document.createElement('div');
+  prompt.id = 'weak-network-prompt';
+  prompt.className = 'weak-network-prompt';
+  prompt.style.display = 'none';
+  prompt.innerHTML = `
+    <div id="weak-network-prompt-text" class="weak-network-prompt-text"></div>
+    <div class="weak-network-prompt-actions">
+      <button id="weak-network-prompt-btn" class="weak-network-prompt-btn" type="button"></button>
+    </div>
+  `;
+
+  const btn = prompt.querySelector('#weak-network-prompt-btn');
+  btn.addEventListener('click', () => {
+    if (!weakNetworkMode) {
+      setWeakNetworkMode(true);
+      showCopyToast('已切到弱网模式，正在重连');
+      if (currentSessionId && $('detail-page').classList.contains('active')) {
+        connectWebSocket(currentSessionId);
+      }
+      if ($('main-page').classList.contains('active') && token) {
+        startSSE();
+      }
+    }
+    hideWeakNetworkPrompt();
+  });
+
+  container.appendChild(prompt);
+  return prompt;
+}
+
+function showWeakNetworkPrompt(message) {
+  if (!$('detail-page').classList.contains('active')) return;
+  const prompt = ensureWeakNetworkPrompt();
+  if (!prompt) return;
+  const textEl = prompt.querySelector('#weak-network-prompt-text');
+  const btn = prompt.querySelector('#weak-network-prompt-btn');
+  if (!textEl || !btn) return;
+
+  textEl.textContent = message;
+  if (weakNetworkMode) {
+    btn.textContent = '已在弱网模式';
+    btn.setAttribute('disabled', 'disabled');
+  } else {
+    btn.textContent = '切到弱网模式';
+    btn.removeAttribute('disabled');
+  }
+  prompt.style.display = 'flex';
+}
+
+function hideWeakNetworkPrompt() {
+  const prompt = $('weak-network-prompt');
+  if (prompt) prompt.style.display = 'none';
+}
 
 // 截断长路径，优先显示最右侧目录名，如 /a/b/c/d → …/c/d
 function shortenPath(p, maxLen = 30) {
@@ -36,16 +166,8 @@ function shortenPath(p, maxLen = 30) {
 
 // CLI 标签颜色映射 [文字色, 背景色]，与桌面端保持一致
 const CLI_TAG_COLORS = {
-  'Claude':       ['#d4a574', '#3d2e1e'],
   'Claude全自动':  ['#e5a100', '#3d3010'],
-  'Codex':        ['#73c991', '#1e3328'],
   'Codex全自动':   ['#56d4a0', '#1a3d2e'],
-  'Kimi':         ['#c678dd', '#2e1e3d'],
-  'Kimi全自动':    ['#d19ae8', '#33204a'],
-  'OpenCode':     ['#61afef', '#1e2e3d'],
-  'Cursor':       ['#56b6c2', '#1e3338'],
-  'Gemini':       ['#82aaff', '#1e2540'],
-  'Gemini全自动':  ['#99bbff', '#222d4a'],
 };
 
 function getCliTagColors(name) {
@@ -73,19 +195,53 @@ function hideTerminalLoading() {
 function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`${API}${path}`, { ...opts, headers }).then(async r => {
-    if (r.status === 401) { logout(); throw new Error('未授权'); }
-    return r.json();
-  });
+  // 全局超时：避免弱网下 fetch 永远 pending 卡住整个 UI
+  // 默认 12s，弱网模式 25s；调用方可通过 opts.timeout 覆盖（0 = 无超时）
+  const timeoutMs = opts.timeout != null
+    ? opts.timeout
+    : (weakNetworkMode ? 25000 : 12000);
+  let signal = opts.signal;
+  let timer = null;
+  if (timeoutMs > 0 && !signal) {
+    const ctrl = new AbortController();
+    signal = ctrl.signal;
+    timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  }
+  const cleanup = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  return fetch(`${API}${path}`, { ...opts, headers, signal })
+    .then(async r => {
+      cleanup();
+      if (r.status === 401) { logout(); throw new Error('未授权'); }
+      let data = {};
+      try {
+        data = await r.json();
+      } catch {
+        data = {};
+      }
+      return chatHelpers.ensureApiSuccess(r.ok, r.status, data);
+    })
+    .catch((err) => {
+      cleanup();
+      if (err && err.name === 'AbortError') {
+        const e = new Error('请求超时，请检查网络');
+        e.code = 'TIMEOUT';
+        throw e;
+      }
+      throw err;
+    });
 }
 
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   $(id).classList.add('active');
+  if (id !== 'detail-page') {
+    hideWeakNetworkPrompt();
+  }
 }
 
 function formatTime(ts) {
   const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
   const h = d.getHours().toString().padStart(2, '0');
   const m = d.getMinutes().toString().padStart(2, '0');
   return `${h}:${m}`;
@@ -172,8 +328,13 @@ async function toggleAutoContinue(sessionId, enabled) {
 async function showAutoContinueConfigModal(sessionId) {
   const config = await getAutoContinueConfig(sessionId) || {};
   const modal = $('auto-continue-modal');
-  $('ac-message').value = config.message || '继续';
+  // 兼容旧版 message → messages
+  const msgs = Array.isArray(config.messages) ? config.messages : (config.message ? [config.message] : ['继续']);
+  $('ac-message').value = msgs.join('\n');
   $('ac-interval').value = String(Math.round((config.intervalMs || 600000) / 60000));
+  $('ac-cmd-interval').value = String(Math.round((config.commandIntervalMs || 2000) / 1000));
+  $('ac-send-delay').value = String(config.sendDelaySec ?? 2);
+  $('ac-max-duration').value = String(config.maxDurationMs ? Math.round(config.maxDurationMs / 60000) : 0);
   $('ac-auto-agree').checked = config.autoAgree !== false;
   $('ac-agree-delay').value = String(config.autoAgreeDelaySec ?? 5);
   $('ac-agree-delay-row').style.display = $('ac-auto-agree').checked ? '' : 'none';
@@ -206,6 +367,16 @@ function isAtBottom() {
   return buf.viewportY >= buf.baseY - 2;
 }
 
+function markUserScrolling() {
+  isUserScrolling = !isAtBottom();
+  if (userScrollReleaseTimer) clearTimeout(userScrollReleaseTimer);
+  userScrollReleaseTimer = setTimeout(() => {
+    if (term && isAtBottom()) {
+      isUserScrolling = false;
+    }
+  }, 800);
+}
+
 function getLineTextByTouchY(clientY) {
   if (!term) return '';
   const container = $('terminal-container');
@@ -231,8 +402,150 @@ function logout() {
   localStorage.removeItem('duocli_token');
   stopSSE();
   closeTerminal();
+  LanSwitcher.stop();
   showPage('login-page');
 }
+
+// ============================================================
+// 网络模式切换：CF Tunnel ⇄ LAN 直连
+// 背景：HTTPS 页面无法在浏览器侧探测 HTTP LAN（iOS Safari Mixed Content
+// 把所有子资源请求要么拦截要么强制升级到 HTTPS，<img>/<iframe>/fetch 全堵）。
+// 所以放弃自动探针，改成顶部常驻按钮：
+//   - CF 模式（HTTPS）：按钮显示"🟡 切局域网"，点击 → 拿 /api/lan-info →
+//     选 IP（上次成功优先；否则 192.168 > 10 > 172）→ location.replace 跳过去。
+//     跳过去打不开是用户自己的事（不在家就别点）。
+//   - LAN 模式（HTTP + 私有 IP）：按钮显示"🟢 局域网"，点击 → 跳回 CF。
+//     另外 5 秒一次 fetch /ping.png 自检，连续两次不通自动跳回 CF（HTTP→HTTP
+//     不受 Mixed Content 限制，这里用 fetch 比 <img> 更准）。
+// ============================================================
+const LanSwitcher = (() => {
+  const PROBE_INTERVAL_LAN_MS = 5 * 1000;
+  const PROBE_TIMEOUT_MS = 2000;
+  const STORAGE_CLOUD_URL = 'duocli_cloud_url';   // 上次的 CF 入口（origin）
+  const STORAGE_LAST_LAN_IP = 'duocli_last_lan_ip'; // 上次成功用过的 LAN IP
+
+  let probeTimer = null;
+
+  function isPrivateIp(host) {
+    return /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+  }
+
+  function isLocalHostname(host) {
+    return host === 'localhost' || host.endsWith('.local');
+  }
+
+  function isLanMode() {
+    const host = location.hostname.toLowerCase();
+    return location.protocol === 'http:' && (isPrivateIp(host) || isLocalHostname(host));
+  }
+
+  function isCfMode() {
+    return location.protocol === 'https:';
+  }
+
+  // 多 IP 选优：上次成功的 > 192.168 > 10 > 172 > 其它
+  function pickBestIp(ips) {
+    if (!ips || !ips.length) return null;
+    const last = localStorage.getItem(STORAGE_LAST_LAN_IP);
+    if (last && ips.includes(last)) return last;
+    const score = ip => {
+      if (ip.startsWith('192.168.')) return 3;
+      if (ip.startsWith('10.')) return 2;
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 1;
+      return 0;
+    };
+    return [...ips].sort((a, b) => score(b) - score(a))[0];
+  }
+
+  // LAN 自检：HTTP 页面 fetch HTTP 不受 Mixed Content 限制
+  async function probeLanSelf() {
+    const url = `${location.origin}/ping.png?_=${Date.now()}`;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+      const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+      clearTimeout(t);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function probeLanMode() {
+    if (await probeLanSelf()) return;
+    await new Promise(r => setTimeout(r, 1000));
+    if (await probeLanSelf()) return;
+    switchToCloud(true);
+  }
+
+  // CF → LAN：用户主动点
+  async function switchToLan() {
+    if (!token) return;
+    let info;
+    try {
+      info = await api('/api/lan-info');
+    } catch {
+      showCopyToast('拿不到局域网信息（token 失效？）');
+      return;
+    }
+    const ip = pickBestIp(info && info.lanIps);
+    if (!ip) {
+      showCopyToast('电脑暂无可用局域网 IP');
+      return;
+    }
+    const port = info.port || 9800;
+    localStorage.setItem(STORAGE_CLOUD_URL, location.origin);
+    localStorage.setItem(STORAGE_LAST_LAN_IP, ip);
+    showCopyToast(`🟢 切到 ${ip}:${port}`);
+    setTimeout(() => location.replace(`http://${ip}:${port}/?token=${encodeURIComponent(token)}`), 200);
+  }
+
+  // LAN → CF：用户点 或 自检失败
+  function switchToCloud(auto) {
+    const cloudUrl = localStorage.getItem(STORAGE_CLOUD_URL) || 'https://duocli.guixian.fun';
+    showCopyToast(auto ? '局域网失联，回到云端…' : '☁️ 切到云端…');
+    setTimeout(() => location.replace(`${cloudUrl}/?token=${encodeURIComponent(token)}`), 200);
+  }
+
+  function updateButton() {
+    const btn = $('net-mode-btn');
+    if (!btn) return;
+    if (!token) { btn.style.display = 'none'; return; }
+    btn.style.display = 'inline-flex';
+    if (isLanMode()) {
+      btn.textContent = '🟢 局域网';
+      btn.title = '当前局域网直连，点击切回云端';
+      btn.className = 'net-mode-btn lan';
+      btn.onclick = () => switchToCloud(false);
+    } else if (isCfMode()) {
+      btn.textContent = '🟡 切局域网';
+      btn.title = '在家时点击切到局域网直连，更快';
+      btn.className = 'net-mode-btn cf';
+      btn.onclick = switchToLan;
+    } else {
+      btn.style.display = 'none';
+    }
+  }
+
+  function start() {
+    stop();
+    updateButton();
+    if (!token) return;
+    if (isLanMode()) {
+      setTimeout(probeLanMode, 1000);
+      probeTimer = setInterval(probeLanMode, PROBE_INTERVAL_LAN_MS);
+    }
+  }
+
+  function stop() {
+    if (probeTimer) {
+      clearInterval(probeTimer);
+      probeTimer = null;
+    }
+  }
+
+  return { start, stop, switchToLan, switchToCloud, isLanMode, isCfMode };
+})();
 
 $('login-btn').onclick = async () => {
   const t = $('token-input').value.trim();
@@ -267,33 +580,66 @@ let remoteTapEnabled = false;
 let screenshotObjectUrl = null;
 
 function initDevicePage() {
-  $('device-console-btn').onclick = () => {
+  $('device-console-btn').onclick = async () => {
     showPage('device-page');
-    refreshAndroidDevices();
-    showCopyToast('📷 截图查看手机画面 · 🖱 开启后可点击操控');
+    await refreshAndroidDevices();
+    // 设备加载完后自动截图
+    if ($('device-select').value) {
+      refreshAndroidScreenshot();
+    }
+    showCopyToast('🖱 开启后可点击操控');
   };
-  let autoRefreshTimer = null;
-  $('device-back-btn').onclick = () => showPage('main-page');
-  $('fullscreen-back-btn').onclick = () => {
-    if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  // ---- 自适应帧率控制器 ----
+  let autoRunning = false;
+  let autoStopped = false;
+  let adaptiveQuality = 60;
+  let adaptiveScale = 0.5;
+  const TARGET_MS = 1000; // 目标帧间隔
+
+  async function adaptiveLoop() {
+    if (autoStopped) return;
+    autoRunning = true;
+    const t0 = Date.now();
+    try {
+      await refreshAndroidScreenshot(adaptiveQuality, adaptiveScale);
+      $('fullscreen-preview').src = $('device-preview').src;
+    } catch {}
+    const elapsed = Date.now() - t0;
+    // 自适应：太慢就降质量/分辨率，够快就提升
+    if (elapsed > TARGET_MS * 1.2) {
+      if (adaptiveQuality > 20) { adaptiveQuality = Math.max(20, adaptiveQuality - 10); }
+      else if (adaptiveScale > 0.2) { adaptiveScale = Math.max(0.2, adaptiveScale - 0.1); }
+    } else if (elapsed < TARGET_MS * 0.6) {
+      if (adaptiveScale < 0.5) { adaptiveScale = Math.min(0.5, adaptiveScale + 0.05); }
+      else if (adaptiveQuality < 70) { adaptiveQuality = Math.min(70, adaptiveQuality + 5); }
+    }
+    if (!autoStopped) {
+      const wait = Math.max(0, TARGET_MS - elapsed);
+      setTimeout(adaptiveLoop, wait);
+    }
+  }
+
+  function startAutoRefresh() {
+    if (autoRunning && !autoStopped) return;
+    autoStopped = false;
+    adaptiveLoop();
+    $('fullscreen-auto-btn').textContent = '停止刷新';
+  }
+
+  function stopAutoRefresh() {
+    autoStopped = true;
+    autoRunning = false;
     $('fullscreen-auto-btn').textContent = '自动刷新';
+  }
+
+  $('device-back-btn').onclick = () => { stopAutoRefresh(); showPage('main-page'); };
+  $('fullscreen-back-btn').onclick = () => {
+    stopAutoRefresh();
     $('fullscreen-overlay').style.display = 'none';
   };
   $('fullscreen-auto-btn').onclick = () => {
-    if (autoRefreshTimer) {
-      clearInterval(autoRefreshTimer);
-      autoRefreshTimer = null;
-      $('fullscreen-auto-btn').textContent = '自动刷新';
-    } else {
-      const secs = parseInt($('fullscreen-interval').value);
-      const doRefresh = async () => {
-        await refreshAndroidScreenshot();
-        $('fullscreen-preview').src = $('device-preview').src;
-      };
-      doRefresh();
-      autoRefreshTimer = setInterval(doRefresh, secs * 1000);
-      $('fullscreen-auto-btn').textContent = '停止刷新';
-    }
+    if (autoRunning && !autoStopped) { stopAutoRefresh(); }
+    else { startAutoRefresh(); }
   };
   const sendTextToDevice = async () => {
     const text = $('fullscreen-text-input').value;
@@ -324,7 +670,8 @@ function initDevicePage() {
     if (!src) { showCopyToast('请先获取截图'); return; }
     $('fullscreen-preview').src = src;
     $('fullscreen-overlay').style.display = 'flex';
-    showCopyToast('点击屏幕可远程操控 · ⌨️ 输入文字 · 📷 刷新截图');
+    startAutoRefresh(); // 进入全屏默认开启自动刷新
+    showCopyToast('点击/拖动操控 · ⌨️ 输入文字');
   };
   $('device-shell-btn').onclick = () => {
     $('shell-output').style.display = 'none';
@@ -356,22 +703,62 @@ function initDevicePage() {
       $('shell-run-btn').disabled = false;
     }
   };
-  $('fullscreen-preview').onclick = async (e) => {
-    const img = e.currentTarget;
-    const rect = img.getBoundingClientRect();
-    const x = Math.round((e.clientX - rect.left) * img.naturalWidth / rect.width);
-    const y = Math.round((e.clientY - rect.top) * img.naturalHeight / rect.height);
+  // ---- 全屏触摸：区分点击(tap)和拖动(swipe) ----
+  let touchStart = null;
+  const fsImg = $('fullscreen-preview');
+  function imgToDevice(clientX, clientY) {
+    const rect = fsImg.getBoundingClientRect();
+    return {
+      x: Math.round((clientX - rect.left) * fsImg.naturalWidth / rect.width),
+      y: Math.round((clientY - rect.top) * fsImg.naturalHeight / rect.height),
+    };
+  }
+  fsImg.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    touchStart = { cx: t.clientX, cy: t.clientY, time: Date.now() };
+  }, { passive: true });
+  fsImg.addEventListener('touchend', async (e) => {
+    if (!touchStart) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStart.cx;
+    const dy = t.clientY - touchStart.cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const duration = Date.now() - touchStart.time;
+    const deviceId = $('device-select').value;
+    if (!deviceId) { touchStart = null; return; }
+    e.preventDefault();
+    if (dist < 15) {
+      // 点击
+      const p = imgToDevice(t.clientX, t.clientY);
+      fetch(`${API}/api/android/tap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ deviceId, x: p.x, y: p.y }),
+      }).catch(() => {});
+    } else {
+      // 拖动
+      const p1 = imgToDevice(touchStart.cx, touchStart.cy);
+      const p2 = imgToDevice(t.clientX, t.clientY);
+      const swipeDur = Math.max(150, Math.min(2000, duration));
+      fetch(`${API}/api/android/swipe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ deviceId, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, duration: swipeDur }),
+      }).catch(() => {});
+    }
+    touchStart = null;
+  });
+  // 桌面端兜底：鼠标点击 = tap
+  fsImg.onclick = async (e) => {
     const deviceId = $('device-select').value;
     if (!deviceId) return;
-    await fetch(`${API}/api/android/tap`, {
+    const p = imgToDevice(e.clientX, e.clientY);
+    fetch(`${API}/api/android/tap`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ deviceId, x, y }),
+      body: JSON.stringify({ deviceId, x: p.x, y: p.y }),
     }).catch(() => {});
-    setTimeout(async () => {
-      await refreshAndroidScreenshot();
-      $('fullscreen-preview').src = $('device-preview').src;
-    }, 800);
   };
   $('device-refresh-btn').onclick = refreshAndroidDevices;
   $('device-shot-btn').onclick = () => {
@@ -421,21 +808,36 @@ async function refreshAndroidDevices() {
     const data = await api('/api/android/devices');
     const sel = $('device-select');
     const saved = localStorage.getItem('duocli_android_device');
-    sel.innerHTML = data.devices.length
-      ? data.devices.map(d => `<option value="${d.id}"${d.id === saved ? ' selected' : ''}>${d.id} ${d.info}</option>`).join('')
-      : '<option value="">未找到设备</option>';
+    sel.innerHTML = '';
+    if (data.devices.length) {
+      for (const d of data.devices) {
+        // 用 DOM API 而非 innerHTML 拼接，避免 adb 输出里的 OEM 设备名注入 HTML
+        const opt = document.createElement('option');
+        opt.value = d.id;
+        opt.textContent = d.info ? `${d.id} ${d.info}` : d.id;
+        if (d.id === saved) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    } else {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '未找到设备';
+      sel.appendChild(opt);
+    }
     setDeviceHint(data.devices.length ? '' : '未找到已连接的 Android 设备');
   } catch (e) {
     setDeviceHint('获取设备失败: ' + (e.message || e));
   }
 }
 
-async function refreshAndroidScreenshot() {
+async function refreshAndroidScreenshot(quality, scale) {
   const deviceId = $('device-select').value;
   if (!deviceId) { setDeviceHint('请先选择设备'); return; }
-  setDeviceHint('正在获取截图...');
   try {
-    const res = await fetch(`${API}/api/android/screenshot?deviceId=${encodeURIComponent(deviceId)}`, {
+    let url = `${API}/api/android/screenshot?deviceId=${encodeURIComponent(deviceId)}`;
+    if (quality) url += `&quality=${quality}`;
+    if (scale) url += `&scale=${scale}`;
+    const res = await fetch(url, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -459,8 +861,15 @@ async function enterMain() {
   initDevicePage();
   await refreshSessions();
   await refreshRecentCwdOptions();
+  await pullCustomPresetsFromServer(); // 从服务端同步预设
+  renderPresetSelect();
   startSSE();
   subscribePush();
+  // 预加载 chat 会话列表
+  chatSessionsLastFetch = 0;
+  fetchChatSessions().then(list => { cachedChatSessions = list || []; });
+  // 启动局域网探测（CF 模式提示切换；LAN 模式监控失联回退）
+  LanSwitcher.start();
 }
 
 async function refreshSessions() {
@@ -497,14 +906,7 @@ function renderSessionList(sessions) {
   const list = $('session-list');
   const empty = $('empty-state');
 
-  if (!sessions.length) {
-    list.innerHTML = '';
-    empty.style.display = 'flex';
-    return;
-  }
-
-  empty.style.display = 'none';
-  list.innerHTML = sessions.map(s => {
+  const allCards = sessions.map(s => {
     const dn = s.displayName || '';
     const [tagColor, tagBg] = dn ? getCliTagColors(dn) : ['', ''];
     const tagHtml = dn
@@ -527,8 +929,18 @@ function renderSessionList(sessions) {
     </div>`;
   }).join('');
 
+  if (!sessions.length) {
+    list.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  empty.style.display = 'none';
+  list.innerHTML = allCards;
+
   list.querySelectorAll('.session-card').forEach(card => {
-    card.onclick = () => openSession(card.dataset.id);
+    const id = card.dataset.id;
+    card.onclick = () => openSession(id);
   });
 }
 
@@ -536,7 +948,11 @@ function renderSessionList(sessions) {
 
 function startSSE() {
   stopSSE();
+  const profile = getNetworkProfile();
   sseSource = new EventSource(`${API}/api/events?token=${encodeURIComponent(token)}`);
+  sseSource.onopen = () => {
+    sseReconnectAttempt = 0;
+  };
   sseSource.addEventListener('sessions', e => {
     try {
       const sessions = JSON.parse(e.data);
@@ -553,11 +969,22 @@ function startSSE() {
   });
   sseSource.onerror = () => {
     stopSSE();
-    setTimeout(startSSE, 5000);
+    if (navigator.onLine === false) return;
+    if (sseReconnectTimer) clearTimeout(sseReconnectTimer);
+    const delay = Math.min(profile.sseRetryBaseMs * Math.pow(2, sseReconnectAttempt), profile.sseRetryMaxMs) + Math.floor(Math.random() * 600);
+    sseReconnectAttempt++;
+    sseReconnectTimer = setTimeout(() => {
+      sseReconnectTimer = null;
+      // 只在主页面时维持 SSE，减少弱网反复连接抖动
+      if ($('main-page').classList.contains('active')) {
+        startSSE();
+      }
+    }, delay);
   };
 }
 
 function stopSSE() {
+  if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
   if (sseSource) { sseSource.close(); sseSource = null; }
 }
 
@@ -627,6 +1054,15 @@ function createTerminal() {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
 
+  // 启用 unicode v11 字宽表，让 Braille spinner / emoji / CJK 等字符
+  // 在手机端按和 PC 端 PTY 一致的列宽计算光标位置，避免 wrap 撕裂多行
+  try {
+    if (typeof Unicode11Addon !== 'undefined') {
+      term.loadAddon(new Unicode11Addon.Unicode11Addon());
+      term.unicode.activeVersion = '11';
+    }
+  } catch {}
+
   const container = $('terminal-container');
   // 清除旧终端 DOM，但保留 loading 遮罩
   const loading = $('terminal-loading');
@@ -655,64 +1091,98 @@ function createTerminal() {
         xtermTextarea.setAttribute('readonly', 'readonly');
       }
 
-      // 移动端触摸滚动：xterm.js 默认拦截触摸事件，手动实现滚动
-      let touchLastY = 0;
+      // 移动端触摸滚动：xterm.js 的 .xterm-screen 覆盖在 .xterm-viewport 上层，
+      // 手指实际触摸到的是 screen，所以监听必须挂在 screen（或同时挂 viewport 兜底），
+      // 然后直接操作 viewport.scrollTop，让 xterm 内部 onScroll 同步渲染。
       const screen = container.querySelector('.xterm-screen');
       const viewport = container.querySelector('.xterm-viewport');
-      if (screen) {
-        screen.addEventListener('touchstart', (e) => {
-          if (e.touches.length === 1) {
-            touchLastY = e.touches[0].clientY;
-            // 标记用户正在手动滚动
-            isUserScrolling = true;
-          }
-        }, { passive: true });
+      term.onScroll(() => {
+        markUserScrolling();
+      });
 
-        screen.addEventListener('touchmove', (e) => {
-          if (e.touches.length === 1 && term) {
-            const currentY = e.touches[0].clientY;
-            const deltaY = touchLastY - currentY;
-            touchLastY = currentY;
-            const lines = Math.round(deltaY / 8);
-            if (lines !== 0) {
-              term.scrollLines(lines);
-            }
-          }
-        }, { passive: true });
-
-        screen.addEventListener('touchend', () => {
-          // 触摸结束后检查是否在底部，如果在底部则恢复自动滚动
-          setTimeout(() => {
-            if (term && isAtBottom()) {
-              isUserScrolling = false;
-            }
-          }, 150);
-        }, { passive: true });
-      }
-
-      // 用户手动滚动期间，阻止 xterm 内部 write() 自动滚到底部
-      // 通过拦截 viewport 的 scrollTop 赋值实现
-      if (viewport) {
-        let savedScrollTop = null;
-        const origScrollTopDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop') ||
-                                   Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
-        if (origScrollTopDesc && origScrollTopDesc.set) {
-          const origSet = origScrollTopDesc.set;
-          const origGet = origScrollTopDesc.get;
-          Object.defineProperty(viewport, 'scrollTop', {
-            get() {
-              return origGet.call(this);
-            },
-            set(val) {
-              if (isUserScrolling) {
-                // 用户滚动中，忽略 xterm 内部的 scrollTop 设置
-                return;
-              }
-              origSet.call(this, val);
-            },
-            configurable: true,
-          });
+      let touchLastY = 0;
+      let touchActive = false;
+      const onTouchStart = (e) => {
+        if (e.touches.length !== 1) { touchActive = false; return; }
+        touchLastY = e.touches[0].clientY;
+        touchActive = true;
+      };
+      const onTouchMove = (e) => {
+        if (!touchActive || !viewport || e.touches.length !== 1) return;
+        const currentY = e.touches[0].clientY;
+        const deltaY = touchLastY - currentY;
+        if (deltaY === 0) return;
+        const before = viewport.scrollTop;
+        const max = viewport.scrollHeight - viewport.clientHeight;
+        const next = Math.max(0, Math.min(max, before + deltaY));
+        if (next !== before) {
+          viewport.scrollTop = next;
+          touchLastY = currentY;
+          markUserScrolling();
+          // 仅在确实滚动时阻止页面滚动，到顶/到底时让浏览器接管（避免卡死）
+          if (e.cancelable) e.preventDefault();
+        } else {
+          // 到达边界，更新基准点避免反向滑动需要先抵消累计量
+          touchLastY = currentY;
         }
+      };
+      const onTouchEnd = () => {
+        touchActive = false;
+        if (term && isAtBottom()) isUserScrolling = false;
+      };
+
+      // screen 必须监听（用户手指实际接触的层），viewport 也监听以兜底滚动条区域
+      [screen, viewport].forEach((el) => {
+        if (!el) return;
+        el.addEventListener('touchstart', onTouchStart, { passive: true });
+        el.addEventListener('touchmove', onTouchMove, { passive: false });
+        el.addEventListener('touchend', onTouchEnd, { passive: true });
+        el.addEventListener('touchcancel', onTouchEnd, { passive: true });
+      });
+
+      // 兜底：部分设备/版本 .xterm-screen 内层 canvas 会吃掉触摸事件，
+      // 在最外层 container 上再挂一份滚动逻辑，同样操作 viewport.scrollTop 做像素级滚动。
+      // 命中内层 screen/viewport 时跳过，避免和上面那套一起触发导致滑动距离翻倍
+      if (!container.dataset.scrollFallbackBound) {
+        container.dataset.scrollFallbackBound = '1';
+        let fbLastY = 0;
+        let fbActive = false;
+        const isHandledByInner = (e) => {
+          const t = e.target;
+          if (!t || !t.closest) return false;
+          return !!(t.closest('.xterm-screen') || t.closest('.xterm-viewport'));
+        };
+        container.addEventListener('touchstart', (e) => {
+          if (isHandledByInner(e)) { fbActive = false; return; }
+          if (e.touches.length !== 1) { fbActive = false; return; }
+          fbLastY = e.touches[0].clientY;
+          fbActive = true;
+        }, { passive: true });
+        container.addEventListener('touchmove', (e) => {
+          if (!fbActive || !term || e.touches.length !== 1) return;
+          if (isHandledByInner(e)) return;
+          if (!viewport) return;
+          const currentY = e.touches[0].clientY;
+          const deltaY = fbLastY - currentY;
+          if (deltaY === 0) return;
+          const before = viewport.scrollTop;
+          const max = viewport.scrollHeight - viewport.clientHeight;
+          const next = Math.max(0, Math.min(max, before + deltaY));
+          if (next !== before) {
+            viewport.scrollTop = next;
+            fbLastY = currentY;
+            markUserScrolling();
+            if (e.cancelable) e.preventDefault();
+          } else {
+            fbLastY = currentY;
+          }
+        }, { passive: false });
+        const fbEnd = () => {
+          fbActive = false;
+          if (term && isAtBottom()) isUserScrolling = false;
+        };
+        container.addEventListener('touchend', fbEnd, { passive: true });
+        container.addEventListener('touchcancel', fbEnd, { passive: true });
       }
 
       if (!container.dataset.copyBound) {
@@ -789,6 +1259,8 @@ function closeTerminal() {
 
 function connectWebSocket(sessionId) {
   closeWebSocket();
+  hideWeakNetworkPrompt();
+  const profile = getNetworkProfile();
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${location.host}/ws?token=${encodeURIComponent(token)}`;
@@ -796,6 +1268,9 @@ function connectWebSocket(sessionId) {
 
   ws.onopen = () => {
     console.log('[ws] onopen, term exists=', !!term);
+    hideWeakNetworkPrompt();
+    wsReconnectAttempt = 0;
+    wsLastPongAt = Date.now();
     // 重连时清空终端，避免 replay 叠加
     if (term) term.reset();
     // 订阅会话
@@ -811,7 +1286,11 @@ function connectWebSocket(sessionId) {
     clearInterval(wsHeartbeat);
     wsHeartbeat = setInterval(() => {
       wsSend({ type: 'ping' });
-    }, 15000);
+      // 超过 45 秒未收到任何服务端消息（含 pong）则主动断开并重连
+      if (Date.now() - wsLastPongAt > profile.wsStaleTimeoutMs && ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    }, profile.wsPingIntervalMs);
   };
 
   let replayReceived = false;
@@ -819,21 +1298,29 @@ function connectWebSocket(sessionId) {
   let replayRetryCount = 0;
 
   // 8秒内未收到 replay，显示重连提示
-  const connectTimeoutTimer = setTimeout(() => {
+  if (wsConnectTimeoutTimer) clearTimeout(wsConnectTimeoutTimer);
+  wsConnectTimeoutTimer = setTimeout(() => {
     if (!replayReceived && term) {
       hideTerminalLoading();
       term.write('\r\n\x1b[33m⚠ 连接超时，正在重连...\x1b[0m\r\n');
+      showWeakNetworkPrompt('连接超时，正在重试');
     }
-  }, 8000);
+  }, profile.wsConnectTimeoutMs);
 
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       if (!term) return;
+      wsLastPongAt = Date.now();
+
+      if (msg.type === 'pong') {
+        return;
+      }
 
       if (msg.type === 'replay') {
         replayReceived = true;
-        clearTimeout(connectTimeoutTimer);
+        if (wsConnectTimeoutTimer) { clearTimeout(wsConnectTimeoutTimer); wsConnectTimeoutTimer = null; }
+        hideWeakNetworkPrompt();
         console.log('[ws] replay received, data length=', (msg.data || '').length);
         // 先彻底清空，再写入 replay 内容，避免残留
         term.reset();
@@ -861,9 +1348,11 @@ function connectWebSocket(sessionId) {
         }
       } else if (msg.type === 'output') {
         hideTerminalLoading();
+        hideWeakNetworkPrompt();
+        const shouldStickToBottom = !isUserScrolling && isAtBottom();
         term.write(msg.data);
         // 用户手动滚动时不自动滚到底部，避免死循环
-        if (!isUserScrolling) {
+        if (shouldStickToBottom) {
           if (scrollToBottomTimer) clearTimeout(scrollToBottomTimer);
           scrollToBottomTimer = setTimeout(() => {
             term.scrollToBottom();
@@ -875,35 +1364,63 @@ function connectWebSocket(sessionId) {
 
   ws.onclose = () => {
     clearInterval(wsHeartbeat);
+    if (wsConnectTimeoutTimer) { clearTimeout(wsConnectTimeoutTimer); wsConnectTimeoutTimer = null; }
+    if (navigator.onLine === false) return;
     // 如果还在详情页，尝试重连
     if (currentSessionId === sessionId && $('detail-page').classList.contains('active')) {
-      setTimeout(() => {
-        if (currentSessionId === sessionId) {
+      if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+      const delay = Math.min(profile.wsRetryBaseMs * Math.pow(2, wsReconnectAttempt), profile.wsRetryMaxMs) + Math.floor(Math.random() * 500);
+      wsReconnectAttempt++;
+      showWeakNetworkPrompt('连接中断，正在重试');
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        if (currentSessionId === sessionId && $('detail-page').classList.contains('active')) {
           connectWebSocket(sessionId);
         }
-      }, 2000);
+      }, delay);
     }
   };
 
-  ws.onerror = () => {};
+  ws.onerror = () => {
+    // 某些浏览器弱网下只触发 onerror 不触发 onclose，主动 close 统一走重连逻辑
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      ws.close();
+    }
+  };
 }
 
 function closeWebSocket() {
   clearInterval(wsHeartbeat);
+  hideWeakNetworkPrompt();
+  if (wsConnectTimeoutTimer) { clearTimeout(wsConnectTimeoutTimer); wsConnectTimeoutTimer = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   if (ws) {
+    // close() 是异步的，关闭过程中已在路上的帧仍会调用旧 ws 的 onmessage，
+    // 全置 null 避免会话切换时旧 session 的输出写入新 term
     ws.onclose = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onopen = null;
     ws.close();
     ws = null;
   }
+}
+
+// 将 Uint8Array 或普通数组安全转为 base64（避免 spread 栈溢出）
+function uint8ToBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 function wsSend(data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     // 对 input 类型的数据，用 base64 编码传输，避免控制字符在 JSON 中丢失
     if (data.type === 'input' && data.data) {
-      // TextEncoder 将字符串转为 UTF-8 字节，再 base64 编码
       const bytes = new TextEncoder().encode(data.data);
-      const b64 = btoa(String.fromCharCode(...bytes));
+      const b64 = uint8ToBase64(bytes);
       ws.send(JSON.stringify({ type: 'input_b64', data: b64 }));
     } else {
       ws.send(JSON.stringify(data));
@@ -924,6 +1441,7 @@ async function openSession(id) {
     if (s && currentSessionId === id) {
       $('detail-name').textContent = s.title || s.presetCommand || '终端';
       $('detail-status').className = `status-dot ${s.status}`;
+      lastKnownSessionCwd = s.cwd || '';
     }
   }).catch(() => {});
 
@@ -998,16 +1516,22 @@ $('ac-stop').onclick = async () => {
 // 催工配置弹窗：保存并开启
 $('ac-save').onclick = async () => {
   if (!currentSessionId) return;
-  const message = $('ac-message').value.trim();
-  if (!message) { $('ac-message').focus(); return; }
+  const msgs = $('ac-message').value.split('\n').map(m => m.trim()).filter(Boolean);
+  if (!msgs.length) { $('ac-message').focus(); return; }
   const intervalMinutes = parseInt($('ac-interval').value, 10);
   if (isNaN(intervalMinutes) || intervalMinutes < 1) { $('ac-interval').focus(); return; }
   const agreeDelay = parseInt($('ac-agree-delay').value, 10);
+  const cmdIntervalSec = parseInt($('ac-cmd-interval')?.value || '2', 10);
+  const sendDelaySec = parseInt($('ac-send-delay')?.value || '2', 10);
+  const maxDurationMinutes = parseInt($('ac-max-duration')?.value || '0', 10);
 
   const config = {
     enabled: true,
-    message,
+    messages: msgs,
     intervalMs: intervalMinutes * 60000,
+    commandIntervalMs: (isNaN(cmdIntervalSec) || cmdIntervalSec < 0 ? 2 : cmdIntervalSec) * 1000,
+    sendDelaySec: isNaN(sendDelaySec) || sendDelaySec < 0 ? 2 : sendDelaySec,
+    maxDurationMs: isNaN(maxDurationMinutes) || maxDurationMinutes < 0 ? 0 : maxDurationMinutes * 60000,
     autoAgree: $('ac-auto-agree').checked,
     autoAgreeDelaySec: isNaN(agreeDelay) ? 5 : agreeDelay,
   };
@@ -1018,7 +1542,12 @@ $('ac-save').onclick = async () => {
 };
 
 // 发送消息 — 点击发送按钮
-$('send-btn').onclick = sendMessage;
+// 用 touchend 替代 onclick，避免手机端 textarea 失焦吞掉第一次点击
+$('send-btn').addEventListener('touchend', (e) => {
+  e.preventDefault();
+  sendMessage();
+});
+$('send-btn').onclick = sendMessage; // 桌面端兜底
 
 // iOS 键盘"发送"在 textarea 上会插入换行符，用轮询检测并发送
 // 保存换行前的文本，防止纯换行时丢失内容
@@ -1033,15 +1562,23 @@ setInterval(() => {
     const textToSend = cleaned || pendingText;
     pendingText = '';
     if (textToSend) {
-      sendInputWithHexEnter(textToSend);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendInputWithHexEnter(textToSend);
+        wsSendHex('0d');
+      } else {
+        api(`/api/sessions/${currentSessionId}/input`, {
+          method: 'POST',
+          body: JSON.stringify({ input: textToSend }),
+        }).catch(() => {});
+      }
     }
-    // 单独用 hex 发送回车
-    wsSendHex('0d');
-    // 发送后滚到底部
     if (term) term.scrollToBottom();
   } else if (val) {
-    // 持续记录最新的非空文本，以备换行时使用
     pendingText = val;
+  } else {
+    // val 为空说明用户清空了输入，立即重置 pendingText，
+    // 避免下次纯换行时把上一次残留内容重复发送
+    pendingText = '';
   }
 }, 50);
 
@@ -1052,13 +1589,21 @@ function sendMessage() {
   input.value = '';
   pendingText = '';
 
-  // 文本部分：纯文本发送
   if (text) {
-    sendInputWithHexEnter(text);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      sendInputWithHexEnter(text);
+      wsSendHex('0d');
+    } else {
+      // WebSocket 不可用时走 HTTP API 兜底
+      api(`/api/sessions/${currentSessionId}/input`, {
+        method: 'POST',
+        body: JSON.stringify({ input: text }),
+      }).catch(() => showCopyToast('发送失败，连接已断开'));
+    }
+  } else {
+    // 空消息只发回车
+    wsSendHex('0d');
   }
-  // 回车部分：单独用 hex 发送，确保终端收到真正的 CR
-  wsSendHex('0d');
-  // 发送后滚到底部
   if (term) term.scrollToBottom();
 }
 
@@ -1066,7 +1611,7 @@ function sendMessage() {
 function wsSendHex(hexStr) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     const bytes = hexStr.match(/.{2}/g).map(h => parseInt(h, 16));
-    const b64 = btoa(String.fromCharCode(...bytes));
+    const b64 = uint8ToBase64(bytes);
     ws.send(JSON.stringify({ type: 'input_b64', data: b64 }));
   }
 }
@@ -1111,6 +1656,83 @@ if (window.visualViewport) {
 }
 
 // 快捷键按钮 — 通过 WebSocket 发送原始键码（不弹键盘）
+
+// ========== 快捷命令栏 ==========
+
+const QCMD_STORAGE_KEY = 'duocli_quick_commands';
+const QCMD_DEFAULTS = ['/new', '/help', '/compact', '/unicloud-log-viewer', '/uniapp-dev'];
+
+function loadQuickCommands() {
+  try {
+    const saved = localStorage.getItem(QCMD_STORAGE_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch {}
+  return [...QCMD_DEFAULTS];
+}
+
+function saveQuickCommands(cmds) {
+  localStorage.setItem(QCMD_STORAGE_KEY, JSON.stringify(cmds));
+}
+
+function renderQuickCommands() {
+  const bar = $('quick-commands');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const cmds = loadQuickCommands();
+
+  cmds.forEach((cmd, idx) => {
+    const btn = document.createElement('button');
+    btn.className = 'qcmd-btn';
+    btn.textContent = cmd;
+    // 点击 → 填入输入框并发送
+    btn.onclick = () => {
+      if (!currentSessionId) return;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendInputWithHexEnter(cmd);
+        wsSendHex('0d');
+      } else {
+        api(`/api/sessions/${currentSessionId}/input`, {
+          method: 'POST',
+          body: JSON.stringify({ input: cmd }),
+        }).catch(() => showCopyToast('发送失败'));
+      }
+      if (term) term.scrollToBottom();
+    };
+    // 长按 → 删除
+    let longTimer = null;
+    btn.addEventListener('touchstart', (e) => {
+      longTimer = setTimeout(() => {
+        longTimer = null;
+        if (confirm(`删除快捷命令「${cmd}」？`)) {
+          const list = loadQuickCommands();
+          list.splice(idx, 1);
+          saveQuickCommands(list);
+          renderQuickCommands();
+        }
+      }, 600);
+    }, { passive: true });
+    btn.addEventListener('touchend', () => { if (longTimer) clearTimeout(longTimer); });
+    btn.addEventListener('touchmove', () => { if (longTimer) clearTimeout(longTimer); });
+    bar.appendChild(btn);
+  });
+
+  // 添加按钮
+  const addBtn = document.createElement('button');
+  addBtn.className = 'qcmd-btn qcmd-add';
+  addBtn.textContent = '+ 添加';
+  addBtn.onclick = () => {
+    const cmd = prompt('输入快捷命令：');
+    if (cmd && cmd.trim()) {
+      const list = loadQuickCommands();
+      list.push(cmd.trim());
+      saveQuickCommands(list);
+      renderQuickCommands();
+    }
+  };
+  bar.appendChild(addBtn);
+}
+
+renderQuickCommands();
 
 // ========== 文件上传 ==========
 $('upload-btn').onclick = () => {
@@ -1192,14 +1814,303 @@ $('delete-btn').onclick = async () => {
   }
 };
 
+// ========== 自定义预设 ==========
+
+const CUSTOM_PRESETS_KEY = 'duocli_custom_presets';
+const MOBILE_THEME_KEY = 'duocli_mobile_new_theme';
+
+const BUILTIN_OPTIONS = [
+  { value: '', label: '纯终端 (shell)' },
+  { value: 'claude --dangerously-skip-permissions', label: 'Claude 全自动' },
+  { value: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"', label: 'Codex 全自动' },
+  { value: '__windsurf__', label: 'Windsurf 对话' },
+];
+
+let customPresetNextId = 1;
+
+function getCustomPresets() {
+  try { return JSON.parse(localStorage.getItem(CUSTOM_PRESETS_KEY) || '[]'); } catch { return []; }
+}
+
+function saveCustomPresets(list) {
+  localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list));
+  // 同步到服务端
+  if (token && API) {
+    fetch(`${API}/api/custom-presets`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(list),
+    }).catch(() => {});
+  }
+}
+
+async function pullCustomPresetsFromServer() {
+  if (!token || !API) {
+    console.log('[Mobile Preset] No token or API, skipping server sync');
+    return;
+  }
+  
+  console.log('[Mobile Preset] Pulling presets from server...');
+  
+  try {
+    const serverPresets = await api('/api/custom-presets');
+    console.log('[Mobile Preset] Server response:', serverPresets);
+    
+    if (Array.isArray(serverPresets)) {
+      const localPresets = getCustomPresets();
+      console.log('[Mobile Preset] Local presets:', localPresets.length, 'items');
+      console.log('[Mobile Preset] Server presets:', serverPresets.length, 'items');
+      
+      if (serverPresets.length > 0) {
+        // 服务端有预设，进行合并（服务端优先）
+        const merged = new Map();
+        for (const p of localPresets) merged.set(p.id, p);
+        for (const p of serverPresets) merged.set(p.id, p);
+        const list = Array.from(merged.values());
+        
+        console.log('[Mobile Preset] Merged presets:', list.length, 'items');
+        localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list));
+      } else if (localPresets.length > 0) {
+        // 服务端没有预设，把本地的推上去
+        console.log('[Mobile Preset] No server presets, pushing local presets to server');
+        fetch(`${API}/api/custom-presets`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify(localPresets),
+        }).catch(err => {
+          console.error('[Mobile Preset] Failed to push local presets:', err);
+        });
+      } else {
+        console.log('[Mobile Preset] No presets on either side');
+      }
+    } else {
+      console.warn('[Mobile Preset] Invalid server response format:', typeof serverPresets);
+    }
+  } catch (e) {
+    console.error('[Mobile Preset] Failed to pull presets from server:', e);
+  }
+}
+
+// 初始化自定义预设 ID 计数器
+(function initCustomPresetId() {
+  const customs = getCustomPresets();
+  for (const p of customs) {
+    const m = p.id && p.id.match(/custom-(\d+)/);
+    if (m) customPresetNextId = Math.max(customPresetNextId, parseInt(m[1]) + 1);
+  }
+})();
+
+function renderPresetSelect() {
+  const presetSelect = $('new-preset');
+  if (!presetSelect) return;
+  const prev = presetSelect.value;
+  presetSelect.innerHTML = '';
+
+  // 内置选项
+  for (const opt of BUILTIN_OPTIONS) {
+    const el = document.createElement('option');
+    el.value = opt.value;
+    el.textContent = opt.label;
+    presetSelect.appendChild(el);
+  }
+
+  // 自定义预设
+  const customs = getCustomPresets();
+  console.log('[Mobile Preset] Rendering preset select with', customs.length, 'custom presets');
+  
+  if (customs.length > 0) {
+    const sep = document.createElement('option');
+    sep.disabled = true;
+    sep.textContent = '── 自定义 ──';
+    presetSelect.appendChild(sep);
+
+    for (const p of customs) {
+      console.log('[Mobile Preset] Adding custom preset:', p.name, '→', p.command);
+      const el = document.createElement('option');
+      el.value = p.autoFlag ? p.command + ' ' + p.autoFlag : p.command;
+      el.textContent = p.autoFlag ? p.name + ' (全自动)' : p.name;
+      presetSelect.appendChild(el);
+    }
+  }
+
+  // 恢复之前的选中值
+  if (prev) presetSelect.value = prev;
+  if (presetSelect.selectedIndex === -1) presetSelect.value = '';
+}
+
+function showPresetDialog(preset) {
+  return new Promise((resolve) => {
+    const isEdit = !!preset;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal active';
+    overlay.style.zIndex = '1001';
+    const dialog = document.createElement('div');
+    dialog.className = 'modal-content';
+    dialog.innerHTML = `
+      <h3>${isEdit ? '编辑' : '新建'}自定义预设</h3>
+      <label>名称</label>
+      <input type="text" id="preset-name-input" placeholder="如 Aider、自定义 CLI 等" value="${preset ? preset.name : ''}" />
+      <label>启动命令</label>
+      <input type="text" id="preset-cmd-input" placeholder="如 aider、my-cli 等" value="${preset ? preset.command : ''}" />
+      <label>全自动参数（可选）</label>
+      <input type="text" id="preset-auto-input" placeholder="如 --yes、--yolo 等" value="${preset ? preset.autoFlag : ''}" />
+      <div class="modal-actions">
+        <button id="preset-dialog-cancel" class="btn-secondary">取消</button>
+        <button id="preset-dialog-ok" class="btn-primary">确定</button>
+      </div>
+    `;
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    const nameInput = dialog.querySelector('#preset-name-input');
+    const cmdInput = dialog.querySelector('#preset-cmd-input');
+    const autoInput = dialog.querySelector('#preset-auto-input');
+
+    const cleanup = (result) => { overlay.remove(); resolve(result); };
+
+    dialog.querySelector('#preset-dialog-cancel').onclick = () => cleanup(null);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
+
+    dialog.querySelector('#preset-dialog-ok').onclick = () => {
+      const name = nameInput.value.trim();
+      const cmd = cmdInput.value.trim();
+      const autoFlag = autoInput.value.trim();
+      if (!name || !cmd) { alert('名称和命令不能为空'); return; }
+      const id = preset ? preset.id : `custom-${customPresetNextId++}`;
+      cleanup({ id, name, command: cmd, autoFlag });
+    };
+  });
+}
+
+function showPresetManageDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal active';
+  overlay.style.zIndex = '1001';
+  const dialog = document.createElement('div');
+  dialog.className = 'modal-content preset-manage-dialog';
+
+  dialog.innerHTML = '<h3>管理自定义预设</h3>';
+  const listEl = document.createElement('div');
+  listEl.className = 'preset-manage-list';
+
+  const customs = getCustomPresets();
+  if (customs.length === 0) {
+    listEl.innerHTML = '<div class="preset-manage-empty">暂无自定义预设，点击上方 ＋ 按钮新建</div>';
+  } else {
+    for (const p of customs) {
+      const item = document.createElement('div');
+      item.className = 'preset-manage-item';
+
+      const info = document.createElement('div');
+      info.className = 'preset-manage-item-info';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'preset-manage-item-name';
+      nameEl.textContent = p.name;
+      const cmdEl = document.createElement('div');
+      cmdEl.className = 'preset-manage-item-cmd';
+      cmdEl.textContent = p.command + (p.autoFlag ? ' ' + p.autoFlag : '');
+      info.appendChild(nameEl);
+      info.appendChild(cmdEl);
+      item.appendChild(info);
+
+      const actions = document.createElement('div');
+      actions.className = 'preset-manage-item-actions';
+
+      const editBtn = document.createElement('button');
+      editBtn.className = 'preset-manage-btn';
+      editBtn.textContent = '✎';
+      editBtn.onclick = async () => {
+        const edited = await showPresetDialog(p);
+        if (edited) {
+          const list = getCustomPresets();
+          const idx = list.findIndex(x => x.id === p.id);
+          if (idx !== -1) { list[idx] = edited; saveCustomPresets(list); }
+          renderPresetSelect();
+          overlay.remove();
+          showPresetManageDialog(); // 刷新管理列表
+        }
+      };
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'preset-manage-btn preset-manage-btn-del';
+      delBtn.textContent = '✕';
+      delBtn.onclick = () => {
+        if (!confirm(`确定删除预设「${p.name}」？`)) return;
+        const list = getCustomPresets().filter(x => x.id !== p.id);
+        saveCustomPresets(list);
+        renderPresetSelect();
+        overlay.remove();
+        showPresetManageDialog(); // 刷新管理列表
+      };
+
+      actions.appendChild(editBtn);
+      actions.appendChild(delBtn);
+      item.appendChild(actions);
+      listEl.appendChild(item);
+    }
+  }
+
+  dialog.appendChild(listEl);
+
+  const actionsBar = document.createElement('div');
+  actionsBar.className = 'modal-actions';
+  actionsBar.innerHTML = '<button id="preset-manage-close" class="btn-secondary">关闭</button>';
+  dialog.appendChild(actionsBar);
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  dialog.querySelector('#preset-manage-close').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+}
+
+// 自定义预设按钮事件
+const presetAddBtn = $('preset-add-btn');
+const presetManageBtn = $('preset-manage-btn');
+if (presetAddBtn) {
+  presetAddBtn.addEventListener('click', async () => {
+    const result = await showPresetDialog();
+    if (result) {
+      const list = getCustomPresets();
+      list.push(result);
+      saveCustomPresets(list);
+      renderPresetSelect();
+      const presetSelect = $('new-preset');
+      if (presetSelect) presetSelect.value = result.autoFlag ? result.command + ' ' + result.autoFlag : result.command;
+    }
+  });
+}
+if (presetManageBtn) {
+  presetManageBtn.addEventListener('click', () => {
+    showPresetManageDialog();
+  });
+}
+
+// 初始化渲染预设下拉
+renderPresetSelect();
+
 // ========== 新建会话 ==========
 
+let lastKnownSessionCwd = '';
+
+
 $('new-session-btn').onclick = async () => {
-  await refreshRecentCwdOptions();
+  await Promise.all([refreshRecentCwdOptions(), pullCustomPresetsFromServer()]);
+  renderPresetSelect();
   const select = $('new-cwd');
-  const options = select?.querySelectorAll('option');
-  const first = options?.length > 1 ? options[1].value : '';
-  if (!select.value.trim() && first) select.value = first;
+  if (select) {
+    const lastCwd = localStorage.getItem(MOBILE_LAST_CWD_KEY) || '';
+    select.value = lastCwd;
+    if (lastCwd && select.value !== lastCwd) select.value = '';
+  }
+  const presetSelect = $('new-preset');
+  if (presetSelect) {
+    const lastPreset = localStorage.getItem(MOBILE_LAST_PRESET_KEY) || '';
+    presetSelect.value = lastPreset;
+    if (lastPreset && presetSelect.value !== lastPreset) presetSelect.value = '';
+  }
+  const themeSelect = $('new-theme');
+  if (themeSelect) themeSelect.value = localStorage.getItem(MOBILE_THEME_KEY) || 'default';
   $('new-session-modal').classList.add('active');
 };
 
@@ -1210,13 +2121,25 @@ $('modal-cancel').onclick = () => {
 $('modal-create').onclick = async () => {
   const cwd = $('new-cwd').value.trim() || '';
   const preset = $('new-preset').value;
+  const themeId = $('new-theme')?.value || 'default';
+  localStorage.setItem(MOBILE_THEME_KEY, themeId);
   $('new-session-modal').classList.remove('active');
 
   try {
+    // Windsurf 特殊处理：创建 Chat 会话而非 PTY 终端
+    if (preset === '__windsurf__') {
+      await createChatSession(cwd || undefined);
+      localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
+      localStorage.setItem(MOBILE_LAST_PRESET_KEY, preset);
+      return;
+    }
+
     const session = await api('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ cwd: cwd || undefined, presetCommand: preset }),
+      body: JSON.stringify({ cwd: cwd || undefined, presetCommand: preset, themeId }),
     });
+    localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
+    localStorage.setItem(MOBILE_LAST_PRESET_KEY, preset);
     await refreshSessions();
     openSession(session.id);
   } catch (e) {
@@ -1370,6 +2293,19 @@ function bindCanvasContextLost() {
 
 // ========== 初始化 ==========
 
+// 屏蔽 Cmd+R / F5 刷新，避免丢失所有对话
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
+    e.preventDefault();
+    showCopyToast('已阻止刷新，对话不会丢失');
+    return;
+  }
+  if (e.key === 'F5') {
+    e.preventDefault();
+    showCopyToast('已阻止刷新，对话不会丢失');
+  }
+}, { capture: true });
+
 async function loadServerInfo() {
   try {
     const res = await fetch(`${API}/api/server-info`);
@@ -1391,3 +2327,342 @@ if (token) {
 } else {
   showPage('login-page');
 }
+
+window.addEventListener('online', () => {
+  if ($('main-page').classList.contains('active') && token && !sseSource) {
+    startSSE();
+  }
+  if (currentSessionId && $('detail-page').classList.contains('active') && (!ws || ws.readyState !== WebSocket.OPEN)) {
+    connectWebSocket(currentSessionId);
+  }
+});
+
+window.addEventListener('offline', () => {
+  showCopyToast('网络已断开，恢复后将自动重连');
+});
+
+// ========== 初始化：自动验证 token 并进入主页 ==========
+
+async function init() {
+  const savedToken = localStorage.getItem('duocli_token');
+  if (!savedToken) {
+    showPage('login-page');
+    return;
+  }
+
+  // 验证 token 是否有效
+  try {
+    const res = await fetch(`${API}/api/auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: savedToken }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      token = savedToken;
+      enterMain();
+    } else {
+      localStorage.removeItem('duocli_token');
+      showPage('login-page');
+    }
+  } catch (e) {
+    // 网络错误时仍显示登录页
+    showPage('login-page');
+  }
+}
+
+// ========== Chat 功能 ==========
+
+let activeChatId = null;
+let chatStreamController = null;
+
+async function fetchChatSessions() {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const r = await fetch(`${API}/api/chat/sessions`, { headers });
+    if (!r.ok) return [];
+    return await r.json();
+  } catch { return []; }
+}
+
+/** 创建 Chat 会话（支持指定工作目录），用于 Windsurf 入口 */
+async function createChatSession(workspace) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const r = await fetch(`${API}/api/chat/sessions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ workspace: workspace || '' }),
+    });
+    if (!r.ok) throw new Error('创建失败');
+    const session = await r.json();
+    chatSessionsLastFetch = 0; // 失效缓存
+    openChatSession(session.id);
+  } catch (e) {
+    alert('创建聊天失败: ' + (e.message || '网络错误'));
+  }
+}
+
+async function createNewChat() {
+  return createChatSession('');
+}
+
+async function openChatSession(id) {
+  activeChatId = id;
+  showPage('chat-detail-page');
+
+  const msgEl = $('chat-messages');
+  msgEl.innerHTML = '';
+
+  // 加载历史消息
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const r = await fetch(`${API}/api/chat/sessions/${encodeURIComponent(id)}/messages`, { headers });
+    if (r.ok) {
+      const data = await r.json();
+      const messages = data.messages || [];
+      for (const m of messages) {
+        addChatBubble(m.role, m.content);
+      }
+      msgEl.scrollTop = msgEl.scrollHeight;
+    }
+  } catch {}
+
+  $('chat-msg-input').focus();
+}
+
+function addChatBubble(role, content, isStreaming) {
+  const msgEl = $('chat-messages');
+  const el = document.createElement('div');
+  el.className = 'chat-bubble-mobile ' + role + (isStreaming ? ' streaming' : '');
+
+  const label = document.createElement('div');
+  label.className = 'chat-label-mobile';
+  if (role === 'user') {
+    label.textContent = 'YOU';
+  } else if (role === 'assistant') {
+    label.textContent = 'AI';
+  } else if (role === 'system') {
+    label.textContent = 'SYS';
+    label.classList.add('system');
+  }
+  el.appendChild(label);
+
+  const body = document.createElement('div');
+  body.className = 'chat-body-mobile';
+  body.textContent = content;
+  el.appendChild(body);
+
+  msgEl.appendChild(el);
+  msgEl.scrollTop = msgEl.scrollHeight;
+  return el;
+}
+
+async function sendChatMessage() {
+  if (!activeChatId) return;
+  const inputEl = $('chat-msg-input');
+  const content = inputEl.value.trim();
+  if (!content) return;
+
+  // 显示用户消息
+  addChatBubble('user', content);
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+
+  // 通过 SSE 发送并接收流式响应
+  const headers = {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-cache',
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  // 中断之前的流
+  if (chatStreamController) {
+    chatStreamController.abort();
+    chatStreamController = null;
+  }
+  chatStreamController = new AbortController();
+
+  try {
+    const r = await fetch(`${API}/api/chat/sessions/${encodeURIComponent(activeChatId)}/messages`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ content }),
+      signal: chatStreamController.signal,
+    });
+
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${r.status}`);
+    }
+
+    // SSE 流式读取
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let streamBubble = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === 'delta') {
+            if (!streamBubble) {
+              streamBubble = addChatBubble('assistant', '', true);
+            }
+            const body = streamBubble.querySelector('.chat-body-mobile');
+            body.textContent += parsed.text;
+            $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+          } else if (parsed.type === 'done') {
+            if (streamBubble) {
+              streamBubble.classList.remove('streaming');
+            }
+            streamBubble = null;
+          } else if (parsed.type === 'error') {
+            if (streamBubble) {
+              streamBubble.classList.remove('streaming');
+              streamBubble.querySelector('.chat-body-mobile').textContent += '\n\n❌ ' + parsed.error;
+            } else {
+              addChatBubble('system', '❌ ' + parsed.error);
+            }
+            streamBubble = null;
+          } else if (parsed.type === 'system') {
+            if (streamBubble) {
+              streamBubble.classList.remove('streaming');
+              streamBubble = null;
+            }
+            addChatBubble('system', parsed.message);
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      addChatBubble('system', '❌ ' + (e.message || '请求失败'));
+    }
+  } finally {
+    chatStreamController = null;
+  }
+}
+
+function closeChatSession() {
+  if (chatStreamController) {
+    chatStreamController.abort();
+    chatStreamController = null;
+  }
+  activeChatId = null;
+  showPage('main-page');
+  refreshSessions(); // 刷新以显示新建的 chat 会话
+}
+
+async function deleteChatSession() {
+  if (!activeChatId) return;
+  if (!confirm('确定删除此对话？')) return;
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    await fetch(`${API}/api/chat/sessions/${encodeURIComponent(activeChatId)}`, {
+      method: 'DELETE',
+      headers,
+    });
+    chatSessionsLastFetch = 0; // 失效缓存
+  } catch {}
+
+  closeChatSession();
+}
+
+// Chat 事件绑定
+function initChatEvents() {
+  $('new-chat-btn').addEventListener('click', createNewChat);
+  $('chat-back-btn').addEventListener('click', closeChatSession);
+  $('chat-delete-btn').addEventListener('click', deleteChatSession);
+  $('chat-send-btn').addEventListener('click', sendChatMessage);
+
+  $('chat-msg-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+
+  $('chat-msg-input').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+  });
+}
+
+// 在会话列表加载时合并 chat 会话
+let cachedChatSessions = [];
+let chatSessionsLastFetch = 0;
+const origRenderSessionList = renderSessionList;
+renderSessionList = function(sessions) {
+  origRenderSessionList(sessions);
+
+  // 缓存 chat 会话列表，避免每次 SSE 刷新都请求
+  const now = Date.now();
+  if (now - chatSessionsLastFetch > 10000) {
+    chatSessionsLastFetch = now;
+    fetchChatSessions().then(list => {
+      cachedChatSessions = list || [];
+      appendChatCards(sessions);
+    });
+  } else {
+    appendChatCards(sessions);
+  }
+};
+
+function appendChatCards(sessions) {
+  if (!cachedChatSessions.length) return;
+  const list = $('session-list');
+  const empty = $('empty-state');
+
+  const divider = document.createElement('div');
+  divider.className = 'chat-sessions-divider';
+  divider.textContent = '💬 Chat 对话';
+  divider.style.cssText = 'padding:12px 14px 4px;font-size:12px;color:#888;font-weight:600;';
+  list.appendChild(divider);
+
+  for (const s of cachedChatSessions) {
+    const card = document.createElement('div');
+    card.className = 'session-card';
+    card.dataset.id = s.id;
+    card.innerHTML = `
+      <div class="status-dot" style="background:#a78bfa;"></div>
+      <div class="session-info">
+        <div class="session-title-row">
+          <div class="session-title">${escHtml(s.title || 'Chat')}</div>
+        </div>
+        <div class="session-meta">
+          <span class="session-time">${formatTime(s.createdAt)}</span>
+          <span class="session-cwd">${s.messageCount || 0} 条消息</span>
+        </div>
+      </div>
+      <div class="session-arrow">›</div>
+    `;
+    card.onclick = () => openChatSession(s.id);
+    list.appendChild(card);
+  }
+
+  if (!sessions.length) {
+    empty.style.display = 'none';
+  }
+}
+
+initChatEvents();
+
+init();

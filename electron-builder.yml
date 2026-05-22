@@ -12,5 +12,8 @@ files:
   - node_modules/**/*
   - "!node_modules/.cache"
 asar: true
+asarUnpack:
+  - "node_modules/sharp/**/*"
+  - "node_modules/@img/**/*"
 directories:
   output: release

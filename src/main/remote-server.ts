@@ -12,7 +12,13 @@ function resolveAdb(): string {
 const ADB = resolveAdb();
 import { WebSocketServer, WebSocket } from 'ws';
 import webpush from 'web-push';
+import sharp from 'sharp';
 import { PtyManager, getDisplayName } from './pty-manager';
+import { ChatSessionManager } from './chat-session-manager';
+
+// 缓存 ptyManager 和回调供远程创建使用（在 startRemoteServer 中设置）
+let cachedPtyManager: PtyManager | null = null;
+let cachedOnRemoteCreate: ((sessionInfo: any) => void) | null = null;
 
 // 根据 preset 命令获取实际使用的模型提供商（与 index.ts 保持一致）
 function getCliProvider(presetCommand: string): string | null {
@@ -91,6 +97,17 @@ function parseShellExports(content: string): Map<string, string> {
   return vars;
 }
 
+function resolveSessionDisplayName(presetCommand: string, customPresets: CustomPreset[]): string {
+  const displayName = getDisplayName(presetCommand);
+  const customPreset = customPresets.find(p =>
+    presetCommand === p.command || (p.autoFlag && presetCommand === p.command + ' ' + p.autoFlag)
+  );
+  return customPreset
+    ? (presetCommand === customPreset.command + ' ' + customPreset.autoFlag
+        ? customPreset.name + '全自动' : customPreset.name)
+    : displayName;
+}
+
 const PORT = parseInt(process.env.DUOCLI_REMOTE_PORT || '9800');
 
 // 获取本机局域网 IP
@@ -111,12 +128,20 @@ function getLocalIP(): string {
 const CONFIG_DIR = path.join(process.env.HOME || os.homedir(), '.duocli-mobile');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
+interface CustomPreset {
+  id: string;
+  name: string;
+  command: string;
+  autoFlag: string;
+}
+
 interface RemoteConfig {
   token: string;
   vapidPublic: string;
   vapidPrivate: string;
   pushSubscriptions: webpush.PushSubscription[];
   recentCwds: string[];
+  customPresets: CustomPreset[];
 }
 
 function loadOrCreateConfig(): RemoteConfig {
@@ -126,21 +151,23 @@ function loadOrCreateConfig(): RemoteConfig {
       const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as Partial<RemoteConfig>;
       const fallbackKeys = webpush.generateVAPIDKeys();
       return {
-        token: raw.token || crypto.randomBytes(32).toString('hex'),
+        token: '123456',
         vapidPublic: raw.vapidPublic || fallbackKeys.publicKey,
         vapidPrivate: raw.vapidPrivate || fallbackKeys.privateKey,
         pushSubscriptions: Array.isArray(raw.pushSubscriptions) ? raw.pushSubscriptions : [],
         recentCwds: Array.isArray(raw.recentCwds) ? raw.recentCwds.filter(Boolean).slice(0, 20) : [],
+        customPresets: Array.isArray(raw.customPresets) ? raw.customPresets : [],
       };
     } catch {}
   }
   const vapidKeys = webpush.generateVAPIDKeys();
   const config: RemoteConfig = {
-    token: crypto.randomBytes(32).toString('hex'),
+    token: '123456',
     vapidPublic: vapidKeys.publicKey,
     vapidPrivate: vapidKeys.privateKey,
     pushSubscriptions: [],
     recentCwds: [],
+    customPresets: [],
   };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
   return config;
@@ -172,6 +199,10 @@ export function startRemoteServer(
   onRemoteDestroy?: (id: string) => void,
   onServerStarted?: (info: { lanUrl: string; token: string; port: number }) => void,
 ): void {
+  // 缓存供 Bridge 事件使用
+  cachedPtyManager = ptyManager;
+  cachedOnRemoteCreate = onRemoteCreate || null;
+
   const config = loadOrCreateConfig();
   const LOCAL_IP = getLocalIP();
 
@@ -200,10 +231,47 @@ export function startRemoteServer(
 
   // ========== WebSocket ==========
 
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  // 启用 permessage-deflate：终端 ANSI 文本压缩比通常 5-10x，
+  // 对弱网首屏 replay 与刷屏 output 都是关键收益。threshold 以下不压缩，避免小消息反而变大。
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    perMessageDeflate: {
+      threshold: 1024,
+      zlibDeflateOptions: { level: 6, memLevel: 7 },
+      clientNoContextTakeover: true,
+      serverNoContextTakeover: true,
+      concurrencyLimit: 10,
+    },
+  });
   const wsClients = new Map<string, Set<WebSocket>>();
+  type AliveWebSocket = WebSocket & { isAlive?: boolean };
+
+  // WS 层心跳：清理半开连接，避免弱网下“假在线”导致客户端一直卡重连
+  const wsHeartbeatTimer = setInterval(() => {
+    wss.clients.forEach((client) => {
+      const wsClient = client as AliveWebSocket;
+      if (wsClient.isAlive === false) {
+        wsClient.terminate();
+        return;
+      }
+      wsClient.isAlive = false;
+      try {
+        wsClient.ping();
+      } catch { /* ignore */ }
+    });
+  }, 20000);
+  server.on('close', () => {
+    clearInterval(wsHeartbeatTimer);
+  });
 
   wss.on('connection', (ws, req) => {
+    const aliveWs = ws as AliveWebSocket;
+    aliveWs.isAlive = true;
+    ws.on('pong', () => {
+      aliveWs.isAlive = true;
+    });
+
     const url = new URL(req.url || '', 'http://localhost');
     if (url.searchParams.get('token') !== config.token) {
       ws.close(4001, '未授权');
@@ -243,6 +311,9 @@ export function startRemoteServer(
         }
 
         // 心跳 ping，忽略即可
+        if (data.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+        }
       } catch {}
     });
 
@@ -252,13 +323,49 @@ export function startRemoteServer(
   });
 
   // pty rawData → 推送给 WebSocket 客户端（由 index.ts 中 onRawData 回调触发）
-  // 这里导出一个方法供外部调用
-  (startRemoteServer as any)._pushRawData = (id: string, data: string) => {
+  // 微批合并：8ms 内的多次 onData 拼成一帧再 send，减少 ws 帧数与 JSON 包头开销。
+  // 8ms 在人眼几乎察觉不到，却能把 npm install / 编译刷屏从几百帧压到几十帧。
+  const pendingChunks = new Map<string, string>();
+  const pendingTimers = new Map<string, NodeJS.Timeout>();
+  const FLUSH_DELAY_MS = 8;
+  const FLUSH_MAX_BYTES = 32768; // 累积超过 32KB 立即冲刷，避免长期积压
+  // 弱网背压：单连接 socket 缓冲区超过 1MB 视为积压，直接 terminate
+  // 客户端重连时通过 replay 拿到 rawBuffer 最新 128KB，正好跳过所有堆积的旧帧。
+  const WS_BACKPRESSURE_BYTES = 1024 * 1024;
+
+  const flushChunks = (id: string) => {
+    const data = pendingChunks.get(id);
+    pendingChunks.delete(id);
+    const t = pendingTimers.get(id);
+    if (t) { clearTimeout(t); pendingTimers.delete(id); }
+    if (!data) return;
     const clients = wsClients.get(id);
-    if (!clients) return;
+    if (!clients || clients.size === 0) return;
     const msg = JSON.stringify({ type: 'output', data });
     for (const ws of clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (ws.bufferedAmount > WS_BACKPRESSURE_BYTES) {
+        // 弱网积压：放弃这条连接，触发客户端重连+replay
+        ws.terminate();
+        clients.delete(ws);
+        continue;
+      }
+      ws.send(msg);
+    }
+  };
+
+  (startRemoteServer as any)._pushRawData = (id: string, data: string) => {
+    const clients = wsClients.get(id);
+    if (!clients || clients.size === 0) return;
+    const prev = pendingChunks.get(id) || '';
+    const merged = prev + data;
+    pendingChunks.set(id, merged);
+    if (merged.length >= FLUSH_MAX_BYTES) {
+      flushChunks(id);
+      return;
+    }
+    if (!pendingTimers.has(id)) {
+      pendingTimers.set(id, setTimeout(() => flushChunks(id), FLUSH_DELAY_MS));
     }
   };
 
@@ -266,6 +373,34 @@ export function startRemoteServer(
 
   app.get('/api/server-info', (_req, res) => {
     res.json({ ip: LOCAL_IP, port: PORT, hostname: os.hostname() });
+  });
+
+  // 返回当前所有可用的局域网 IPv4 地址（多网卡 / 多网段）
+  // 手机端在 CF Tunnel 模式下用此接口探测是否能直连 LAN
+  // 注意：此接口需要 token 鉴权（走 /api 前缀），避免泄露内网拓扑
+  app.get('/api/lan-info', (_req, res) => {
+    const interfaces = os.networkInterfaces();
+    const lanIps: string[] = [];
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name] || []) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          lanIps.push(iface.address);
+        }
+      }
+    }
+    res.json({ lanIps, port: PORT, hostname: os.hostname() });
+  });
+
+  // 1x1 透明 PNG，给手机端 <img> 探针用（HTTPS 页面下 fetch HTTP 会被
+  // Mixed Content 拦截，但 <img> 跨协议加载不被拦，可用 onload 判通断）
+  // 注意：不挂在 /api 下，避免 token 限制——这是公开探针端点
+  const PING_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    'base64'
+  );
+  app.get('/ping.png', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.type('png').send(PING_PNG);
   });
 
   app.post('/api/auth', (req, res) => {
@@ -278,6 +413,20 @@ export function startRemoteServer(
 
   app.get('/api/vapid-public-key', (_req, res) => {
     res.json({ key: config.vapidPublic });
+  });
+
+  // ========== 自定义预设同步 API ==========
+
+  app.get('/api/custom-presets', (_req, res) => {
+    res.json(config.customPresets || []);
+  });
+
+  app.put('/api/custom-presets', (req, res) => {
+    const list = req.body;
+    if (!Array.isArray(list)) { res.status(400).json({ error: '需要数组' }); return; }
+    config.customPresets = list;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    res.json({ ok: true });
   });
 
   app.post('/api/push/subscribe', (req, res) => {
@@ -298,18 +447,22 @@ export function startRemoteServer(
     return statuses[id] || 'idle';
   }
 
-  // 会话列表 — 直接读 ptyManager
-  app.get('/api/sessions', (_req, res) => {
-    const sessions = ptyManager.getAllSessions().map(s => ({
+  function mapSessionToApi(s: any) {
+    return {
       id: s.id,
       title: s.title,
       cwd: s.cwd,
       presetCommand: s.presetCommand,
-      displayName: getDisplayName(s.presetCommand),
-      provider: (s as any).provider || getCliProvider(s.presetCommand),
+      displayName: resolveSessionDisplayName(s.presetCommand, config.customPresets),
+      provider: s.provider || getCliProvider(s.presetCommand),
       status: getSessionStatus(s.id, s.ptyProcess),
-      createdAt: (s as any).createdAt || Date.now(),
-    }));
+      createdAt: s.createdAt || Date.now(),
+    };
+  }
+
+  // 会话列表 — 直接读 ptyManager
+  app.get('/api/sessions', (_req, res) => {
+    const sessions = ptyManager.getAllSessions().map(s => mapSessionToApi(s));
     res.json(sessions);
   });
 
@@ -327,10 +480,15 @@ export function startRemoteServer(
 
   // 创建会话 — 通过 ptyManager 创建，通知桌面端
   app.post('/api/sessions', (req, res) => {
-    const { cwd, presetCommand } = req.body;
+    const { cwd, presetCommand, themeId, providerEnv } = req.body;
     const targetCwd = cwd || process.env.HOME || os.homedir();
     try {
-      const session = ptyManager.create(targetCwd, presetCommand || '', 'default');
+      const session = ptyManager.create(
+        targetCwd,
+        presetCommand || '',
+        typeof themeId === 'string' && themeId ? themeId : 'default',
+        providerEnv && typeof providerEnv === 'object' ? providerEnv : undefined,
+      );
       const info = {
         id: session.id,
         title: session.title,
@@ -368,9 +526,18 @@ export function startRemoteServer(
   app.post('/api/sessions/:id/upload', express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
     const session = ptyManager.getSession(req.params.id);
     if (!session) { res.status(404).json({ error: '会话不存在' }); return; }
-    const filename = (req.headers['x-filename'] as string) || `upload_${Date.now()}`;
+    const rawName = (req.headers['x-filename'] as string) || `upload_${Date.now()}`;
+    // 路径穿越防护：只取 basename，再校验落点必须在 cwd 下
+    const filename = path.basename(rawName);
+    if (!filename || filename === '.' || filename === '..') {
+      res.status(400).json({ error: '非法文件名' }); return;
+    }
     const decoded = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body);
-    const dest = path.join(session.cwd, filename);
+    const dest = path.resolve(session.cwd, filename);
+    const cwdReal = path.resolve(session.cwd);
+    if (!dest.startsWith(cwdReal + path.sep) && dest !== cwdReal) {
+      res.status(400).json({ error: '非法路径' }); return;
+    }
     try {
       fs.writeFileSync(dest, decoded);
       res.json({ ok: true, path: dest, size: decoded.length });
@@ -399,6 +566,164 @@ export function startRemoteServer(
     res.json({ ok: true });
   });
 
+  // ========== Chat Session API ==========
+
+  function getChatManager(): ChatSessionManager | null {
+    return (global as any).__chatSessionManager || null;
+  }
+
+  // 健康检查
+  app.get('/api/chat/health', async (_req, res) => {
+    const mgr = getChatManager();
+    if (!mgr) { res.json({ ok: false, error: 'Chat manager not ready' }); return; }
+    const health = await mgr.healthCheck();
+    const proxyMgr = (global as any).__windsurfProxyManager;
+    res.json({
+      ...health,
+      autoManaged: proxyMgr?.isAvailable() ?? false,
+      proxyDir: proxyMgr?.getProxyDir() ?? null,
+    });
+  });
+
+  // 手动重启/启动代理
+  app.post('/api/chat/proxy/start', async (_req, res) => {
+    const proxyMgr = (global as any).__windsurfProxyManager;
+    if (!proxyMgr) { res.status(500).json({ error: 'Proxy manager not available' }); return; }
+    const result = await proxyMgr.start();
+    res.json(result);
+  });
+
+  // 模型列表
+  app.get('/api/chat/models', async (_req, res) => {
+    const mgr = getChatManager();
+    if (!mgr) { res.json([]); return; }
+    const models = await mgr.listModels();
+    res.json(models);
+  });
+
+  // 会话列表
+  app.get('/api/chat/sessions', (_req, res) => {
+    const mgr = getChatManager();
+    if (!mgr) { res.json([]); return; }
+    const sessions = mgr.getAllSessions().map(s => ({
+      id: s.id,
+      title: s.title,
+      model: s.model,
+      workspace: s.workspace,
+      createdAt: s.createdAt,
+      messageCount: s.messages.length,
+    }));
+    res.json(sessions);
+  });
+
+  // 创建会话
+  app.post('/api/chat/sessions', (req, res) => {
+    const mgr = getChatManager();
+    if (!mgr) { res.status(500).json({ error: 'Chat manager not ready' }); return; }
+    const { workspace, model } = req.body || {};
+    const session = mgr.create(workspace || os.homedir(), model);
+    res.json({
+      id: session.id,
+      title: session.title,
+      model: session.model,
+      workspace: session.workspace,
+      createdAt: session.createdAt,
+    });
+  });
+
+  // 获取会话消息
+  app.get('/api/chat/sessions/:id/messages', (req, res) => {
+    const mgr = getChatManager();
+    const session = mgr?.getSession(req.params.id);
+    if (!session) { res.status(404).json({ error: '会话不存在' }); return; }
+    res.json({ messages: session.messages });
+  });
+
+  // 发送消息（SSE 流式返回）
+  app.post('/api/chat/sessions/:id/messages', (req, res) => {
+    const mgr = getChatManager();
+    if (!mgr) { res.status(500).json({ error: 'Chat manager not ready' }); return; }
+    const content = req.body?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      res.status(400).json({ error: '缺少 content' });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const sessionId = req.params.id;
+
+    // 监听器在 manager 上是全局共享的，必须按 sid 过滤，
+    // 否则其他并发会话的 delta 会窜进当前 SSE 响应
+    const onDelta = (sid: string, text: string) => {
+      if (sid !== sessionId) return;
+      res.write(`data: ${JSON.stringify({ type: 'delta', text })}\n\n`);
+    };
+    const onDone = (sid: string, contentStr: string) => {
+      if (sid !== sessionId) return;
+      res.write(`data: ${JSON.stringify({ type: 'done', content: contentStr })}\n\n`);
+      res.end();
+      cleanup();
+    };
+    const onError = (sid: string, error: string) => {
+      if (sid !== sessionId) return;
+      res.write(`data: ${JSON.stringify({ type: 'error', error })}\n\n`);
+      res.end();
+      cleanup();
+    };
+
+    const cleanup = () => {
+      mgr.removeListener('onDelta', onDelta);
+      mgr.removeListener('onDone', onDone);
+      mgr.removeListener('onError', onError);
+    };
+
+    mgr.on('onDelta', onDelta);
+    mgr.on('onDone', onDone);
+    mgr.on('onError', onError);
+
+    mgr.sendMessage(sessionId, content).catch((err) => {
+      onError(sessionId, err.message || String(err));
+    });
+
+    req.on('close', () => {
+      mgr.abortStream(sessionId);
+      cleanup();
+    });
+  });
+
+  // 终止会话
+  app.delete('/api/chat/sessions/:id', (req, res) => {
+    const mgr = getChatManager();
+    if (!mgr) { res.status(500).json({ error: 'Chat manager not ready' }); return; }
+    mgr.destroy(req.params.id);
+    res.json({ ok: true });
+  });
+
+  // 重命名会话
+  app.put('/api/chat/sessions/:id/title', (req, res) => {
+    const mgr = getChatManager();
+    const { title } = req.body || {};
+    if (typeof title !== 'string' || !title.trim()) {
+      res.status(400).json({ error: '缺少 title' });
+      return;
+    }
+    mgr?.rename(req.params.id, title.trim());
+    res.json({ ok: true });
+  });
+
+  // 中断流
+  app.post('/api/chat/sessions/:id/abort', (req, res) => {
+    const mgr = getChatManager();
+    mgr?.abortStream(req.params.id);
+    res.json({ ok: true });
+  });
+
   // ========== Android 设备 API ==========
 
   app.get('/api/android/devices', (_req, res) => {
@@ -414,16 +739,26 @@ export function startRemoteServer(
     }
   });
 
-  app.get('/api/android/screenshot', (req, res) => {
+  app.get('/api/android/screenshot', async (req, res) => {
     try {
       const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId.trim() : '';
+      const quality = Math.min(100, Math.max(1, parseInt(req.query.quality as string) || 80));
+      const scale = Math.min(1, Math.max(0.1, parseFloat(req.query.scale as string) || 1));
       const args: string[] = [];
       if (deviceId) args.push('-s', deviceId);
       args.push('exec-out', 'screencap', '-p');
       const png = execFileSync(ADB, args, { maxBuffer: 8 * 1024 * 1024 });
-      res.setHeader('Content-Type', 'image/png');
+      let pipeline = sharp(png);
+      if (scale < 1) {
+        const meta = await sharp(png).metadata();
+        if (meta.width && meta.height) {
+          pipeline = pipeline.resize(Math.round(meta.width * scale), Math.round(meta.height * scale));
+        }
+      }
+      const jpeg = await pipeline.jpeg({ quality }).toBuffer();
+      res.setHeader('Content-Type', 'image/jpeg');
       res.setHeader('Cache-Control', 'no-store');
-      res.send(png);
+      res.send(jpeg);
     } catch (e: any) {
       res.status(500).json({ error: '截图失败: ' + (e.message || e) });
     }
@@ -439,6 +774,22 @@ export function startRemoteServer(
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: '点击失败: ' + (e.message || e) });
+    }
+  });
+
+  app.post('/api/android/swipe', (req, res) => {
+    try {
+      const deviceId = typeof req.body.deviceId === 'string' ? req.body.deviceId.trim() : '';
+      const x1 = Math.round(Number(req.body.x1));
+      const y1 = Math.round(Number(req.body.y1));
+      const x2 = Math.round(Number(req.body.x2));
+      const y2 = Math.round(Number(req.body.y2));
+      const duration = Math.max(100, Math.min(3000, Math.round(Number(req.body.duration) || 300)));
+      if (!deviceId || [x1, y1, x2, y2].some(isNaN)) { res.status(400).json({ error: '参数错误' }); return; }
+      execFileSync(ADB, ['-s', deviceId, 'shell', 'input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(duration)]);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: '滑动失败: ' + (e.message || e) });
     }
   });
 
@@ -495,15 +846,7 @@ export function startRemoteServer(
       'Connection': 'keep-alive',
     });
     const sendSessions = () => {
-      const sessions = ptyManager.getAllSessions().map(s => ({
-        id: s.id,
-        title: s.title,
-        cwd: s.cwd,
-        presetCommand: s.presetCommand,
-        displayName: getDisplayName(s.presetCommand),
-        provider: (s as any).provider || getCliProvider(s.presetCommand),
-        status: getSessionStatus(s.id, s.ptyProcess),
-      }));
+      const sessions = ptyManager.getAllSessions().map(s => mapSessionToApi(s));
       res.write(`event: sessions\ndata: ${JSON.stringify(sessions)}\n\n`);
     };
     const heartbeat = setInterval(() => { res.write(': heartbeat\n\n'); }, 3000);

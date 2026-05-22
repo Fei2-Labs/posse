@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('duocli', {
   renamePty: (id: string, title: string) =>
     ipcRenderer.send('pty:rename', id, title),
 
+  // 重新用 AI 生成标题
+  regenerateTitle: (id: string) =>
+    ipcRenderer.invoke('pty:regenerate-title', id),
+
   // 获取所有会话
   getSessions: () => ipcRenderer.invoke('pty:sessions'),
 
@@ -48,22 +52,10 @@ contextBridge.exposeInMainWorld('duocli', {
     ipcRenderer.on('pty:remote-created', (_e, info) => cb(info)),
 
   // 远程服务器连接信息
-  onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number }) => void) =>
+  onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } }) => void) =>
     ipcRenderer.on('remote:server-info', (_e, info) => cb(info)),
-
-  // 快照 API
-  snapshotCheckRepo: (cwd: string) => ipcRenderer.invoke('snapshot:check-repo', cwd),
-  snapshotCreate: (cwd: string, message?: string) => ipcRenderer.invoke('snapshot:create', cwd, message),
-  snapshotList: (cwd: string) => ipcRenderer.invoke('snapshot:list', cwd),
-  snapshotFiles: (cwd: string, commitId: string) => ipcRenderer.invoke('snapshot:files', cwd, commitId),
-  snapshotRollback: (cwd: string, commitId: string, files: string[]) => ipcRenderer.invoke('snapshot:rollback', cwd, commitId, files),
-  snapshotRollbackAll: (cwd: string, commitId: string) => ipcRenderer.invoke('snapshot:rollback-all', cwd, commitId),
-  snapshotFileDiff: (cwd: string, commitId: string, filePath: string) => ipcRenderer.invoke('snapshot:file-diff', cwd, commitId, filePath),
-  snapshotDiff: (cwd: string, commitId: string) => ipcRenderer.invoke('snapshot:diff', cwd, commitId),
-  snapshotRestoreTo: (cwd: string, commitId: string) => ipcRenderer.invoke('snapshot:restore-to', cwd, commitId),
-  snapshotSummarize: (cwd: string, commitId: string) => ipcRenderer.invoke('snapshot:summarize', cwd, commitId),
-  onSnapshotCreated: (cb: (commitId: string) => void) =>
-    ipcRenderer.on('snapshot:created', (_e, commitId) => cb(commitId)),
+  // 渲染进程主动获取远程服务器信息（解决竞态问题）
+  getRemoteServerInfo: () => ipcRenderer.invoke('remote:get-server-info'),
 
   // 剪贴板图片
   clipboardSaveImage: () => ipcRenderer.invoke('clipboard:save-image'),
@@ -92,29 +84,15 @@ contextBridge.exposeInMainWorld('duocli', {
   openUrl: (url: string) => ipcRenderer.invoke('shell:open-url', url),
 
   // AI 配置 API
-  aiScan: () => ipcRenderer.invoke('ai:scan'),
-  aiTestAll: () => ipcRenderer.invoke('ai:test-all'),
-  aiGetProviders: () => ipcRenderer.invoke('ai:get-providers'),
-  aiSelect: (providerId: string) => ipcRenderer.invoke('ai:select', providerId),
-  aiSetModel: (providerId: string, model: string) => ipcRenderer.invoke('ai:set-model', providerId, model),
-  aiGetSelected: () => ipcRenderer.invoke('ai:get-selected'),
+  aiApplyConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('ai:apply-config', config),
+  aiTestConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('ai:test-config', config),
+  aiGetCurrentConfig: () => ipcRenderer.invoke('ai:get-current-config'),
   // 获取 CLI 实际使用的模型提供商
   getCliProvider: (presetCommand: string) => ipcRenderer.invoke('cli:get-provider', presetCommand),
 
   // Claude 供应商配置
   claudeProvidersList: () => ipcRenderer.invoke('claude-providers:list'),
   claudeProvidersSave: (providers: any[]) => ipcRenderer.invoke('claude-providers:save', providers),
-
-  // 会话历史 API
-  sessionHistoryInit: (sessionId: string, title: string) => ipcRenderer.invoke('session-history:init', sessionId, title),
-  sessionHistoryAppend: (sessionId: string, data: string) => ipcRenderer.send('session-history:append', sessionId, data),
-  sessionHistoryFlush: (sessionId: string) => ipcRenderer.invoke('session-history:flush', sessionId),
-  sessionHistoryFinish: (sessionId: string) => ipcRenderer.invoke('session-history:finish', sessionId),
-  sessionHistoryRename: (sessionId: string, newTitle: string) => ipcRenderer.invoke('session-history:rename', sessionId, newTitle),
-  sessionHistoryList: () => ipcRenderer.invoke('session-history:list'),
-  sessionHistoryRead: (filename: string) => ipcRenderer.invoke('session-history:read', filename),
-  sessionHistoryDelete: (filename: string) => ipcRenderer.invoke('session-history:delete', filename),
-  sessionHistorySummarize: (filename: string) => ipcRenderer.invoke('session-history:summarize', filename),
 
   // 会话状态同步：renderer → main（供手机端读取）
   syncSessionStatus: (statuses: Record<string, string>) =>
@@ -127,4 +105,30 @@ contextBridge.exposeInMainWorld('duocli', {
     ipcRenderer.send('auto-continue:config-reply', sessionId, config),
   onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) =>
     ipcRenderer.on('auto-continue:set', (_e, sessionId, config) => cb(sessionId, config)),
+
+  // ========== Chat API ==========
+  chatCreate: (opts: { workspace: string; model?: string }) =>
+    ipcRenderer.invoke('chat:create', opts),
+  chatSend: (sessionId: string, content: string) =>
+    ipcRenderer.invoke('chat:send', sessionId, content),
+  chatList: () => ipcRenderer.invoke('chat:list'),
+  chatMessages: (sessionId: string) =>
+    ipcRenderer.invoke('chat:messages', sessionId),
+  chatDestroy: (sessionId: string) =>
+    ipcRenderer.invoke('chat:destroy', sessionId),
+  chatAbort: (sessionId: string) =>
+    ipcRenderer.invoke('chat:abort', sessionId),
+  chatRename: (sessionId: string, title: string) =>
+    ipcRenderer.invoke('chat:rename', sessionId, title),
+  chatHealth: () => ipcRenderer.invoke('chat:health'),
+  chatProxyStart: () => ipcRenderer.invoke('chat:proxy-start'),
+  chatModels: () => ipcRenderer.invoke('chat:models'),
+  onChatDelta: (cb: (sessionId: string, text: string) => void) =>
+    ipcRenderer.on('chat:delta', (_e, sessionId, text) => cb(sessionId, text)),
+  onChatDone: (cb: (sessionId: string, content: string) => void) =>
+    ipcRenderer.on('chat:done', (_e, sessionId, content) => cb(sessionId, content)),
+  onChatError: (cb: (sessionId: string, error: string) => void) =>
+    ipcRenderer.on('chat:error', (_e, sessionId, error) => cb(sessionId, error)),
+  onChatTitleUpdate: (cb: (sessionId: string, title: string) => void) =>
+    ipcRenderer.on('chat:title-update', (_e, sessionId, title) => cb(sessionId, title)),
 });

@@ -147,11 +147,6 @@ DUOCLI_IMESSAGE_TO="你的手机号或邮箱" npm start
   <img src="docs/images/mobile-claude-demo.jpg" alt="手机端 Claude Code 操作" width="350"/>
 </p>
 
-**历史与 Diff 对比**
-<p align="center">
-  <img src="docs/images/snapshot.png" alt="历史与 Diff" width="700"/>
-</p>
-
 **AI 配置自动扫描**
 <p align="center">
   <img src="docs/images/ai-config.png" alt="AI 配置" width="700"/>
@@ -184,7 +179,6 @@ npm run build:linux # Linux
 
 - macOS / Windows / Linux
 - Node.js >= 18
-- Git（历史功能需要）
 - Windows 需安装 [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（编译 node-pty）
 
 ### 全部功能
@@ -206,7 +200,7 @@ npm run build:linux # Linux
 - 创建多个独立终端，每个可指定预设命令（Claude、Codex、Gemini、Kimi 等）
 - 支持普通模式和全自动模式（Claude `--dangerously-skip-permissions`、Codex `--full-auto`、Gemini/Kimi `--yolo`）
 - 会话列表实时显示标题、最后活跃时间和工作目录
-- 会话置顶、归档/恢复、手动重命名、未读标记
+- 会话置顶、手动重命名、未读标记
 - 三色状态指示灯：🟡 工作中 → 🟢 等待输入 → ⚪ 已读，状态自动流转
 - 关闭应用时自动检测运行中的终端并弹出确认提示
 
@@ -227,12 +221,6 @@ npm run build:linux # Linux
 - 支持多种 AI 后端：Anthropic Claude、OpenAI、Google Gemini、DeepSeek、MiniMax、ZhipuAI、本地 Ollama
 - 自动扫描本机已有的 AI 工具配置，零配置即用
 
-#### Git 历史与回滚
-
-- 检测到 AI 输入时自动创建 Git 快照（独立孤儿分支 `_duocli_snapshots`，不污染项目历史）
-- 逐文件 diff 查看、撤销变更、时间机器还原
-- AI 自动生成快照变更总结
-
 #### 目录树与文件操作
 
 - 左侧目录树实时显示工作目录结构，支持展开/折叠
@@ -243,7 +231,6 @@ npm run build:linux # Linux
 #### 其他
 
 - 终端输出中的文件路径自动识别为可点击链接，点击用编辑器打开
-- 会话历史自动保存为 TXT，支持全文查看、复制和 AI 总结
 - 内置 6 套配色方案 + 自动配色：VS Code Dark、Monokai、Dracula、Solarized Dark、One Dark、Nord
 - 自定义 CLI 预设管理，保存常用的命令行组合
 - 终端尺寸智能自适应，窗口缩放、面板拖拽后自动重新计算行列数
@@ -408,11 +395,6 @@ DUOCLI_IMESSAGE_TO="your-phone-or-email" npm start
   <img src="docs/images/mobile-claude-demo.jpg" alt="Mobile Claude Code Demo" width="350"/>
 </p>
 
-**History & Diff**
-<p align="center">
-  <img src="docs/images/snapshot.png" alt="History and Diff" width="700"/>
-</p>
-
 **AI Configuration Auto-Scan**
 <p align="center">
   <img src="docs/images/ai-config.png" alt="AI Configuration" width="700"/>
@@ -445,7 +427,6 @@ npm run build:linux # Linux
 
 - macOS / Windows / Linux
 - Node.js >= 18
-- Git (required for history features)
 - Windows requires [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (for compiling node-pty)
 
 ### Full Features
@@ -467,7 +448,7 @@ npm run build:linux # Linux
 - Create multiple independent terminals, each with customizable preset commands (Claude, Codex, Gemini, Kimi, etc.)
 - Support for normal and fully automatic modes (Claude `--dangerously-skip-permissions`, Codex `--full-auto`, Gemini/Kimi `--yolo`)
 - Session list displays title, last active time, and working directory in real-time
-- Pin sessions, archive/restore, manual rename, unread indicators
+- Pin sessions, manual rename, unread indicators
 - Three-color status indicator: 🟡 Working → 🟢 Awaiting input → ⚪ Read, auto-transitions
 - Auto-detect running terminals and prompt for confirmation when closing the app
 
@@ -488,12 +469,6 @@ Keep your AI working non-stop. Configure a prompt message and DuoCLI will automa
 - Support for multiple AI backends: Anthropic Claude, OpenAI, Google Gemini, DeepSeek, MiniMax, ZhipuAI, local Ollama
 - Auto-scan existing AI tool configurations on your machine, zero-config ready to use
 
-#### Git History & Rollback
-
-- Auto-create Git snapshots when AI input detected (isolated orphan branch `_duocli_snapshots`, doesn't pollute project history)
-- Per-file diff viewing, undo changes, time machine restore
-- AI auto-generates snapshot change summaries
-
 #### File Tree & File Operations
 
 - Left sidebar file tree displays working directory structure in real-time, with expand/collapse
@@ -504,7 +479,6 @@ Keep your AI working non-stop. Configure a prompt message and DuoCLI will automa
 #### Others
 
 - File paths in terminal output automatically recognized as clickable links, open in editor on click
-- Session history auto-saved as TXT, supports full-text viewing, copying, and AI summarization
 - 6 built-in color schemes + auto-color: VS Code Dark, Monokai, Dracula, Solarized Dark, One Dark, Nord
 - Custom CLI preset management, save frequently used command combinations
 - Smart terminal resizing — auto-recalculates rows and columns after window resize or panel drag
@@ -548,7 +522,6 @@ src/
 │   ├── index.ts             # Entry, IPC registration, window creation | 入口，IPC 注册，窗口创建
 │   ├── pty-manager.ts       # node-pty terminal management | 终端管理
 │   ├── remote-server.ts     # Mobile sync service (Express + WebSocket) | 手机同步服务
-│   ├── snapshot-manager.ts  # Git snapshot engine | Git 快照引擎
 │   ├── ai-config.ts         # AI config auto-scan & management | AI 配置自动扫描
 │   └── ollama.ts            # AI calls (title generation / diff summary) | AI 调用
 ├── preload/

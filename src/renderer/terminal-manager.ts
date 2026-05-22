@@ -1,6 +1,5 @@
 import { Terminal, IBufferLine, ILinkProvider, ILink } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
 
 // 终端配色方案
 const THEMES: Record<string, any> = {
@@ -163,6 +162,9 @@ const SOURCE_EXTS = new Set([
   'txt', 'env', 'lock', 'config', 'nvue', 'wxml', 'wxss',
 ]);
 
+// URL 正则
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+
 // 文件路径链接检测器
 class FilePathLinkProvider implements ILinkProvider {
   private onClickCallback: (resolvedPath: string) => void;
@@ -176,35 +178,69 @@ class FilePathLinkProvider implements ILinkProvider {
   }
 
   provideLinks(y: number, callback: (links: ILink[] | undefined) => void): void {
-    const line = this.terminal.buffer.active.getLine(y - 1);
+    const buffer = this.terminal.buffer.active;
+    const line = buffer.getLine(y - 1);
     if (!line) { callback(undefined); return; }
 
-    // 读取行文本，跳过宽字符（中文等）后面的空 cell
-    // 同时记录 textIndex → cellIndex 映射，用于计算链接坐标
-    let text = '';
-    const textToCellStart: number[] = []; // textToCellStart[textIdx] = cellIdx
-    for (let i = 0; i < line.length; i++) {
-      const cell = line.getCell(i);
-      const chars = cell?.getChars() || '';
-      const width = cell?.getWidth() || 1;
-      if (chars.length > 0) {
-        for (let c = 0; c < chars.length; c++) {
-          textToCellStart.push(i);
-        }
-        text += chars;
-      } else if (width === 0) {
-        // 宽字符的第二个 cell，跳过
+    // 跳过续行（由起始行统一处理整个续行序列）
+    if (line.isWrapped) { callback(undefined); return; }
+
+    // 收集起始行及后续所有续行
+    const bufferLines: IBufferLine[] = [line];
+    let nextY = y;
+    while (true) {
+      const nextLine = buffer.getLine(nextY);
+      if (nextLine && nextLine.isWrapped) {
+        bufferLines.push(nextLine);
+        nextY++;
       } else {
-        textToCellStart.push(i);
-        text += ' ';
+        break;
+      }
+    }
+
+    // 拼接文本，记录每个字符对应的 buffer 行号和 cell 列号
+    let text = '';
+    const posLine: number[] = [];
+    const posCell: number[] = [];
+
+    for (let li = 0; li < bufferLines.length; li++) {
+      const bl = bufferLines[li];
+      const bufLineIdx = y - 1 + li;
+      for (let i = 0; i < bl.length; i++) {
+        const cell = bl.getCell(i);
+        const chars = cell?.getChars() || '';
+        const width = cell?.getWidth() || 1;
+        if (chars.length > 0) {
+          for (let c = 0; c < chars.length; c++) {
+            posLine.push(bufLineIdx);
+            posCell.push(i);
+          }
+          text += chars;
+        } else if (width === 0) {
+          // 宽字符后续 cell
+        } else {
+          posLine.push(bufLineIdx);
+          posCell.push(i);
+          text += ' ';
+        }
       }
     }
 
     const cwd = this.getCwd();
-    const matched: Array<{ filePath: string; display: string; index: number }> = [];
+    const matched: Array<{ filePath: string; display: string; index: number; length: number; isUrl: boolean }> = [];
 
-    // 1. 匹配带目录的路径
+    // 1. 匹配 URL
     let match: RegExpExecArray | null;
+    URL_RE.lastIndex = 0;
+    while ((match = URL_RE.exec(text)) !== null) {
+      let url = match[0].replace(/[.,;:!?)\]}>]+$/, '');
+      if (url.length < 8) continue;
+      const overlaps = matched.some(r => match!.index >= r.index && match!.index < r.index + r.length);
+      if (overlaps) continue;
+      matched.push({ filePath: url, display: url, index: match.index, length: url.length, isUrl: true });
+    }
+
+    // 2. 匹配带目录的路径
     PATH_RE.lastIndex = 0;
     while ((match = PATH_RE.exec(text)) !== null) {
       let fp = match[0];
@@ -215,42 +251,57 @@ class FilePathLinkProvider implements ILinkProvider {
       const ext = fp.split('.').pop()?.toLowerCase() || '';
       const isDir = fp.endsWith('/');
       if (!isDir && !fp.startsWith('/') && !SOURCE_EXTS.has(ext)) continue;
-      matched.push({ filePath: fp, display: fp, index: match.index });
+      const overlaps = matched.some(r => match!.index >= r.index && match!.index < r.index + r.length);
+      if (overlaps) continue;
+      matched.push({ filePath: fp, display: fp, index: match.index, length: fp.length, isUrl: false });
     }
 
-    // 2. 匹配单文件名
+    // 3. 匹配单文件名
     SINGLE_FILE_RE.lastIndex = 0;
     while ((match = SINGLE_FILE_RE.exec(text)) !== null) {
       const fp = match[0];
-      const overlaps = matched.some(r => match!.index >= r.index && match!.index < r.index + r.display.length);
+      const overlaps = matched.some(r => match!.index >= r.index && match!.index < r.index + r.length);
       if (overlaps) continue;
-      matched.push({ filePath: fp, display: fp, index: match.index });
+      matched.push({ filePath: fp, display: fp, index: match.index, length: fp.length, isUrl: false });
     }
 
-    // 解析路径并生成链接
+    // 生成链接
     const links: ILink[] = [];
     for (const m of matched) {
-      let resolved = m.filePath;
-      if (resolved.startsWith('/')) {
-        // 绝对路径
-      } else if (resolved.startsWith('@/') || resolved.startsWith('@')) {
-        resolved = cwd + '/' + resolved.replace(/^@\/?/, '');
-      } else if (resolved.startsWith('./')) {
-        resolved = cwd + '/' + resolved.replace(/^\.\//, '');
-      } else {
-        resolved = cwd + '/' + resolved;
-      }
-      if (resolved.endsWith('/')) resolved = resolved.slice(0, -1);
+      const si = m.index;
+      const ei = m.index + m.length - 1;
+      if (si >= posLine.length || ei >= posLine.length) continue;
 
-      // 用 textToCellStart 映射把 text index 转换为 cell index
-      const cellStart = (textToCellStart[m.index] ?? m.index) + 1;
-      const endTextIdx = m.index + m.display.length - 1;
-      const cellEnd = (textToCellStart[endTextIdx] ?? endTextIdx) + 1;
-      links.push({
-        range: { start: { x: cellStart, y }, end: { x: cellEnd, y } },
-        text: m.display,
-        activate: () => { this.onClickCallback(resolved); },
-      });
+      if (m.isUrl) {
+        links.push({
+          range: {
+            start: { x: posCell[si] + 1, y: posLine[si] + 1 },
+            end: { x: posCell[ei] + 1, y: posLine[ei] + 1 },
+          },
+          text: m.display,
+          activate: () => { (window as any).duocli?.openUrl?.(m.filePath); },
+        });
+      } else {
+        let resolved = m.filePath;
+        if (resolved.startsWith('/')) {
+          // 绝对路径
+        } else if (resolved.startsWith('@/') || resolved.startsWith('@')) {
+          resolved = cwd + '/' + resolved.replace(/^@\/?/, '');
+        } else if (resolved.startsWith('./')) {
+          resolved = cwd + '/' + resolved.replace(/^\.\//, '');
+        } else {
+          resolved = cwd + '/' + resolved;
+        }
+        if (resolved.endsWith('/')) resolved = resolved.slice(0, -1);
+        links.push({
+          range: {
+            start: { x: posCell[si] + 1, y: posLine[si] + 1 },
+            end: { x: posCell[ei] + 1, y: posLine[ei] + 1 },
+          },
+          text: m.display,
+          activate: () => { this.onClickCallback(resolved); },
+        });
+      }
     }
     callback(links.length > 0 ? links : undefined);
   }
@@ -294,6 +345,7 @@ interface TermInstance {
   fitAddon: FitAddon;
   container: HTMLDivElement;
   themeId: string;
+  pendingInputScroll: boolean;
 }
 
 export class TerminalManager {
@@ -345,7 +397,6 @@ export class TerminalManager {
     this.terminalArea.appendChild(container);
 
     terminal.open(container);
-    terminal.loadAddon(new WebLinksAddon());
     terminal.onData((data) => onData(data));
 
     // 注册文件路径链接检测
@@ -435,28 +486,24 @@ export class TerminalManager {
     const viewport = terminal.element?.querySelector('.xterm-viewport') as HTMLElement | null;
     viewport?.addEventListener('wheel', (e: WheelEvent) => {
       if (e.deltaY <= 0) return;
-      const buf = terminal.buffer.active;
-      const distanceToBottom = buf.baseY - buf.viewportY;
-      if (distanceToBottom <= 12) {
-        requestAnimationFrame(() => {
+      const snapIfNearBottom = () => {
+        const buf = terminal.buffer.active;
+        const distanceToBottom = buf.baseY - buf.viewportY;
+        if (distanceToBottom <= 18) {
           terminal.scrollToBottom();
           scrollBtn.style.display = 'none';
-        });
-      }
+        }
+      };
+      snapIfNearBottom();
+      requestAnimationFrame(() => requestAnimationFrame(snapIfNearBottom));
     }, { passive: true });
 
-    this.instances.set(id, { id, terminal, fitAddon, container, themeId });
+    this.instances.set(id, { id, terminal, fitAddon, container, themeId, pendingInputScroll: false });
     this.switchTo(id);
 
-    // 创建终端后确保滚动到正确位置
+    // 创建终端后默认停在底部，避免交互式 CLI 初始化输出后停在历史顶部。
     setTimeout(() => {
-      // 强制重置 viewport 滚动位置
-      const viewportEl = terminal.element?.querySelector('.xterm-viewport') as HTMLElement | null;
-      if (viewportEl) {
-        viewportEl.scrollTop = 0;
-      }
-      // 确保 buffer 视图在顶部
-      terminal.scrollToTop();
+      terminal.scrollToBottom();
     }, 100);
   }
 
@@ -472,55 +519,20 @@ export class TerminalManager {
     this.activeId = id;
     // 延迟fit确保DOM更新
     setTimeout(() => {
-      target.fitAddon.fit();
-      if (this.onResize) {
-        const { cols, rows } = target.terminal;
-        this.onResize(target.id, cols, rows);
-      }
-      target.terminal.focus();
-      // 切换终端后重新计算滚动位置
-      this.recalcScroll(target.id);
+      // 50ms 内用户可能已关闭这个终端 → instance 不在 map 里也不在 DOM 里
+      // 直接 fit 会抛 "ITerminalDimensions" 异常，再用 cols/rows 也是 0
+      const stillActive = this.instances.get(id);
+      if (!stillActive || stillActive !== target) return;
+      try {
+        target.fitAddon.fit();
+        if (this.onResize) {
+          const { cols, rows } = target.terminal;
+          if (cols > 0 && rows > 0) this.onResize(target.id, cols, rows);
+        }
+        target.terminal.focus();
+        target.terminal.scrollToBottom();
+      } catch {}
     }, 50);
-  }
-
-  // 重新计算并修正滚动位置
-  private recalcScroll(id: string): void {
-    const inst = this.instances.get(id);
-    if (!inst) return;
-    const { terminal } = inst;
-    // 强制重置 viewport 滚动
-    const viewportEl = terminal.element?.querySelector('.xterm-viewport') as HTMLElement | null;
-    if (viewportEl) {
-      // 检查是否应该滚动到底部（当 buffer 内容很少时）
-      const buf = terminal.buffer.active;
-      const hasEnoughContent = buf.baseY > 0;
-      if (!hasEnoughContent) {
-        // 内容很少，滚动到顶部
-        viewportEl.scrollTop = 0;
-        terminal.scrollToTop();
-      } else {
-        // 内容很多，确保滚动到底部
-        requestAnimationFrame(() => {
-          terminal.scrollToBottom();
-        });
-      }
-    }
-  }
-
-  // 隐藏终端（归档用，不销毁）
-  hide(id: string): void {
-    const inst = this.instances.get(id);
-    if (!inst) return;
-    inst.container.classList.remove('active');
-    if (this.activeId === id) {
-      // 切换到其他可见终端
-      const remaining = Array.from(this.instances.keys()).filter(k => k !== id);
-      if (remaining.length > 0) {
-        this.switchTo(remaining[remaining.length - 1]);
-      } else {
-        this.activeId = null;
-      }
-    }
   }
 
   write(id: string, data: string): void {
@@ -530,8 +542,18 @@ export class TerminalManager {
     const buf = inst.terminal.buffer.active;
     const nearBottom = buf.baseY - buf.viewportY <= 3;
     inst.terminal.write(data, () => {
-      if (nearBottom) inst.terminal.scrollToBottom();
+      if (nearBottom || inst.pendingInputScroll) {
+        inst.terminal.scrollToBottom();
+        inst.pendingInputScroll = false;
+      }
     });
+  }
+
+  notifyInput(id: string): void {
+    const inst = this.instances.get(id);
+    if (!inst) return;
+    inst.pendingInputScroll = true;
+    inst.terminal.scrollToBottom();
   }
 
   destroy(id: string): string | null {

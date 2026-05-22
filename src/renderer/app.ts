@@ -1,20 +1,7 @@
 import { TerminalManager } from './terminal-manager';
+import { ChatView } from './chat-view';
 
-interface AIProviderInfo {
-  id: string;
-  name: string;
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  availableModels: string[];
-  source: string;
-  apiFormat: 'anthropic' | 'openai' | 'gemini' | 'ollama';
-  status: 'pending' | 'ok' | 'fail';
-  errorMsg?: string;
-}
-
-let selectedAiProviderId: string | null = null;
-let remoteServerInfo: { lanUrl: string; token: string; port: number } | null = null;
+let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null = null;
 
 declare global {
   interface Window {
@@ -25,6 +12,7 @@ declare global {
       resizePty: (id: string, cols: number, rows: number) => void;
       destroyPty: (id: string) => void;
       renamePty: (id: string, title: string) => void;
+      regenerateTitle: (id: string) => Promise<void>;
       getSessions: () => Promise<Array<{ id: string; title: string; themeId: string; cwd: string; displayName: string }>>;
       selectFolder: (currentPath?: string) => Promise<string | null>;
       fileTreeListDir: (dirPath: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>;
@@ -33,19 +21,8 @@ declare global {
       onTitleUpdate: (cb: (id: string, title: string) => void) => void;
       onPtyExit: (cb: (id: string) => void) => void;
       onRemoteCreated: (cb: (sessionInfo: { id: string; title: string; themeId: string; cwd: string; displayName: string }) => void) => void;
-      onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number }) => void) => void;
-      // 快照 API
-      snapshotCheckRepo: (cwd: string) => Promise<boolean>;
-      snapshotCreate: (cwd: string, message?: string) => Promise<string | null>;
-      snapshotList: (cwd: string) => Promise<Array<{ id: string; message: string; timestamp: number; fileCount: number }>>;
-      snapshotFiles: (cwd: string, commitId: string) => Promise<Array<{ path: string; status: string }>>;
-      snapshotRollback: (cwd: string, commitId: string, files: string[]) => Promise<void>;
-      snapshotRollbackAll: (cwd: string, commitId: string) => Promise<{ total: number; changed: number; unchanged: number }>;
-      snapshotRestoreTo: (cwd: string, commitId: string) => Promise<{ total: number; changed: number; unchanged: number; deleted: number; backupCommitId: string | null }>;
-      snapshotFileDiff: (cwd: string, commitId: string, filePath: string) => Promise<string>;
-      snapshotDiff: (cwd: string, commitId: string) => Promise<string>;
-      snapshotSummarize: (cwd: string, commitId: string) => Promise<string>;
-      onSnapshotCreated: (cb: (commitId: string) => void) => void;
+      onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } }) => void) => void;
+      getRemoteServerInfo: () => Promise<{ lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null>;
       clipboardSaveImage: () => Promise<string | null>;
       clipboardGetFilePath: () => Promise<string | null>;
       // 文件监听 API
@@ -58,26 +35,13 @@ declare global {
       openUrl: (url: string) => Promise<void>;
       onFileChange: (cb: (filename: string, eventType: string) => void) => void;
       // AI 配置 API
-      aiScan: () => Promise<AIProviderInfo[]>;
-      aiTestAll: () => Promise<AIProviderInfo[]>;
-      aiGetProviders: () => Promise<AIProviderInfo[]>;
-      aiSelect: (providerId: string) => Promise<boolean>;
-      aiSetModel: (providerId: string, model: string) => Promise<boolean>;
-      aiGetSelected: () => Promise<{ providerId: string | null; model: string | null }>;
+      aiApplyConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => Promise<boolean>;
+      aiTestConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => Promise<{ ok: boolean; error?: string; response?: string }>;
+      aiGetCurrentConfig: () => Promise<{ apiFormat: string; baseUrl: string; apiKey: string; model: string; providerId: string | null } | null>;
       getCliProvider: (presetCommand: string) => Promise<string | null>;
       // Claude 供应商配置
       claudeProvidersList: () => Promise<Array<{ id: string; name: string; baseUrl: string; apiKey: string; model?: string }>>;
       claudeProvidersSave: (providers: Array<{ id: string; name: string; baseUrl: string; apiKey: string; model?: string }>) => Promise<boolean>;
-      // 会话历史 API
-      sessionHistoryInit: (sessionId: string, title: string) => Promise<string>;
-      sessionHistoryAppend: (sessionId: string, data: string) => void;
-      sessionHistoryFlush: (sessionId: string) => Promise<void>;
-      sessionHistoryFinish: (sessionId: string) => Promise<void>;
-      sessionHistoryRename: (sessionId: string, newTitle: string) => Promise<void>;
-      sessionHistoryList: () => Promise<Array<{ filename: string; size: number; mtime: number }>>;
-      sessionHistoryRead: (filename: string) => Promise<string>;
-      sessionHistoryDelete: (filename: string) => Promise<void>;
-      sessionHistorySummarize: (filename: string) => Promise<string>;
       // 文件操作
       openFile: (filePath: string) => Promise<void>;
       readDirectory: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean; isFile: boolean }>>;
@@ -87,6 +51,20 @@ declare global {
       onGetAutoContinueConfig: (cb: (sessionId: string) => void) => void;
       sendAutoContinueConfig: (sessionId: string, config: any) => void;
       onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) => void;
+      // Chat API
+      chatCreate: (opts: { workspace: string; model?: string }) => Promise<{ id: string; title: string; model: string; workspace: string; createdAt: number } | null>;
+      chatSend: (sessionId: string, content: string) => Promise<void>;
+      chatList: () => Promise<Array<{ id: string; title: string; model: string; workspace: string; createdAt: number; messageCount: number }>>;
+      chatMessages: (sessionId: string) => Promise<Array<{ role: string; content: string; timestamp: number }>>;
+      chatDestroy: (sessionId: string) => Promise<boolean>;
+      chatAbort: (sessionId: string) => Promise<boolean>;
+      chatRename: (sessionId: string, title: string) => Promise<boolean>;
+      chatHealth: () => Promise<{ ok: boolean; error?: string }>;
+      chatModels: () => Promise<Array<{ id: string; credits: string }>>;
+      onChatDelta: (cb: (sessionId: string, text: string) => void) => void;
+      onChatDone: (cb: (sessionId: string, content: string) => void) => void;
+      onChatError: (cb: (sessionId: string, error: string) => void) => void;
+      onChatTitleUpdate: (cb: (sessionId: string, title: string) => void) => void;
     };
   }
 }
@@ -98,6 +76,7 @@ let lastPreset = localStorage.getItem('duocli_preset') || '';
 const sessionTitles: Map<string, string> = new Map();
 const sessionThemes: Map<string, string> = new Map();
 const sessionUpdateTimes: Map<string, number> = new Map();
+const sessionCreateTimes: Map<string, number> = new Map();
 // 会话工作目录
 const sessionCwds: Map<string, string> = new Map();
 // 会话显示名称（如 Claude全自动、Codex 等）
@@ -107,30 +86,48 @@ const sessionProviders: Map<string, string> = new Map();
 // 每个会话使用的自定义供应商 ID（用于切换终端时恢复选择）
 const sessionClaudeProviderIds: Map<string, string> = new Map();
 
+// ========== Chat 会话状态 ==========
+const chatViews: Map<string, ChatView> = new Map();
+const chatSessionTitles: Map<string, string> = new Map(); // chat session id → title
+const chatSessionCreateTimes: Map<string, number> = new Map();
+let activeChatId: string | null = null;
+
 // 自动继续配置
-const sessionAutoContinue: Map<string, { enabled: boolean; message: string; intervalMs: number; lastSendTime: number; autoAgree: boolean; autoAgreeDelaySec: number; sendDelaySec: number }> = new Map();
-const AUTO_CONTINUE_DEFAULT_MESSAGE = '继续';
+const sessionAutoContinue: Map<string, { enabled: boolean; messages: string[]; intervalMs: number; commandIntervalMs: number; lastSendTime: number; autoAgree: boolean; autoAgreeDelaySec: number; sendDelaySec: number; maxDurationMs: number; enabledAt: number }> = new Map();
+const AUTO_CONTINUE_DEFAULT_MESSAGES = ['继续'];
 const AUTO_CONTINUE_DEFAULT_INTERVAL = 10 * 60 * 1000; // 10 分钟
+const AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL = 2000; // 命令间隔 2 秒
 const AUTO_AGREE_DEFAULT_DELAY_SEC = 5; // 自动同意默认延后 5 秒
 const AUTO_CONTINUE_SEND_DELAY_SEC = 2; // 发送回车前默认延迟 2 秒
+const AUTO_CONTINUE_DEFAULT_MAX_DURATION = 0; // 0 表示不限制
 const AUTO_CONTINUE_STORAGE_KEY = 'duocli_auto_continue';
 
 function hasSessionInUI(sessionId: string): boolean {
-  return sessionTitles.has(sessionId) || archivedSessions.has(sessionId);
+  return sessionTitles.has(sessionId);
+}
+
+function getSessionCreateTime(id: string): number {
+  const exists = sessionCreateTimes.get(id);
+  if (exists != null) return exists;
+  const fallback = sessionUpdateTimes.get(id) || Date.now();
+  sessionCreateTimes.set(id, fallback);
+  return fallback;
 }
 
 // 持久化催工配置到 localStorage
 function saveAutoContinueToStorage(): void {
   const data: Record<string, any> = {};
   sessionAutoContinue.forEach((config, sessionId) => {
-    // lastSendTime 是运行时状态，不持久化
+    // lastSendTime / enabledAt 是运行时状态，不持久化
     data[sessionId] = {
       enabled: config.enabled,
-      message: config.message,
+      messages: config.messages,
       intervalMs: config.intervalMs,
+      commandIntervalMs: config.commandIntervalMs,
       autoAgree: config.autoAgree,
       autoAgreeDelaySec: config.autoAgreeDelaySec,
       sendDelaySec: config.sendDelaySec,
+      maxDurationMs: config.maxDurationMs,
     };
   });
   localStorage.setItem(AUTO_CONTINUE_STORAGE_KEY, JSON.stringify(data));
@@ -143,14 +140,21 @@ function loadAutoContinueFromStorage(): void {
     if (!raw) return;
     const data = JSON.parse(raw) as Record<string, any>;
     for (const [sessionId, config] of Object.entries(data)) {
+      // 兼容旧版 message → messages 迁移
+      const msgs = Array.isArray(config.messages)
+        ? config.messages
+        : (config.message ? [config.message] : [...AUTO_CONTINUE_DEFAULT_MESSAGES]);
       sessionAutoContinue.set(sessionId, {
         enabled: config.enabled ?? false,
-        message: config.message ?? AUTO_CONTINUE_DEFAULT_MESSAGE,
+        messages: msgs,
         intervalMs: config.intervalMs ?? AUTO_CONTINUE_DEFAULT_INTERVAL,
+        commandIntervalMs: config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
         lastSendTime: Date.now(),
         autoAgree: config.autoAgree ?? true,
         autoAgreeDelaySec: config.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC,
         sendDelaySec: config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC,
+        maxDurationMs: config.maxDurationMs ?? AUTO_CONTINUE_DEFAULT_MAX_DURATION,
+        enabledAt: Date.now(),
       });
     }
   } catch {}
@@ -158,9 +162,10 @@ function loadAutoContinueFromStorage(): void {
 
 // 启动时恢复催工配置并启动定时器
 loadAutoContinueFromStorage();
-// 冷启动时先清理历史会话残留，避免旧 term-id 误命中新会话
-sessionAutoContinue.clear();
-saveAutoContinueToStorage();
+// 旧逻辑会无条件清空磁盘配置，导致用户的催工设置永远丢失。
+// 现状：冷启动时 sessionTitles 为空 → loadAutoContinueFromStorage 写入的旧 session-id 配置
+// 不会命中任何当前会话，定时器自然 no-op；当 onRemoteCreated/createPty 创建新会话时
+// 会通过 onSetAutoContinueConfig 同步推送新配置覆盖旧条目。
 // 检查是否有启用的配置，如果有则启动定时器
 const hasEnabledConfig = Array.from(sessionAutoContinue.values()).some(c => c.enabled);
 if (hasEnabledConfig) initAutoContinueTimer();
@@ -170,6 +175,7 @@ let autoContinueTimer: ReturnType<typeof setInterval> | null = null;
 
 // 写入 PTY 并重置自动继续计时器
 function writePtyWithAutoReset(id: string, data: string): void {
+  termManager.notifyInput(id);
   window.duocli.writePty(id, data);
   // 重置该会话的自动继续计时器
   const config = sessionAutoContinue.get(id);
@@ -192,44 +198,51 @@ function initAutoContinueTimer(): void {
         staleSessionIds.push(sessionId);
         return;
       }
+      // 检查最大持续时间，超时自动关闭催工
+      if (config.maxDurationMs > 0 && config.enabledAt > 0 && (now - config.enabledAt >= config.maxDurationMs)) {
+        console.log(`[循环] 会话 ${sessionId} 已达最大持续时间 ${config.maxDurationMs}ms，自动关闭催工`);
+        config.enabled = false;
+        saveAutoContinueToStorage();
+        renderSessionList();
+        return;
+      }
       // 检查是否超时
       if (now - config.lastSendTime >= config.intervalMs) {
-        // 发送自动继续消息
-        const message = config.message || AUTO_CONTINUE_DEFAULT_MESSAGE;
+        const messages = config.messages || AUTO_CONTINUE_DEFAULT_MESSAGES;
+        const cmdInterval = config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL;
         const sendDelay = (config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC) * 1000;
-        console.log(`[AutoContinue] 准备发送消息到会话 ${sessionId}（回车延迟 ${sendDelay}ms）`);
-        window.duocli.writePty(sessionId, message);
-        // 延迟发送回车，避免长文本未写入完成就提交
-        // 发送多种换行符组合，最大化兼容性
-        setTimeout(() => {
-          // 尝试多种换行符组合，最大化兼容性
-          // 1. \r (CR, 0x0D) - 经典 Unix Enter
-          // 2. \n (LF, 0x0A) - 另一种换行
-          // 3. \r\n (CRLF) - Windows/网络标准
-          // 4. Ctrl+M (0x0D) - 和 \r 相同但明确
-          // 5. Ctrl+J (0x0A) - 和 \n 相同但明确
-          // 6. Alt+Enter 变体 - 某些终端有效
-          const enterKeys = [
-            '\r',           // CR - 经典 Enter
-            '\n',           // LF
-            '\r\n',         // CRLF
-            '\x0d',         // CR 十六进制
-            '\x0a',         // LF 十六进制
-            '\x1b\n',       // Alt+Enter
-            '\x1b\r',       // Alt+Enter 变体
-          ];
-          let idx = 0;
-          const sendNext = () => {
-            if (idx < enterKeys.length) {
-              window.duocli.writePty(sessionId, enterKeys[idx]);
-              idx++;
-              setTimeout(sendNext, 15);
-            } else {
-              console.log(`[AutoContinue] 已发送 ${enterKeys.length} 种回车`);
-            }
-          };
-          sendNext();
-        }, sendDelay);
+        console.log(`[循环] 准备发送 ${messages.length} 条命令到会话 ${sessionId}`);
+
+        // 依次发送每条命令，命令之间有间隔
+        let cmdIdx = 0;
+        const sendNextCommand = () => {
+          if (cmdIdx >= messages.length) {
+            console.log(`[循环] 已发送全部 ${messages.length} 条命令`);
+            return;
+          }
+          const msg = messages[cmdIdx];
+          cmdIdx++;
+          window.duocli.writePty(sessionId, msg);
+          // 延迟发送回车
+          setTimeout(() => {
+            const enterKeys = [
+              '\r', '\n', '\r\n', '\x0d', '\x0a', '\x1b\n', '\x1b\r',
+            ];
+            let ei = 0;
+            const sendNextEnter = () => {
+              if (ei < enterKeys.length) {
+                window.duocli.writePty(sessionId, enterKeys[ei]);
+                ei++;
+                setTimeout(sendNextEnter, 15);
+              } else {
+                // 这条命令回车完成，发送下一条命令
+                setTimeout(sendNextCommand, cmdInterval);
+              }
+            };
+            sendNextEnter();
+          }, sendDelay);
+        };
+        sendNextCommand();
         config.lastSendTime = now;
       }
     });
@@ -247,17 +260,23 @@ function toggleAutoContinue(sessionId: string, enabled: boolean): void {
   if (!config) {
     config = {
       enabled: false,
-      message: AUTO_CONTINUE_DEFAULT_MESSAGE,
+      messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
       intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
+      commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
       lastSendTime: Date.now(),
       autoAgree: true,
       autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
       sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
+      maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
+      enabledAt: 0,
     };
     sessionAutoContinue.set(sessionId, config);
   }
   config.enabled = enabled;
   config.lastSendTime = Date.now();
+  if (enabled) {
+    config.enabledAt = Date.now();
+  }
   saveAutoContinueToStorage();
 
   // 启动定时器（如果尚未启动）
@@ -271,39 +290,50 @@ function toggleAutoContinue(sessionId: string, enabled: boolean): void {
 function showAutoContinueConfigDialog(sessionId: string): void {
   const config = sessionAutoContinue.get(sessionId) || {
     enabled: false,
-    message: AUTO_CONTINUE_DEFAULT_MESSAGE,
+    messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
     intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
+    commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
     lastSendTime: Date.now(),
     autoAgree: true,
     autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
     sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
+    maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
+    enabledAt: 0,
   };
 
-  const currentMessage = config.message || AUTO_CONTINUE_DEFAULT_MESSAGE;
+  const currentMessages = config.messages || AUTO_CONTINUE_DEFAULT_MESSAGES;
   const currentInterval = config.intervalMs || AUTO_CONTINUE_DEFAULT_INTERVAL;
   const currentIntervalMinutes = Math.round(currentInterval / 60000);
+  const currentCommandInterval = Math.round((config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL) / 1000);
   const currentAutoAgree = config.autoAgree ?? true;
   const currentAutoAgreeDelay = config.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC;
   const currentSendDelay = config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC;
+  const currentMaxDuration = config.maxDurationMs ?? AUTO_CONTINUE_DEFAULT_MAX_DURATION;
+  const currentMaxDurationMinutes = currentMaxDuration > 0 ? Math.round(currentMaxDuration / 60000) : 0;
 
   const overlay = document.getElementById('auto-continue-overlay')!;
   const messageInput = document.getElementById('auto-continue-message') as HTMLTextAreaElement;
   const intervalInput = document.getElementById('auto-continue-interval') as HTMLInputElement;
+  const commandIntervalInput = document.getElementById('auto-continue-command-interval') as HTMLInputElement;
   const autoAgreeCheckbox = document.getElementById('auto-continue-auto-agree') as HTMLInputElement;
   const autoAgreeDelayInput = document.getElementById('auto-continue-agree-delay') as HTMLInputElement;
   const autoAgreeDelayRow = document.getElementById('auto-agree-delay-row')!;
   const sendDelayInput = document.getElementById('auto-continue-send-delay') as HTMLInputElement;
+  const maxDurationInput = document.getElementById('auto-continue-max-duration') as HTMLInputElement;
   const saveBtn = document.getElementById('auto-continue-save')!;
   const stopBtn = document.getElementById('auto-continue-stop')!;
   const cancelBtn = document.getElementById('auto-continue-cancel')!;
   const closeBtn = document.getElementById('auto-continue-dialog-close')!;
 
-  messageInput.value = currentMessage;
+  messageInput.value = currentMessages.join('\n');
+  messageInput.placeholder = '每行一条命令，按顺序发送';
   intervalInput.value = String(currentIntervalMinutes);
+  if (commandIntervalInput) commandIntervalInput.value = String(currentCommandInterval);
   autoAgreeCheckbox.checked = currentAutoAgree;
   autoAgreeDelayInput.value = String(currentAutoAgreeDelay);
   autoAgreeDelayRow.style.display = currentAutoAgree ? '' : 'none';
   sendDelayInput.value = String(currentSendDelay);
+  maxDurationInput.value = String(currentMaxDurationMinutes);
 
   // 根据当前状态设置按钮文字和显示
   if (config.enabled) {
@@ -331,8 +361,8 @@ function showAutoContinueConfigDialog(sessionId: string): void {
   }
 
   function onSave(): void {
-    const message = messageInput.value.trim();
-    if (!message) { messageInput.focus(); return; }
+    const messages = messageInput.value.split('\n').map(m => m.trim()).filter(Boolean);
+    if (!messages.length) { messageInput.focus(); return; }
     const intervalMinutes = parseInt(intervalInput.value, 10);
     if (isNaN(intervalMinutes) || intervalMinutes < 1) { intervalInput.focus(); return; }
 
@@ -342,16 +372,25 @@ function showAutoContinueConfigDialog(sessionId: string): void {
     const sendDelay = parseInt(sendDelayInput.value, 10);
     if (isNaN(sendDelay) || sendDelay < 0) { sendDelayInput.focus(); return; }
 
-    config.message = message;
+    const maxDurationMinutes = parseInt(maxDurationInput.value, 10);
+    if (isNaN(maxDurationMinutes) || maxDurationMinutes < 0) { maxDurationInput.focus(); return; }
+
+    config.messages = messages;
     config.intervalMs = intervalMinutes * 60000;
+    if (commandIntervalInput) {
+      const cmdIntervalSec = parseInt(commandIntervalInput.value, 10);
+      config.commandIntervalMs = isNaN(cmdIntervalSec) || cmdIntervalSec < 0 ? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL : cmdIntervalSec * 1000;
+    }
     config.lastSendTime = Date.now();
     config.autoAgree = autoAgreeCheckbox.checked;
     config.autoAgreeDelaySec = isNaN(agreeDelay) ? AUTO_AGREE_DEFAULT_DELAY_SEC : agreeDelay;
     config.sendDelaySec = sendDelay;
+    config.maxDurationMs = maxDurationMinutes > 0 ? maxDurationMinutes * 60000 : 0;
     sessionAutoContinue.set(sessionId, config);
 
     if (!config.enabled) {
       config.enabled = true;
+      config.enabledAt = Date.now();
       initAutoContinueTimer();
     }
 
@@ -376,8 +415,6 @@ function showAutoContinueConfigDialog(sessionId: string): void {
   closeBtn.addEventListener('click', close);
 }
 
-// 归档：终端进程仍在运行，只是从活跃列表隐藏
-const archivedSessions: Map<string, { title: string; themeId: string; updateTime: number; cwd: string; displayName: string }> = new Map();
 // 当前正在编辑标题的会话 ID
 let editingTitleId: string | null = null;
 
@@ -397,7 +434,10 @@ interface FileTreeItem {
 }
 
 const CUSTOM_PRESETS_KEY = 'duocli_custom_presets';
+const PRESET_SYNC_INTERVAL_MS = 30 * 1000;
 let customPresetNextId = 1;
+let presetSyncInFlight = false;
+let presetSyncTimer: ReturnType<typeof setInterval> | null = null;
 
 function getCustomPresets(): CustomPreset[] {
   try { return JSON.parse(localStorage.getItem(CUSTOM_PRESETS_KEY) || '[]'); } catch { return []; }
@@ -405,21 +445,103 @@ function getCustomPresets(): CustomPreset[] {
 
 function saveCustomPresets(list: CustomPreset[]): void {
   localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list));
+  // 同步到远程服务器，供手机端读取
+  syncPresetsToServer(list);
+}
+
+async function syncPresetsToServer(list: CustomPreset[]): Promise<void> {
+  if (!remoteServerInfo) {
+    console.log('[Preset Sync] Remote server not ready, skipping sync');
+    return;
+  }
+  
+  console.log('[Preset Sync] Syncing presets to server:', list.length, 'items');
+  
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${remoteServerInfo.port}/api/custom-presets`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${remoteServerInfo.token}` },
+        body: JSON.stringify(list),
+      });
+      
+      if (response.ok) {
+        console.log('[Preset Sync] Successfully synced presets to server');
+        return;
+      } else {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    } catch (error) {
+      retries--;
+      console.warn(`[Preset Sync] Failed to sync presets (${3 - retries}/3):`, error);
+      
+      if (retries > 0) {
+        // 等待 1 秒后重试
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+  
+  console.error('[Preset Sync] Failed to sync presets after 3 attempts');
+}
+
+async function pullPresetsFromServer(): Promise<CustomPreset[] | null> {
+  if (!remoteServerInfo) return null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${remoteServerInfo.port}/api/custom-presets`, {
+      headers: { 'Authorization': `Bearer ${remoteServerInfo.token}` },
+    });
+    if (res.ok) return await res.json();
+  } catch { /* ignore */ }
+  return null;
+}
+
+function arePresetListsEqual(a: CustomPreset[], b: CustomPreset[]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+async function reconcilePresetsWithServer(reason: string): Promise<void> {
+  if (!remoteServerInfo || presetSyncInFlight) return;
+  presetSyncInFlight = true;
+  try {
+    const localPresets = getCustomPresets();
+    const serverPresets = await pullPresetsFromServer();
+    if (!serverPresets) return;
+
+    const merged = new Map<string, CustomPreset>();
+    for (const p of localPresets) merged.set(p.id, p);
+    for (const p of serverPresets) merged.set(p.id, p);
+    const list = Array.from(merged.values());
+
+    if (!arePresetListsEqual(localPresets, list)) {
+      console.log('[Preset Sync] Updating local presets from server:', reason);
+      localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(list));
+      renderPresetSelect();
+    }
+
+    if (!arePresetListsEqual(serverPresets, list)) {
+      console.log('[Preset Sync] Updating server presets from local:', reason);
+      await syncPresetsToServer(list);
+    }
+  } finally {
+    presetSyncInFlight = false;
+  }
+}
+
+function startPresetSyncTimer(): void {
+  if (presetSyncTimer) return;
+  presetSyncTimer = setInterval(() => {
+    void reconcilePresetsWithServer('timer');
+  }, PRESET_SYNC_INTERVAL_MS);
 }
 
 // 内置 option 的 HTML（从 index.html 中提取，作为 renderPresetSelect 的基础）
 const BUILTIN_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '空终端' },
-  { value: 'claude', label: 'Claude' },
   { value: 'claude --dangerously-skip-permissions', label: 'Claude (全自动)' },
-  { value: 'codex', label: 'Codex' },
   { value: 'codex -c sandbox_mode=\"danger-full-access\" -c approval=\"never\" -c network=\"enabled\"', label: 'Codex (全自动)' },
-  { value: 'kimi', label: 'Kimi' },
-  { value: 'kimi --yolo', label: 'Kimi (全自动)' },
-  { value: 'opencode', label: 'OpenCode' },
-  { value: 'agent', label: 'Cursor (agent)' },
-  { value: 'gemini', label: 'Gemini' },
-  { value: 'gemini --yolo', label: 'Gemini (全自动)' },
+  { value: '__windsurf__', label: 'Windsurf' },
 ];
 
 // 渲染远程服务器连接信息
@@ -429,9 +551,10 @@ function renderRemoteServerInfo(): void {
     return;
   }
   remoteServerInfoEl.style.display = 'block';
-  const urlEl = remoteServerInfoEl.querySelector('.remote-info-url')!;
+  const urlEl = remoteServerInfoEl.querySelector('.remote-info-url') as HTMLElement;
   const tokenEl = remoteServerInfoEl.querySelector('.remote-info-token')!;
-  urlEl.textContent = remoteServerInfo.lanUrl;
+  urlEl.textContent = remoteServerInfo.publicUrl || remoteServerInfo.lanUrl;
+  urlEl.title = remoteServerInfo.publicUrl ? remoteServerInfo.lanUrl : '';
   tokenEl.textContent = `Token: ${remoteServerInfo.token}`;
 }
 
@@ -457,16 +580,9 @@ function renderPresetSelect(): void {
 
     for (const p of customs) {
       const el = document.createElement('option');
-      el.value = p.command;
-      el.textContent = p.name;
+      el.value = p.autoFlag ? p.command + ' ' + p.autoFlag : p.command;
+      el.textContent = p.autoFlag ? p.name + ' (全自动)' : p.name;
       presetSelect.appendChild(el);
-
-      if (p.autoFlag) {
-        const autoEl = document.createElement('option');
-        autoEl.value = p.command + ' ' + p.autoFlag;
-        autoEl.textContent = p.name + ' (全自动)';
-        presetSelect.appendChild(autoEl);
-      }
     }
   }
 
@@ -474,6 +590,14 @@ function renderPresetSelect(): void {
   presetSelect.value = prev;
   // 如果之前的值不存在了，回退到空终端
   if (presetSelect.selectedIndex === -1) presetSelect.value = '';
+
+  // 只在远程服务器可用时同步到服务端
+  if (remoteServerInfo) {
+    console.log('[Preset Sync] Remote server available, syncing presets');
+    syncPresetsToServer(customs);
+  } else {
+    console.log('[Preset Sync] Remote server not available, will sync when ready');
+  }
 }
 
 function showPresetDialog(preset?: CustomPreset): Promise<CustomPreset | null> {
@@ -489,11 +613,11 @@ function showPresetDialog(preset?: CustomPreset): Promise<CustomPreset | null> {
       <div class="preset-form">
         <div class="preset-form-field">
           <label>名称</label>
-          <input type="text" id="preset-name-input" placeholder="如 Aider、Cursor 等" value="${preset?.name || ''}" />
+          <input type="text" id="preset-name-input" placeholder="如 Aider、自定义 CLI 等" value="${preset?.name || ''}" />
         </div>
         <div class="preset-form-field">
           <label>命令</label>
-          <input type="text" id="preset-cmd-input" placeholder="如 aider、cursor 等" value="${preset?.command || ''}" />
+          <input type="text" id="preset-cmd-input" placeholder="如 aider、my-cli 等" value="${preset?.command || ''}" />
         </div>
         <div class="preset-form-field">
           <label>全自动参数（可选）</label>
@@ -690,44 +814,29 @@ const terminalArea = document.getElementById('terminal-area')!;
 const terminalContent = document.getElementById('terminal-content')!;
 const emptyState = document.getElementById('empty-state')!;
 const sessionList = document.getElementById('session-list')!;
-const archivedHeader = document.getElementById('archived-header')!;
-const archivedToggle = document.getElementById('archived-toggle')!;
-const archivedList = document.getElementById('archived-list')!;
-const archivedCount = document.getElementById('archived-count')!;
-const sidebar = document.getElementById('sidebar')!;
+const chatContent = document.getElementById('chat-content')!;
+const chatEmptyState = document.getElementById('chat-empty-state')!;
+const sidebar = document.getElementById('sidebar')!;;
 const sidebarToggle = document.getElementById('sidebar-toggle')!;
 const sidebarResizer = document.getElementById('sidebar-resizer')!;
-
-// 历史对话 DOM
-const historyHeader = document.getElementById('history-header')!;
-const historyToggle = document.getElementById('history-toggle')!;
-const historyList = document.getElementById('history-list')!;
-const historyCount = document.getElementById('history-count')!;
 
 // 文件状态栏 DOM
 const fileStatusbar = document.getElementById('file-statusbar')!;
 const fileStatusbarFiles = document.getElementById('file-statusbar-files')!;
 
-// 快照相关 DOM
 const sidebarTabs = document.querySelectorAll('.sidebar-tab');
 const tabSessions = document.getElementById('tab-sessions')!;
-const tabSnapshots = document.getElementById('tab-snapshots')!;
-const snapshotNotGit = document.getElementById('snapshot-not-git')!;
-const snapshotActions = document.getElementById('snapshot-actions')!;
-const snapshotCreateBtn = document.getElementById('snapshot-create-btn')!;
-const snapshotListEl = document.getElementById('snapshot-list')!;
-
-// 快照状态
-let expandedSnapshotId: string | null = null;
-// 已撤销/已还原的快照记录：snapId → '已撤销' | '已还原'
-const revertedSnapshots: Map<string, string> = new Map();
-// 当前快照列表缓存（用于还原标记）
-let cachedSnapshots: Array<{ id: string; message: string; timestamp: number; fileCount: number }> = [];
 
 // AI 配置相关 DOM
 const tabAiConfig = document.getElementById('tab-ai-config')!;
-const aiScanBtn = document.getElementById('ai-scan-btn')!;
-const aiProviderList = document.getElementById('ai-provider-list')!;
+const aiApplyBtn = document.getElementById('ai-apply-btn')!;
+const aiTestBtn = document.getElementById('ai-test-btn')!;
+const aiFormatSelect = document.getElementById('ai-format-select') as HTMLSelectElement;
+const aiBaseurlInput = document.getElementById('ai-baseurl-input') as HTMLInputElement;
+const aiApikeyInput = document.getElementById('ai-apikey-input') as HTMLInputElement;
+const aiModelInput = document.getElementById('ai-model-input') as HTMLInputElement;
+const aiKeyToggle = document.getElementById('ai-key-toggle')!;
+
 
 // 文件监听状态（全局）
 let globalRecentFiles: string[] = [];
@@ -764,9 +873,6 @@ function syncSessionStatusToMain(): void {
   }
   window.duocli.syncSessionStatus(statuses);
 }
-
-// 会话历史 buffer 刷盘
-const historyFlushTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 
 // 终端管理器
 const termManager = new TerminalManager(terminalContent, (id, cols, rows) => {
@@ -835,12 +941,7 @@ const CLI_TAG_COLORS: Record<string, [string, string]> = {
   'Claude全自动':  ['#e5a100', '#3d3010'],
   'Codex':        ['#73c991', '#1e3328'],
   'Codex全自动':   ['#56d4a0', '#1a3d2e'],
-  'Kimi':         ['#c678dd', '#2e1e3d'],
-  'Kimi全自动':    ['#d19ae8', '#33204a'],
-  'OpenCode':     ['#61afef', '#1e2e3d'],
-  'Cursor':       ['#56b6c2', '#1e3338'],
-  'Gemini':       ['#82aaff', '#1e2540'],
-  'Gemini全自动':  ['#99bbff', '#222d4a'],
+  'Windsurf':     ['#a78bfa', '#2e1e3d'],
 };
 
 function getCliTagColors(displayName: string): [string, string] {
@@ -872,12 +973,22 @@ const PATH_COLORS = [
 ];
 
 function cwdToColor(cwd: string): string {
-  if (!cwd) return PATH_COLORS[0];
+  const key = normalizeCwd(cwd);
+  if (!key) return PATH_COLORS[0];
   let hash = 0;
-  for (let i = 0; i < cwd.length; i++) {
-    hash = ((hash << 5) - hash + cwd.charCodeAt(i)) | 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
   }
   return PATH_COLORS[Math.abs(hash) % PATH_COLORS.length];
+}
+
+// 归一化目录路径，避免同一目录因末尾斜杠 / macOS /private 前缀差异被拆成多组
+function normalizeCwd(cwd: string): string {
+  if (!cwd) return '';
+  let p = cwd.trim();
+  if (p.startsWith('/private/')) p = p.slice('/private'.length);
+  if (p.length > 1) p = p.replace(/\/+$/, '');
+  return p;
 }
 
 // 取路径最后一段作为项目名
@@ -1164,7 +1275,7 @@ async function refreshFileTree(force = false): Promise<void> {
 }
 
 // 确认弹窗
-function showConfirmDialog(title: string): Promise<'close' | 'archive' | 'cancel'> {
+function showConfirmDialog(title: string): Promise<'close' | 'cancel'> {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'confirm-overlay';
@@ -1175,14 +1286,12 @@ function showConfirmDialog(title: string): Promise<'close' | 'archive' | 'cancel
       <p>确定要关闭「${title}」吗？</p>
       <div class="confirm-buttons">
         <button class="btn-cancel">取消</button>
-        <button class="btn-archive">归档</button>
         <button class="btn-close-confirm">关闭</button>
       </div>`;
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
-    const cleanup = (r: 'close' | 'archive' | 'cancel') => { overlay.remove(); resolve(r); };
+    const cleanup = (r: 'close' | 'cancel') => { overlay.remove(); resolve(r); };
     dialog.querySelector('.btn-cancel')!.addEventListener('click', () => cleanup('cancel'));
-    dialog.querySelector('.btn-archive')!.addEventListener('click', () => cleanup('archive'));
     dialog.querySelector('.btn-close-confirm')!.addEventListener('click', () => cleanup('close'));
     overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup('cancel'); });
   });
@@ -1215,7 +1324,6 @@ function startTitleEdit(id: string, titleSpan: HTMLElement): void {
       sessionTitles.set(id, val);
       sessionTitleLocked.add(id);
       window.duocli.renamePty(id, val);
-      window.duocli.sessionHistoryRename(id, val);
     }
     renderSessionList();
   };
@@ -1231,20 +1339,34 @@ function showSessionContextMenu(e: MouseEvent, targetId: string): void {
 
   const menu = document.createElement('div');
   menu.className = 'term-context-menu';
+  const targetCwd = sessionCwds.get(targetId) || '';
+  const targetCwdKey = normalizeCwd(targetCwd);
 
   const items: Array<{ label: string; action: () => void }> = [
     {
-      label: '关闭其他终端',
+      label: '重新生成标题',
       action: () => {
-        const allIds = Array.from(sessionTitles.keys()).filter(id => id !== targetId);
-        for (const id of allIds) destroySession(id);
+        void window.duocli.regenerateTitle(targetId);
       },
     },
     {
-      label: '关闭所有终端',
+      label: '关闭其他对话',
       action: () => {
-        const allIds = Array.from(sessionTitles.keys());
-        for (const id of allIds) destroySession(id);
+        destroySessions(Array.from(sessionTitles.keys()).filter(id => id !== targetId));
+      },
+    },
+    {
+      label: '关闭本项目下其他对话',
+      action: () => {
+        destroySessions(Array.from(sessionTitles.keys()).filter(id =>
+          id !== targetId && normalizeCwd(sessionCwds.get(id) || '') === targetCwdKey
+        ));
+      },
+    },
+    {
+      label: '关闭所有对话',
+      action: () => {
+        destroySessions(Array.from(sessionTitles.keys()));
       },
     },
   ];
@@ -1285,24 +1407,31 @@ function renderSessionList(): void {
   }
   sessionList.innerHTML = '';
 
-  // pinned 优先，其余按最近活跃时间降序（最近使用的排最上面）
+  // pinned 优先，其余按创建时间降序（新创建的排最上面）
   const allIds = Array.from(sessionTitles.keys());
-  const byRecent = (a: string, b: string) =>
-    (sessionUpdateTimes.get(b) || 0) - (sessionUpdateTimes.get(a) || 0);
+  const byCreated = (a: string, b: string) =>
+    getSessionCreateTime(b) - getSessionCreateTime(a);
   const sortedIds = [
-    ...allIds.filter(id => pinnedSessions.has(id)).sort(byRecent),
-    ...allIds.filter(id => !pinnedSessions.has(id)).sort(byRecent),
+    ...allIds.filter(id => pinnedSessions.has(id)).sort(byCreated),
+    ...allIds.filter(id => !pinnedSessions.has(id)).sort(byCreated),
   ];
 
   // 按 cwd 分组（保持排序顺序）
+  // 同一目录可能因末尾斜杠 / macOS /private 前缀差异被拆成多组，先归一化再分组
   const groups: Map<string, string[]> = new Map();
+  const groupDisplayCwd: Map<string, string> = new Map();
   for (const id of sortedIds) {
-    const cwd = sessionCwds.get(id) || '';
-    if (!groups.has(cwd)) groups.set(cwd, []);
-    groups.get(cwd)!.push(id);
+    const rawCwd = sessionCwds.get(id) || '';
+    const key = normalizeCwd(rawCwd);
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      groupDisplayCwd.set(key, rawCwd);
+    }
+    groups.get(key)!.push(id);
   }
 
-  for (const [cwd, ids] of groups) {
+  for (const [groupKey, ids] of groups) {
+    const cwd = groupDisplayCwd.get(groupKey) || groupKey;
     const color = cwdToColor(cwd);
 
     // 分组头
@@ -1426,7 +1555,7 @@ function renderSessionList(): void {
       const autoContinueLabel = document.createElement('span');
       autoContinueLabel.className = 'session-auto-continue-label' + (autoContinueEnabled ? ' enabled' : '');
       autoContinueLabel.textContent = '催';
-      autoContinueLabel.title = autoContinueEnabled ? '催工已开启，点击配置' : '点击配置催工';
+      autoContinueLabel.title = autoContinueEnabled ? '循环已开启，点击配置' : '点击配置循环';
       autoContinueLabel.addEventListener('click', (e) => {
         e.stopPropagation();
         showAutoContinueConfigDialog(id);
@@ -1451,60 +1580,89 @@ function renderSessionList(): void {
       sessionList.appendChild(item);
     }
   }
-}
 
-function renderArchivedList(): void {
-  archivedList.innerHTML = '';
-  archivedCount.textContent = String(archivedSessions.size);
-  archivedSessions.forEach((info, id) => {
-    const item = document.createElement('div');
-    item.className = 'session-item archived';
-    const dot = document.createElement('span');
-    dot.className = 'session-color-dot';
-    dot.style.backgroundColor = TerminalManager.getThemeDotColor(info.themeId);
-    const titleSpan = document.createElement('span');
-    titleSpan.className = 'session-title';
-    titleSpan.textContent = info.title;
-    const timeSpan = document.createElement('span');
-    timeSpan.className = 'session-time';
-    timeSpan.textContent = friendlyTime(info.updateTime);
-    const infoWrap = document.createElement('div');
-    infoWrap.className = 'session-info';
-    infoWrap.appendChild(titleSpan);
-    infoWrap.appendChild(timeSpan);
-    // 恢复按钮
-    const restoreBtn = document.createElement('button');
-    restoreBtn.className = 'session-restore';
-    restoreBtn.textContent = '\u21A9';
-    restoreBtn.title = '恢复';
-    restoreBtn.addEventListener('click', (e) => { e.stopPropagation(); restoreSession(id); });
-    // 彻底关闭按钮
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'session-close';
-    closeBtn.textContent = '\u00d7';
-    closeBtn.addEventListener('click', (e) => { e.stopPropagation(); destroySession(id); });
-    item.addEventListener('click', () => { restoreSession(id); });
-    item.appendChild(dot);
-    item.appendChild(infoWrap);
-    item.appendChild(restoreBtn);
-    item.appendChild(closeBtn);
-    archivedList.appendChild(item);
-  });
+  // Chat 会话区域
+  if (chatSessionTitles.size > 0) {
+    const chatHeader = document.createElement('div');
+    chatHeader.className = 'session-group-header';
+    chatHeader.style.borderLeftColor = '#a78bfa';
+    const chatName = document.createElement('span');
+    chatName.className = 'session-group-name';
+    chatName.textContent = '💬 Chat 对话';
+    chatHeader.appendChild(chatName);
+    sessionList.appendChild(chatHeader);
+
+    const sortedChatIds = Array.from(chatSessionTitles.keys()).sort((a, b) =>
+      (chatSessionCreateTimes.get(b) || 0) - (chatSessionCreateTimes.get(a) || 0)
+    );
+
+    for (const id of sortedChatIds) {
+      const title = chatSessionTitles.get(id)!;
+      const item = document.createElement('div');
+      item.className = 'session-item session-item-chat' + (id === activeChatId ? ' active' : '');
+      item.style.setProperty('--group-color', '#a78bfa12');
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'session-title chat-session-title';
+      titleSpan.textContent = title;
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'session-close-btn';
+      delBtn.textContent = '✕';
+      delBtn.title = '删除对话';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        destroyChatSession(id);
+      });
+
+      const topRow = document.createElement('div');
+      topRow.className = 'session-top-row';
+      topRow.appendChild(titleSpan);
+      topRow.appendChild(delBtn);
+
+      const metaRow = document.createElement('div');
+      metaRow.className = 'session-meta-row';
+      const timeSpan = document.createElement('span');
+      timeSpan.className = 'session-time';
+      timeSpan.textContent = friendlyTime(chatSessionCreateTimes.get(id) || Date.now());
+      metaRow.appendChild(timeSpan);
+
+      item.addEventListener('click', () => {
+        switchToTerminal();
+        switchToChat(id);
+      });
+      item.appendChild(topRow);
+      item.appendChild(metaRow);
+      sessionList.appendChild(item);
+    }
+  }
 }
 
 // ========== 核心操作 ==========
 
 async function createSession(): Promise<boolean> {
   if (!currentCwd) { alert('请先选择工作目录'); return false; }
+
+  // Windsurf 特殊处理：创建 Chat 会话而非 PTY
+  if (presetSelect.value === '__windsurf__') {
+    addRecentCwd(currentCwd);
+    lastPreset = '__windsurf__';
+    localStorage.setItem('duocli_preset', '__windsurf__');
+    await createChatSession(currentCwd);
+    return true;
+  }
+
   addRecentCwd(currentCwd);
   const preset = presetSelect.value;
   const themeId = resolveThemeId(currentThemeId, currentCwd);
   lastPreset = preset;
   localStorage.setItem('duocli_preset', preset);
   const result = await window.duocli.createPty(currentCwd, preset, themeId);
+  const now = Date.now();
   sessionTitles.set(result.id, result.title);
   sessionThemes.set(result.id, result.themeId);
-  sessionUpdateTimes.set(result.id, Date.now());
+  sessionUpdateTimes.set(result.id, now);
+  sessionCreateTimes.set(result.id, now);
   sessionCwds.set(result.id, result.cwd);
   sessionDisplayNames.set(result.id, result.displayName);
   // 自定义预设：用用户定义的名称覆盖后端 fallback
@@ -1516,12 +1674,7 @@ async function createSession(): Promise<boolean> {
     const displayName = isAuto ? customPreset.name + '全自动' : customPreset.name;
     sessionDisplayNames.set(result.id, displayName);
   }
-  // 初始化会话历史记录
-  window.duocli.sessionHistoryInit(result.id, result.title);
-  const flushTimer = setInterval(() => {
-    window.duocli.sessionHistoryFlush(result.id);
-  }, 2000);
-  historyFlushTimers.set(result.id, flushTimer);
+  // 初始化终端
   termManager.create(result.id, result.themeId, currentCwd, (data) => { writePtyWithAutoReset(result.id, data); });
   updateEmptyState();
   renderSessionList();
@@ -1535,6 +1688,9 @@ async function createSession(): Promise<boolean> {
 }
 
 function switchSession(id: string): void {
+  // 确保从 chat 视图切回终端视图
+  switchToTerminal();
+
   const prev = termManager.getActiveId();
   termManager.switchTo(id);
 
@@ -1555,73 +1711,15 @@ async function handleCloseClick(id: string): Promise<void> {
   const title = sessionTitles.get(id) || '终端';
   const action = await showConfirmDialog(title);
   if (action === 'cancel') return;
-  if (action === 'archive') {
-    archiveSession(id);
-  } else {
-    destroySession(id);
-  }
-}
-
-// 归档：从活跃列表移到已归档，终端隐藏但进程不杀
-function archiveSession(id: string): void {
-  const title = sessionTitles.get(id) || '终端';
-  const themeId = sessionThemes.get(id) || 'vscode-dark';
-  const updateTime = sessionUpdateTimes.get(id) || Date.now();
-  const cwd = sessionCwds.get(id) || '';
-  const displayName = sessionDisplayNames.get(id) || '';
-  archivedSessions.set(id, { title, themeId, updateTime, cwd, displayName });
-  sessionTitles.delete(id);
-  sessionThemes.delete(id);
-  sessionUpdateTimes.delete(id);
-  sessionCwds.delete(id);
-  sessionDisplayNames.delete(id);
-  sessionProviders.delete(id);
-  sessionAutoContinue.delete(id);
-  saveAutoContinueToStorage();
-  // 隐藏终端但不销毁
-  termManager.hide(id);
-  updateEmptyState();
-  renderSessionList();
-  renderArchivedList();
-  void renderFileTree();
-}
-
-// 从归档恢复到活跃列表
-function restoreSession(id: string): void {
-  const info = archivedSessions.get(id);
-  if (!info) return;
-  archivedSessions.delete(id);
-  sessionTitles.set(id, info.title);
-  sessionThemes.set(id, info.themeId);
-  sessionUpdateTimes.set(id, info.updateTime);
-  if (info.cwd) sessionCwds.set(id, info.cwd);
-  if (info.displayName) sessionDisplayNames.set(id, info.displayName);
-  sessionUnread.delete(id);
-  sessionBusy.delete(id);
-  clearTimeout(unreadTimers.get(id));
-  unreadTimers.delete(id);
-  recentDataBuffer.delete(id);
-  termManager.switchTo(id);
-  updateEmptyState();
-  renderSessionList();
-  renderArchivedList();
-  renderFileStatusbar();
-  void renderFileTree();
-  const dims = termManager.getActiveDimensions();
-  if (dims) window.duocli.resizePty(id, dims.cols, dims.rows);
+  destroySession(id);
 }
 
 // 彻底关闭终端
-function destroySession(id: string): void {
-  // 结束会话历史记录
-  const flushTimer = historyFlushTimers.get(id);
-  if (flushTimer) { clearInterval(flushTimer); historyFlushTimers.delete(id); }
-  window.duocli.sessionHistoryFinish(id);
-  window.duocli.destroyPty(id);
+function clearSessionState(id: string): void {
   sessionTitles.delete(id);
   sessionThemes.delete(id);
   sessionUpdateTimes.delete(id);
-  archivedSessions.delete(id);
+  sessionCreateTimes.delete(id);
   sessionUnread.delete(id);
   sessionBusy.delete(id);
   clearTimeout(unreadTimers.get(id));
@@ -1632,16 +1730,103 @@ function destroySession(id: string): void {
   sessionCwds.delete(id);
   sessionDisplayNames.delete(id);
   sessionProviders.delete(id);
+  sessionClaudeProviderIds.delete(id);
   sessionAutoContinue.delete(id);
+}
+
+function destroySession(id: string): void {
+  window.duocli.destroyPty(id);
+  clearSessionState(id);
   saveAutoContinueToStorage();
   termManager.destroy(id);
   updateEmptyState();
   renderSessionList();
-  renderArchivedList();
   updateSessionTitleBar();
   void renderFileTree();
-  // 刷新历史对话列表
-  if (!historyList.classList.contains('collapsed')) refreshHistory();
+}
+
+function destroySessions(ids: string[]): void {
+  const uniqIds = Array.from(new Set(ids)).filter(id => sessionTitles.has(id));
+  if (uniqIds.length === 0) return;
+  for (const id of uniqIds) {
+    window.duocli.destroyPty(id);
+    clearSessionState(id);
+    termManager.destroy(id);
+  }
+  saveAutoContinueToStorage();
+  updateEmptyState();
+  renderSessionList();
+  updateSessionTitleBar();
+  void renderFileTree();
+}
+
+// ========== Chat 会话管理 ==========
+
+async function createChatSession(workspace?: string): Promise<void> {
+  const ws = workspace || currentCwd || '';
+  try {
+    const result = await window.duocli.chatCreate({ workspace: ws });
+    if (!result) return;
+    const now = Date.now();
+    chatSessionTitles.set(result.id, result.title);
+    chatSessionCreateTimes.set(result.id, now);
+    switchToChat(result.id);
+    renderSessionList();
+  } catch (e) {
+    console.error('创建聊天会话失败:', e);
+  }
+}
+
+function switchToChat(id: string): void {
+  // 隐藏终端区域，显示聊天区域
+  terminalContent.style.display = 'none';
+  chatContent.style.display = 'flex';
+  chatContent.style.flexDirection = 'column';
+  chatContent.style.height = '100%';
+  chatEmptyState.style.display = 'none';
+
+  // 销毁旧的 chat view
+  if (activeChatId && activeChatId !== id) {
+    const oldView = chatViews.get(activeChatId);
+    oldView?.destroy();
+    chatViews.delete(activeChatId);
+  }
+
+  activeChatId = id;
+
+  // 创建或恢复 chat view
+  let view = chatViews.get(id);
+  if (!view) {
+    view = new ChatView(chatContent, id, {
+      onTitleChange: (sessionId, title) => {
+        chatSessionTitles.set(sessionId, title);
+        renderSessionList();
+      },
+    });
+    chatViews.set(id, view);
+  }
+  view.focus();
+}
+
+function switchToTerminal(): void {
+  chatContent.style.display = 'none';
+  terminalContent.style.display = '';
+  activeChatId = null;
+  updateEmptyState();
+}
+
+function destroyChatSession(id: string): void {
+  window.duocli.chatDestroy(id);
+  const view = chatViews.get(id);
+  view?.destroy();
+  chatViews.delete(id);
+  chatSessionTitles.delete(id);
+  chatSessionCreateTimes.delete(id);
+  if (activeChatId === id) {
+    activeChatId = null;
+    switchToTerminal();
+  }
+  renderSessionList();
 }
 
 async function browseCwd(): Promise<void> {
@@ -1667,589 +1852,72 @@ function startFileWatcher(cwd: string): void {
 // ========== AI 配置 ==========
 
 async function refreshAiConfig(): Promise<void> {
-  const saved = await window.duocli.aiGetSelected();
-  if (saved?.providerId) selectedAiProviderId = saved.providerId;
-  const providers = await window.duocli.aiGetProviders();
-  if (providers.length === 0) {
-    aiProviderList.innerHTML = '<div class="snapshot-notice">点击「扫描并测试」发现可用 AI 服务</div>';
-  } else {
-    renderAiProviders(providers);
+  // 从主进程加载当前生效的配置，填充到表单
+  const config = await window.duocli.aiGetCurrentConfig();
+  if (config) {
+    aiFormatSelect.value = config.apiFormat || 'anthropic';
+    aiBaseurlInput.value = config.baseUrl || '';
+    aiApikeyInput.value = config.apiKey || '';
+    aiModelInput.value = config.model || '';
   }
 }
 
-async function handleAiScan(): Promise<void> {
-  aiScanBtn.textContent = '扫描中...';
-  (aiScanBtn as HTMLButtonElement).disabled = true;
+
+async function handleAiApply(): Promise<void> {
+  const config = {
+    apiFormat: aiFormatSelect.value,
+    baseUrl: aiBaseurlInput.value.trim(),
+    apiKey: aiApikeyInput.value.trim(),
+    model: aiModelInput.value.trim(),
+  };
+  if (!config.baseUrl) {
+    aiApplyBtn.textContent = '请填写 Base URL';
+    setTimeout(() => { aiApplyBtn.textContent = '保存'; }, 1500);
+    return;
+  }
+  await window.duocli.aiApplyConfig(config);
+  aiApplyBtn.textContent = '已保存';
+  setTimeout(() => { aiApplyBtn.textContent = '保存'; }, 1500);
+}
+
+async function handleAiTest(): Promise<void> {
+  const config = {
+    apiFormat: aiFormatSelect.value,
+    baseUrl: aiBaseurlInput.value.trim(),
+    apiKey: aiApikeyInput.value.trim(),
+    model: aiModelInput.value.trim(),
+  };
+  if (!config.baseUrl) {
+    aiTestBtn.textContent = '请先填写配置';
+    setTimeout(() => { aiTestBtn.textContent = '测试'; }, 1500);
+    return;
+  }
+  aiTestBtn.textContent = '测试中...';
+  aiTestBtn.setAttribute('disabled', 'true');
   try {
-    const providers = await window.duocli.aiScan();
-    renderAiProviders(providers);
-    if (providers.length > 0) {
-      aiScanBtn.textContent = '测试中...';
-      const tested = await window.duocli.aiTestAll();
-      renderAiProviders(tested);
-    }
-  } catch {
-    aiProviderList.innerHTML = '<div class="snapshot-notice">扫描失败</div>';
-  }
-  aiScanBtn.textContent = '扫描并测试';
-  (aiScanBtn as HTMLButtonElement).disabled = false;
-}
-
-async function handleAiSelect(providerId: string): Promise<void> {
-  const ok = await window.duocli.aiSelect(providerId);
-  if (ok) {
-    selectedAiProviderId = providerId;
-    const providers = await window.duocli.aiGetProviders();
-    renderAiProviders(providers);
-  }
-}
-
-async function handleAiSetModel(providerId: string, model: string): Promise<void> {
-  await window.duocli.aiSetModel(providerId, model);
-  const providers = await window.duocli.aiGetProviders();
-  renderAiProviders(providers);
-}
-
-function renderAiProviders(providers: AIProviderInfo[]): void {
-  aiProviderList.innerHTML = '';
-  if (providers.length === 0) {
-    aiProviderList.innerHTML = '<div class="snapshot-notice">未发现 AI 服务配置</div>';
-    return;
-  }
-  for (const p of providers) {
-    const item = document.createElement('div');
-    item.className = 'ai-provider-item' + (p.id === selectedAiProviderId ? ' ai-selected' : '');
-
-    // 状态指示灯
-    const statusDot = document.createElement('span');
-    statusDot.className = `ai-status-dot ai-status-${p.status}`;
-
-    // 信息区
-    const info = document.createElement('div');
-    info.className = 'ai-provider-info';
-
-    const nameRow = document.createElement('div');
-    nameRow.className = 'ai-provider-name';
-    nameRow.textContent = p.name;
-
-    const detailRow = document.createElement('div');
-    detailRow.className = 'ai-provider-detail';
-    detailRow.textContent = `${p.model} | ${p.apiFormat} | ${p.apiKey}`;
-
-    const sourceRow = document.createElement('div');
-    sourceRow.className = 'ai-provider-source';
-    sourceRow.textContent = `来源: ${p.source}`;
-
-    info.appendChild(nameRow);
-    info.appendChild(detailRow);
-    info.appendChild(sourceRow);
-
-    if (p.status === 'fail' && p.errorMsg) {
-      const errRow = document.createElement('div');
-      errRow.className = 'ai-provider-error';
-      errRow.textContent = p.errorMsg;
-      info.appendChild(errRow);
-    }
-
-    // 选中的 provider 显示模型下拉框
-    if (p.id === selectedAiProviderId && p.availableModels && p.availableModels.length > 1) {
-      const modelRow = document.createElement('div');
-      modelRow.className = 'ai-model-row';
-      const modelLabel = document.createElement('span');
-      modelLabel.className = 'ai-model-label';
-      modelLabel.textContent = '模型:';
-      const modelSelect = document.createElement('select');
-      modelSelect.className = 'ai-model-select';
-      for (const m of p.availableModels) {
-        const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        if (m === p.model) opt.selected = true;
-        modelSelect.appendChild(opt);
-      }
-      modelSelect.addEventListener('change', () => {
-        handleAiSetModel(p.id, modelSelect.value);
-      });
-      modelRow.appendChild(modelLabel);
-      modelRow.appendChild(modelSelect);
-      info.appendChild(modelRow);
-    }
-
-    // 选择按钮（仅测试通过的可选）
-    const selectBtn = document.createElement('button');
-    selectBtn.className = 'ai-select-btn';
-    if (p.id === selectedAiProviderId) {
-      selectBtn.textContent = '已选';
-      selectBtn.disabled = true;
-    } else if (p.status === 'ok') {
-      selectBtn.textContent = '选择';
-      selectBtn.addEventListener('click', () => handleAiSelect(p.id));
+    const result = await window.duocli.aiTestConfig(config);
+    if (result.ok) {
+      aiTestBtn.textContent = '✓ 连接成功';
     } else {
-      selectBtn.textContent = '选择';
-      selectBtn.disabled = true;
+      aiTestBtn.textContent = '✗ 失败';
+      alert('AI 配置测试失败：\n' + (result.error || '未知错误'));
     }
-
-    item.appendChild(statusDot);
-    item.appendChild(info);
-    item.appendChild(selectBtn);
-    aiProviderList.appendChild(item);
+  } catch (e: any) {
+    aiTestBtn.textContent = '✗ 失败';
+    alert('AI 配置测试失败：\n' + (e.message || '未知错误'));
+  } finally {
+    aiTestBtn.removeAttribute('disabled');
+    setTimeout(() => { aiTestBtn.textContent = '测试'; }, 2000);
   }
 }
-
-// ========== 历史对话 ==========
-
-async function refreshHistory(): Promise<void> {
-  const items = await window.duocli.sessionHistoryList();
-  historyCount.textContent = String(items.length);
-  historyList.innerHTML = '';
-  if (items.length === 0) {
-    historyList.innerHTML = '<div class="snapshot-notice">暂无历史对话</div>';
-    return;
-  }
-  for (const item of items) {
-    const title = item.filename.replace(/_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.txt$/, '').replace(/_/g, ' ');
-    const el = document.createElement('div');
-    el.className = 'history-item';
-
-    const titleEl = document.createElement('div');
-    titleEl.className = 'history-item-title';
-    titleEl.textContent = title;
-
-    const metaEl = document.createElement('div');
-    metaEl.className = 'history-item-meta';
-    const sizeKB = (item.size / 1024).toFixed(1);
-    metaEl.textContent = `${friendlyTime(item.mtime)} · ${sizeKB} KB`;
-
-    const actionsEl = document.createElement('div');
-    actionsEl.className = 'history-item-actions';
-
-    const viewBtn = document.createElement('button');
-    viewBtn.className = 'history-action-btn';
-    viewBtn.textContent = '查看全文';
-    viewBtn.addEventListener('click', (e) => { e.stopPropagation(); showHistoryDialog(item.filename, title); });
-
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'history-action-btn';
-    copyBtn.textContent = '复制';
-    copyBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const content = await window.duocli.sessionHistoryRead(item.filename);
-      navigator.clipboard.writeText(content);
-      copyBtn.textContent = '已复制';
-      setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
-    });
-
-    const delBtn = document.createElement('button');
-    delBtn.className = 'history-action-btn danger';
-    delBtn.textContent = '删除';
-    delBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await window.duocli.sessionHistoryDelete(item.filename);
-      refreshHistory();
-    });
-
-    actionsEl.appendChild(viewBtn);
-    actionsEl.appendChild(copyBtn);
-    actionsEl.appendChild(delBtn);
-    el.appendChild(titleEl);
-    el.appendChild(metaEl);
-    el.appendChild(actionsEl);
-
-    el.addEventListener('click', () => showHistoryDialog(item.filename, title));
-    historyList.appendChild(el);
-  }
-}
-
-async function showHistoryDialog(filename: string, title: string): Promise<void> {
-  const content = await window.duocli.sessionHistoryRead(filename);
-  const overlay = document.createElement('div');
-  overlay.className = 'confirm-overlay';
-
-  const dialog = document.createElement('div');
-  dialog.className = 'history-dialog';
-
-  // 头部
-  const header = document.createElement('div');
-  header.className = 'history-dialog-header';
-  const titleEl = document.createElement('span');
-  titleEl.className = 'history-dialog-title';
-  titleEl.textContent = title;
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'history-dialog-close';
-  closeBtn.textContent = '\u00d7';
-  closeBtn.addEventListener('click', () => overlay.remove());
-  header.appendChild(titleEl);
-  header.appendChild(closeBtn);
-
-  // 总结区域（初始隐藏）
-  const summaryBox = document.createElement('div');
-  summaryBox.className = 'history-summary-box';
-  summaryBox.style.display = 'none';
-
-  // 操作按钮
-  const actions = document.createElement('div');
-  actions.className = 'history-dialog-actions';
-
-  const copyBtn = document.createElement('button');
-  copyBtn.className = 'toolbar-btn';
-  copyBtn.textContent = '复制全文';
-  copyBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(content);
-    copyBtn.textContent = '已复制';
-    setTimeout(() => { copyBtn.textContent = '复制全文'; }, 1500);
-  });
-
-  const summarizeBtn = document.createElement('button');
-  summarizeBtn.className = 'toolbar-btn';
-  summarizeBtn.style.background = '#e5a100';
-  summarizeBtn.textContent = 'AI 总结';
-  summarizeBtn.addEventListener('click', async () => {
-    summaryBox.style.display = 'block';
-    summaryBox.textContent = '正在生成总结...';
-    summarizeBtn.textContent = '总结中...';
-    (summarizeBtn as HTMLButtonElement).disabled = true;
-    try {
-      const summary = await window.duocli.sessionHistorySummarize(filename);
-      summaryBox.textContent = summary || '(无法生成总结)';
-    } catch {
-      summaryBox.textContent = '(总结生成失败)';
-    }
-    summarizeBtn.textContent = 'AI 总结';
-    (summarizeBtn as HTMLButtonElement).disabled = false;
-  });
-
-  actions.appendChild(copyBtn);
-  actions.appendChild(summarizeBtn);
-
-  // 内容区域
-  const contentEl = document.createElement('div');
-  contentEl.className = 'history-dialog-content';
-  contentEl.textContent = content;
-
-  dialog.appendChild(header);
-  dialog.appendChild(summaryBox);
-  dialog.appendChild(actions);
-  dialog.appendChild(contentEl);
-  overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-}
-
-// ========== 快照功能 ==========
 
 function switchTab(tabName: string): void {
   sidebarTabs.forEach((tab) => {
     tab.classList.toggle('active', tab.getAttribute('data-tab') === tabName);
   });
   tabSessions.classList.toggle('active', tabName === 'sessions');
-  tabSnapshots.classList.toggle('active', tabName === 'snapshots');
   tabAiConfig.classList.toggle('active', tabName === 'ai-config');
-  if (tabName === 'snapshots') refreshSnapshots();
   if (tabName === 'ai-config') refreshAiConfig();
-}
-
-async function refreshSnapshots(): Promise<void> {
-  if (!currentCwd) {
-    snapshotNotGit.style.display = 'block';
-    snapshotNotGit.textContent = '请先选择工作目录';
-    snapshotActions.style.display = 'none';
-    snapshotListEl.innerHTML = '';
-    return;
-  }
-  const isRepo = await window.duocli.snapshotCheckRepo(currentCwd);
-  snapshotNotGit.style.display = isRepo ? 'none' : 'block';
-  snapshotActions.style.display = isRepo ? 'block' : 'none';
-  if (!isRepo) {
-    snapshotListEl.innerHTML = '';
-    return;
-  }
-  const snapshots = await window.duocli.snapshotList(currentCwd);
-  renderSnapshotList(snapshots);
-}
-
-function snapshotTimeStr(ts: number): string {
-  return friendlyTime(ts * 1000);
-}
-
-function renderSnapshotList(snapshots: Array<{ id: string; message: string; timestamp: number; fileCount: number }>): void {
-  cachedSnapshots = snapshots;
-  snapshotListEl.innerHTML = '';
-  if (snapshots.length === 0) {
-    snapshotListEl.innerHTML = '<div class="snapshot-notice">暂无快照</div>';
-    return;
-  }
-  for (const snap of snapshots) {
-    const item = document.createElement('div');
-    const revertLabel = revertedSnapshots.get(snap.id);
-    item.className = 'snapshot-item' + (snap.id === expandedSnapshotId ? ' expanded' : '') + (revertLabel ? ' reverted' : '');
-
-    const header = document.createElement('div');
-    header.className = 'snapshot-header';
-
-    const time = document.createElement('span');
-    time.className = 'snapshot-time';
-    time.textContent = snapshotTimeStr(snap.timestamp);
-
-    // 已撤销/已还原标签
-    if (revertLabel) {
-      const badge = document.createElement('span');
-      badge.className = 'snapshot-reverted-badge';
-      badge.textContent = revertLabel;
-      header.appendChild(time);
-      header.appendChild(badge);
-    } else {
-      header.appendChild(time);
-    }
-
-    const count = document.createElement('span');
-    count.className = 'snapshot-file-count';
-    count.textContent = `${snap.fileCount} 文件`;
-
-    header.appendChild(count);
-
-    const msg = document.createElement('div');
-    msg.className = 'snapshot-msg';
-    msg.textContent = snap.message;
-
-    const filesDiv = document.createElement('div');
-    filesDiv.className = 'snapshot-files';
-
-    item.appendChild(header);
-    item.appendChild(msg);
-    item.appendChild(filesDiv);
-
-    // 点击展开/收起
-    header.addEventListener('click', () => toggleSnapshotExpand(snap.id, item, filesDiv));
-
-    // 如果已展开，加载文件列表
-    if (snap.id === expandedSnapshotId) {
-      loadSnapshotFiles(snap.id, filesDiv);
-    }
-
-    snapshotListEl.appendChild(item);
-  }
-}
-
-function toggleSnapshotExpand(snapId: string, item: HTMLElement, filesDiv: HTMLElement): void {
-  if (expandedSnapshotId === snapId) {
-    expandedSnapshotId = null;
-    item.classList.remove('expanded');
-    filesDiv.innerHTML = '';
-  } else {
-    // 收起之前展开的
-    const prev = snapshotListEl.querySelector('.snapshot-item.expanded');
-    if (prev) {
-      prev.classList.remove('expanded');
-      const prevFiles = prev.querySelector('.snapshot-files');
-      if (prevFiles) prevFiles.innerHTML = '';
-    }
-    expandedSnapshotId = snapId;
-    item.classList.add('expanded');
-    loadSnapshotFiles(snapId, filesDiv);
-  }
-}
-
-async function loadSnapshotFiles(snapId: string, container: HTMLElement): Promise<void> {
-  if (!currentCwd) return;
-  container.innerHTML = '<div class="snapshot-notice">加载中...</div>';
-  const files = await window.duocli.snapshotFiles(currentCwd, snapId);
-  container.innerHTML = '';
-
-  if (files.length === 0) {
-    container.innerHTML = '<div class="snapshot-notice">无文件变更</div>';
-    return;
-  }
-
-  // AI 总结区域
-  const summaryDiv = document.createElement('div');
-  summaryDiv.className = 'snapshot-summary';
-  summaryDiv.textContent = '正在生成总结...';
-  container.appendChild(summaryDiv);
-  loadSnapshotSummary(snapId, summaryDiv);
-
-  for (const f of files) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'snapshot-file-wrapper';
-
-    const row = document.createElement('div');
-    row.className = 'snapshot-file-item';
-
-    const status = document.createElement('span');
-    status.className = `snapshot-file-status ${f.status}`;
-    status.textContent = f.status;
-
-    const pathSpan = document.createElement('span');
-    pathSpan.className = 'snapshot-file-path';
-    pathSpan.textContent = f.path;
-    pathSpan.title = '点击查看 diff';
-
-    const restoreBtn = document.createElement('button');
-    restoreBtn.className = 'snapshot-file-restore';
-    restoreBtn.textContent = '恢复';
-    restoreBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      handleRollbackFile(snapId, f.path, restoreBtn);
-    });
-
-    row.appendChild(status);
-    row.appendChild(pathSpan);
-    row.appendChild(restoreBtn);
-
-    const diffBlock = document.createElement('pre');
-    diffBlock.className = 'snapshot-diff-block';
-    diffBlock.style.display = 'none';
-
-    // 点击文件行展开/收起 diff
-    row.addEventListener('click', () => {
-      toggleFileDiff(snapId, f.path, diffBlock, row);
-    });
-
-    wrapper.appendChild(row);
-    wrapper.appendChild(diffBlock);
-    container.appendChild(wrapper);
-  }
-
-  // 操作按钮区域
-  const actionsDiv = document.createElement('div');
-  actionsDiv.className = 'snapshot-actions-group';
-
-  // 撤销本次变更按钮
-  const rollbackAllBtn = document.createElement('button');
-  rollbackAllBtn.className = 'snapshot-rollback-all';
-  rollbackAllBtn.textContent = `撤销本次变更 (${files.length} 个文件)`;
-  rollbackAllBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    handleRollbackAll(snapId);
-  });
-
-  // 还原到此时刻按钮
-  const restoreToBtn = document.createElement('button');
-  restoreToBtn.className = 'snapshot-restore-to';
-  restoreToBtn.textContent = '还原到此时刻';
-  restoreToBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    handleRestoreTo(snapId);
-  });
-
-  // 说明文字
-  const hintDiv = document.createElement('div');
-  hintDiv.className = 'snapshot-actions-hint';
-  hintDiv.innerHTML = '<b>撤销本次变更</b>：只回滚这次快照记录的变更文件<br><b>还原到此时刻</b>：把整个项目恢复到这个快照那一刻的完整状态';
-
-  actionsDiv.appendChild(rollbackAllBtn);
-  actionsDiv.appendChild(restoreToBtn);
-  actionsDiv.appendChild(hintDiv);
-  container.appendChild(actionsDiv);
-}
-
-// 展开/收起单个文件的 diff
-async function toggleFileDiff(snapId: string, filePath: string, diffBlock: HTMLElement, row: HTMLElement): Promise<void> {
-  if (diffBlock.style.display === 'block') {
-    diffBlock.style.display = 'none';
-    row.classList.remove('diff-expanded');
-    return;
-  }
-  if (!currentCwd) return;
-  diffBlock.textContent = '加载中...';
-  diffBlock.style.display = 'block';
-  row.classList.add('diff-expanded');
-  try {
-    const diff = await window.duocli.snapshotFileDiff(currentCwd, snapId, filePath);
-    renderDiffBlock(diffBlock, diff);
-  } catch {
-    diffBlock.textContent = '(无法获取 diff)';
-  }
-}
-
-// 渲染 diff 内容（带颜色高亮）
-function renderDiffBlock(container: HTMLElement, diff: string): void {
-  container.innerHTML = '';
-  const lines = diff.split('\n');
-  for (const line of lines) {
-    const lineEl = document.createElement('div');
-    lineEl.className = 'diff-line';
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      lineEl.classList.add('diff-add');
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      lineEl.classList.add('diff-del');
-    } else if (line.startsWith('@@')) {
-      lineEl.classList.add('diff-hunk');
-    }
-    lineEl.textContent = line;
-    container.appendChild(lineEl);
-  }
-}
-
-// AI 总结快照修改内容
-async function loadSnapshotSummary(snapId: string, summaryDiv: HTMLElement): Promise<void> {
-  if (!currentCwd) return;
-  try {
-    const summary = await window.duocli.snapshotSummarize(currentCwd, snapId);
-    summaryDiv.textContent = summary;
-  } catch {
-    summaryDiv.textContent = '(总结生成失败)';
-  }
-}
-
-async function handleRollbackFile(snapId: string, filePath: string, btn: HTMLElement): Promise<void> {
-  if (!currentCwd) return;
-  const confirmed = confirm(`确定要恢复文件「${filePath}」到此快照的版本吗？\n当前文件内容将被覆盖。`);
-  if (!confirmed) return;
-  btn.textContent = '...';
-  try {
-    await window.duocli.snapshotRollback(currentCwd, snapId, [filePath]);
-    btn.textContent = '已恢复';
-    setTimeout(() => { btn.textContent = '恢复'; }, 1500);
-  } catch {
-    btn.textContent = '失败';
-    setTimeout(() => { btn.textContent = '恢复'; }, 1500);
-  }
-}
-
-async function handleRollbackAll(snapId: string): Promise<void> {
-  if (!currentCwd) return;
-  const confirmed = confirm('确定要回滚所有文件到此快照的版本吗？\n当前工作目录中对应的文件都将被覆盖，此操作不可撤销。');
-  if (!confirmed) return;
-  try {
-    const result = await window.duocli.snapshotRollbackAll(currentCwd, snapId);
-    if (result.changed > 0) {
-      alert(`已回滚 ${result.total} 个文件（${result.changed} 个已恢复，${result.unchanged} 个无需变更）`);
-    } else {
-      alert(`${result.total} 个文件内容与回滚目标一致，无需变更`);
-    }
-    revertedSnapshots.set(snapId, '已撤销');
-    await refreshSnapshots();
-  } catch {
-    alert('回滚失败');
-  }
-}
-
-async function handleRestoreTo(snapId: string): Promise<void> {
-  if (!currentCwd) return;
-  const confirmed = confirm('确定要把整个项目还原到此快照的完整状态吗？\n\n这会：\n• 恢复所有文件到快照时的内容\n• 删除快照中不存在的文件\n• 操作前会自动创建备份快照');
-  if (!confirmed) return;
-  try {
-    const result = await window.duocli.snapshotRestoreTo(currentCwd, snapId);
-    let msg = `还原完成：共 ${result.total} 个文件`;
-    msg += `\n• ${result.changed} 个已恢复`;
-    msg += `\n• ${result.unchanged} 个无需变更`;
-    if (result.deleted > 0) {
-      msg += `\n• ${result.deleted} 个多余文件已删除`;
-    }
-    if (result.backupCommitId) {
-      msg += '\n\n已自动创建还原前备份快照';
-    }
-    alert(msg);
-    // 标记该快照及其上方所有快照为"已还原"
-    let found = false;
-    for (let i = cachedSnapshots.length - 1; i >= 0; i--) {
-      if (cachedSnapshots[i].id === snapId) found = true;
-      if (found) revertedSnapshots.set(cachedSnapshots[i].id, '已还原');
-    }
-    await refreshSnapshots();
-  } catch {
-    alert('还原失败');
-  }
 }
 
 // ========== 事件绑定 ==========
@@ -2522,7 +2190,17 @@ document.addEventListener('drop', (e) => {
 });
 
 function openNewSessionDialog(cwd?: string): void {
-  cwdInput.value = cwd || currentCwd || '';
+  const targetCwd = (cwd || currentCwd || '').trim();
+  cwdInput.value = targetCwd;
+  // 程序设值不触发 change 事件，需手动同步 currentCwd，
+  // 否则点击分组头加号创建的终端仍走旧 currentCwd
+  if (targetCwd && targetCwd !== currentCwd) {
+    currentCwd = targetCwd;
+    localStorage.setItem('duocli_cwd', targetCwd);
+    addRecentCwd(targetCwd);
+    startFileWatcher(targetCwd);
+    void renderFileTree();
+  }
   presetSelect.value = lastPreset || presetSelect.value || '';
   setThemeValue(currentThemeId);
   newSessionOverlay.classList.add('active');
@@ -2555,7 +2233,7 @@ presetAddBtn.addEventListener('click', async () => {
     saveCustomPresets(list);
     renderPresetSelect();
     // 自动选中新建的预设
-    presetSelect.value = result.command;
+    presetSelect.value = result.autoFlag ? result.command + ' ' + result.autoFlag : result.command;
   }
 });
 
@@ -2571,51 +2249,23 @@ sidebarTabs.forEach((tab) => {
   });
 });
 
-// 手动创建快照
-snapshotCreateBtn.addEventListener('click', async () => {
-  if (!currentCwd) return;
-  snapshotCreateBtn.textContent = '创建中...';
-  (snapshotCreateBtn as HTMLButtonElement).disabled = true;
-  try {
-    await window.duocli.snapshotCreate(currentCwd, '手动快照');
-    await refreshSnapshots();
-  } catch { /* ignore */ }
-  snapshotCreateBtn.textContent = '手动创建快照';
-  (snapshotCreateBtn as HTMLButtonElement).disabled = false;
-});
-
 // AI 配置按钮
-aiScanBtn.addEventListener('click', () => handleAiScan());
-
-// 已归档折叠/展开
-archivedHeader.addEventListener('click', () => {
-  archivedList.classList.toggle('collapsed');
-  archivedToggle.classList.toggle('expanded');
-});
-
-// 历史对话折叠/展开
-historyHeader.addEventListener('click', () => {
-  const wasCollapsed = historyList.classList.contains('collapsed');
-  historyList.classList.toggle('collapsed');
-  historyToggle.classList.toggle('expanded');
-  if (wasCollapsed) refreshHistory();
+aiTestBtn.addEventListener('click', () => handleAiTest());
+aiApplyBtn.addEventListener('click', () => handleAiApply());
+aiKeyToggle.addEventListener('click', () => {
+  aiApikeyInput.type = aiApikeyInput.type === 'password' ? 'text' : 'password';
 });
 
 // ========== IPC 监听 ==========
 
 window.duocli.onPtyData((id, data) => {
   termManager.write(id, data);
-  // 追加到会话历史 buffer
-  window.duocli.sessionHistoryAppend(id, data);
   if (sessionTitles.has(id)) {
     sessionUpdateTimes.set(id, Date.now());
   }
-  if (archivedSessions.has(id)) {
-    archivedSessions.get(id)!.updateTime = Date.now();
-  }
   // 所有会话都追踪状态（工作中/等待输入），确保切换查看后状态不丢失
   const activeId = termManager.getActiveId();
-  if (sessionTitles.has(id) || archivedSessions.has(id)) {
+  if (sessionTitles.has(id)) {
     // 有新输出就优先显示"工作中"（黄点），并清掉旧的"待处理"（绿点）
     const prevBusy = sessionBusy.has(id);
     const prevUnread = sessionUnread.has(id);
@@ -2699,60 +2349,36 @@ window.duocli.onTitleUpdate((id, title) => {
     sessionUpdateTimes.set(id, Date.now());
     renderSessionList();
     updateSessionTitleBar();
-    // 同步重命名历史文件
-    window.duocli.sessionHistoryRename(id, title);
   }
-  if (archivedSessions.has(id)) {
-    const info = archivedSessions.get(id)!;
-    info.title = title;
-    info.updateTime = Date.now();
-    renderArchivedList();
+});
+
+// Chat 会话标题更新（全局处理，避免只在 ChatView 内部监听导致丢失）
+window.duocli.onChatTitleUpdate((id, title) => {
+  if (chatSessionTitles.has(id)) {
+    chatSessionTitles.set(id, title);
+    renderSessionList();
   }
 });
 
 window.duocli.onPtyExit((id) => {
-  // 结束会话历史记录
-  const flushTimer = historyFlushTimers.get(id);
-  if (flushTimer) { clearInterval(flushTimer); historyFlushTimers.delete(id); }
-  window.duocli.sessionHistoryFinish(id);
-  sessionTitles.delete(id);
-  sessionThemes.delete(id);
-  sessionUpdateTimes.delete(id);
-  archivedSessions.delete(id);
-  sessionUnread.delete(id);
-  sessionBusy.delete(id);
-  clearTimeout(unreadTimers.get(id));
-  unreadTimers.delete(id);
-  recentDataBuffer.delete(id);
-  sessionTitleLocked.delete(id);
-  pinnedSessions.delete(id);
-  sessionCwds.delete(id);
-  sessionDisplayNames.delete(id);
-  sessionProviders.delete(id);
-  sessionAutoContinue.delete(id);
+  clearSessionState(id);
   saveAutoContinueToStorage();
   termManager.destroy(id);
   updateEmptyState();
   renderSessionList();
-  renderArchivedList();
   updateSessionTitleBar();
   void renderFileTree();
-  if (!historyList.classList.contains('collapsed')) refreshHistory();
 });
 
 // 手机端远程创建了会话，桌面端同步显示
 window.duocli.onRemoteCreated((info) => {
+  const now = Date.now();
   sessionTitles.set(info.id, info.title);
   sessionThemes.set(info.id, info.themeId);
-  sessionUpdateTimes.set(info.id, Date.now());
+  sessionUpdateTimes.set(info.id, now);
+  sessionCreateTimes.set(info.id, now);
   sessionCwds.set(info.id, info.cwd);
   sessionDisplayNames.set(info.id, info.displayName);
-  // 初始化会话历史
-  window.duocli.sessionHistoryInit(info.id, info.title);
-  const flushTimer = setInterval(() => {
-    window.duocli.sessionHistoryFlush(info.id);
-  }, 2000);
-  historyFlushTimers.set(info.id, flushTimer);
   // 创建 xterm 实例（桌面端也能看到和操作）
   termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithAutoReset(info.id, data); });
   updateEmptyState();
@@ -2765,12 +2391,37 @@ window.duocli.onRemoteCreated((info) => {
   }, 100);
 });
 
-// 远程服务器启动成功，保存连接信息并更新 UI
-window.duocli.onRemoteServerInfo((info) => {
-  console.log('[Renderer] Received remote server info:', info);
+// 远程服务器信息处理：合并推送/拉取预设
+async function handleRemoteServerInfo(info: typeof remoteServerInfo) {
+  if (!info) return;
+  console.log('[Renderer] Remote server info:', info);
   remoteServerInfo = info;
   renderRemoteServerInfo();
-});
+  startPresetSyncTimer();
+  
+  console.log('[Preset Sync] Remote server started, initiating preset sync');
+  await reconcilePresetsWithServer('remote-ready');
+}
+
+// 方式1：IPC 推送（可能因竞态丢失）
+window.duocli.onRemoteServerInfo(handleRemoteServerInfo);
+
+// 方式2：渲染进程加载后主动拉取；服务器启动和页面加载都有竞态，需短时重试。
+async function waitForRemoteServerInfo(): Promise<void> {
+  for (let i = 0; i < 40 && !remoteServerInfo; i++) {
+    const info = await window.duocli.getRemoteServerInfo();
+    if (info && !remoteServerInfo) {
+      await handleRemoteServerInfo(info);
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  if (!remoteServerInfo) {
+    console.warn('[Preset Sync] Remote server info unavailable after retry, presets may not sync to mobile');
+  }
+}
+
+void waitForRemoteServerInfo();
 
 // 催工配置：手机端通过 main 进程读取桌面端配置
 window.duocli.onGetAutoContinueConfig((sessionId) => {
@@ -2783,27 +2434,25 @@ window.duocli.onSetAutoContinueConfig((sessionId, config) => {
   if (!config || !hasSessionInUI(sessionId)) return;
   const existing = sessionAutoContinue.get(sessionId) || {
     enabled: false,
-    message: AUTO_CONTINUE_DEFAULT_MESSAGE,
+    messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
     intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
+    commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
     lastSendTime: Date.now(),
     autoAgree: true,
     autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
     sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
+    maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
+    enabledAt: 0,
   };
   Object.assign(existing, config);
   existing.lastSendTime = Date.now();
+  if (config.enabled && !existing.enabledAt) {
+    existing.enabledAt = Date.now();
+  }
   sessionAutoContinue.set(sessionId, existing);
   saveAutoContinueToStorage();
   if (existing.enabled) initAutoContinueTimer();
   renderSessionList();
-});
-
-// 监听快照自动创建事件
-window.duocli.onSnapshotCreated(() => {
-  // 如果当前在快照 Tab，自动刷新列表
-  if (tabSnapshots.classList.contains('active')) {
-    refreshSnapshots();
-  }
 });
 
 // 监听文件变化（归到当前活跃会话）
@@ -2884,7 +2533,6 @@ window.duocli.filewatcherGetEditor().then((editorPath) => {
 // 每60秒刷新时间显示
 setInterval(() => {
   if (sessionTitles.size > 0) renderSessionList();
-  if (archivedSessions.size > 0) renderArchivedList();
 }, 60000);
 
 // ========== 版权信息交互 ==========
