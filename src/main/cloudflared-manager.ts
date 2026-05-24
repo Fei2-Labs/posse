@@ -10,7 +10,12 @@ export interface CloudflaredStatus {
   message?: string;
 }
 
-const PUBLIC_URL = 'https://duocli.guixian.fun';
+const TEMPLATE_MARKERS = [
+  'YOUR_TUNNEL_NAME',
+  'YOUR_TUNNEL_ID',
+  '/ABSOLUTE/PATH/TO/',
+  'duocli.example.com',
+];
 
 export class CloudflaredManager {
   private child: ChildProcess | null = null;
@@ -25,25 +30,40 @@ export class CloudflaredManager {
   getStatus(): CloudflaredStatus {
     const installed = Boolean(this.resolveBinary());
     const running = this.isRunning();
+    const config = this.readConfig();
+    const publicUrl = config.hostname ? `https://${config.hostname}` : '';
+    const configReady = this.isConfigReady(config.raw);
+    const message = this.getStatusMessage(installed, configReady, config);
     return {
       installed,
       running,
-      url: PUBLIC_URL,
+      url: publicUrl,
       configPath: this.configPath,
-      message: installed ? undefined : 'cloudflared 未安装，请先运行: brew install cloudflared',
+      message,
     };
   }
 
   start(): CloudflaredStatus {
     const bin = this.resolveBinary();
     if (!bin) return this.getStatus();
-    if (!fs.existsSync(this.configPath)) {
+    const config = this.readConfig();
+    const publicUrl = config.hostname ? `https://${config.hostname}` : '';
+    if (!config.exists) {
       return {
         installed: true,
         running: false,
-        url: PUBLIC_URL,
+        url: publicUrl,
         configPath: this.configPath,
         message: `找不到 cloudflared 配置: ${this.configPath}`,
+      };
+    }
+    if (!this.isConfigReady(config.raw)) {
+      return {
+        installed: true,
+        running: false,
+        url: publicUrl,
+        configPath: this.configPath,
+        message: `Cloudflare 配置未完成，请填写本机私有配置: ${this.configPath}`,
       };
     }
     if (this.isRunning()) return this.getStatus();
@@ -62,7 +82,7 @@ export class CloudflaredManager {
     return {
       installed: true,
       running: true,
-      url: PUBLIC_URL,
+      url: publicUrl,
       configPath: this.configPath,
     };
   }
@@ -78,13 +98,20 @@ export class CloudflaredManager {
   }
 
   private resolveConfigPath(projectRoot: string): string {
-    const resourcePath = process.resourcesPath
-      ? path.join(process.resourcesPath, 'frp', 'cloudflared-config.yml')
-      : '';
-    if (resourcePath && fs.existsSync(resourcePath)) return resourcePath;
+    const candidates = [
+      path.join(projectRoot, 'frp', 'cloudflared-config.local.yml'),
+      path.join(projectRoot, 'frp', 'cloudflared-config.private.yml'),
+      process.resourcesPath ? path.join(process.resourcesPath, 'frp', 'cloudflared-config.local.yml') : '',
+      process.resourcesPath ? path.join(process.resourcesPath, 'frp', 'cloudflared-config.private.yml') : '',
+      process.resourcesPath ? path.join(process.resourcesPath, 'frp', 'cloudflared-config.yml') : '',
+      path.join(projectRoot, 'frp', 'cloudflared-config.yml'),
+    ].filter(Boolean);
 
-    const devPath = path.join(projectRoot, 'frp', 'cloudflared-config.yml');
-    return devPath;
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+
+    return path.join(projectRoot, 'frp', 'cloudflared-config.local.yml');
   }
 
   private resolveBinary(): string | null {
@@ -111,9 +138,39 @@ export class CloudflaredManager {
   private isRunning(): boolean {
     if (this.child && !this.child.killed) return true;
     try {
-      execFileSync('/usr/bin/pgrep', ['-f', 'cloudflared.*cloudflared-config.yml'], { stdio: 'ignore' });
+      execFileSync('/usr/bin/pgrep', ['-f', 'cloudflared.*cloudflared-config'], { stdio: 'ignore' });
       return true;
     } catch { /* not running */ }
     return false;
+  }
+
+  private readConfig(): { exists: boolean; raw: string; hostname: string | null } {
+    if (!fs.existsSync(this.configPath)) {
+      return { exists: false, raw: '', hostname: null };
+    }
+    const raw = fs.readFileSync(this.configPath, 'utf-8');
+    const hostnameMatch = raw.match(/^\s*-\s*hostname:\s*([^\s#]+)\s*$/m);
+    return {
+      exists: true,
+      raw,
+      hostname: hostnameMatch ? hostnameMatch[1].trim() : null,
+    };
+  }
+
+  private isConfigReady(raw: string): boolean {
+    if (!raw.trim()) return false;
+    return !TEMPLATE_MARKERS.some(marker => raw.includes(marker));
+  }
+
+  private getStatusMessage(
+    installed: boolean,
+    configReady: boolean,
+    config: { exists: boolean; hostname: string | null },
+  ): string | undefined {
+    if (!installed) return 'cloudflared 未安装，请先运行: brew install cloudflared';
+    if (!config.exists) return `找不到 cloudflared 配置: ${this.configPath}`;
+    if (!configReady) return `Cloudflare 配置未完成，请填写本机私有配置: ${this.configPath}`;
+    if (!config.hostname) return `Cloudflare 配置缺少 hostname: ${this.configPath}`;
+    return undefined;
   }
 }

@@ -9,6 +9,12 @@
 | 隧道名称 | `<your-tunnel-name>` |
 | 隧道 ID | `<your-tunnel-id>` |
 
+## 配置原则
+
+- 仓库内的 `cloudflared-config.yml` 只是模板，用于 GitHub 提交，不保证可直接运行
+- 本机真实配置请放在 `frp/cloudflared-config.local.yml` 或 `frp/cloudflared-config.private.yml`
+- 真实 tunnel 名称、域名、`credentials-file` 绝对路径不要提交到仓库
+
 ## 快速开始
 
 ### 1. 启动 DuoCLI
@@ -16,11 +22,16 @@
 
 ### 2. 启动 Cloudflare Tunnel
 
-先把 `cloudflared-config.yml` 里的占位符替换成你自己的 tunnel 名称、域名和本机凭证绝对路径，再执行：
+先复制模板并填写你自己的 tunnel 名称、域名和本机凭证绝对路径，再执行：
 
 ```bash
 cd /path/to/DuoCLI/frp
+cp cloudflared-config.yml cloudflared-config.local.yml
+```
 
+然后编辑 `cloudflared-config.local.yml`：
+
+```bash
 # 启动
 ./start-cloudflared.sh
 
@@ -54,14 +65,16 @@ https://<your-domain>
 | `start-cloudflared.sh` | 启动 Cloudflare Tunnel（带检查） |
 | `stop-cloudflared.sh` | 停止 Cloudflare Tunnel |
 | `status-cloudflared.sh` | 查看运行状态 |
-| `cloudflared-config.yml` | Tunnel 配置文件 |
+| `cloudflared-config.yml` | Git 仓库模板配置 |
+| `cloudflared-config.local.yml` | 本机私有配置（推荐） |
 | `创建桌面启动器.command` | 生成桌面 AppleScript 启动器 |
 
 ## 配置文件
 
 | 文件 | 用途 |
 |------|------|
-| `cloudflared-config.yml` | Tunnel 入口配置 |
+| `cloudflared-config.yml` | 模板配置 |
+| `cloudflared-config.local.yml` | 本机真实入口配置 |
 | `~/.cloudflared/cert.pem` | Cloudflare 登录凭证 |
 | `~/.cloudflared/<your-tunnel-id>.json` | Tunnel 凭证 |
 
@@ -120,6 +133,7 @@ launchctl load ~/Library/LaunchAgents/com.duocli.cloudflared.plist
 - 检查 `cloudflared` 是否已安装：`which cloudflared`
 - 检查凭证文件是否存在：`ls ~/.cloudflared/cert.pem`
 - 查看日志：`cat cloudflared.log`
+- 检查本机私有配置是否仍是模板占位符：`./status-cloudflared.sh`
 
 ### 2. 手机无法访问
 - 确认 Tunnel 正在运行：`./status-cloudflared.sh`

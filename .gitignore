@@ -33,10 +33,14 @@ frp/*
 !frp/status-cloudflared.sh
 !frp/stop-cloudflared.sh
 !frp/cloudflared-config.yml
+!frp/cloudflared-config.local.example.yml
 !frp/DuoCLI-远程启动.scpt
 !frp/创建桌面启动器.command
 frp/*.log
+frp/cloudflared-config.local.yml
+frp/cloudflared-config.private.yml
 
 # Local secrets
 .env
 .env.*
+.duocli/

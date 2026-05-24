@@ -992,7 +992,7 @@ app.whenReady().then(async () => {
     const tunnel = cloudflaredManager?.start();
     const serverInfo = {
       ...info,
-      publicUrl: tunnel?.running ? tunnel.url : undefined,
+      publicUrl: tunnel?.url || undefined,
       tunnel,
     };
     cachedRemoteServerInfo = serverInfo;

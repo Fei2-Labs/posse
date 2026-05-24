@@ -553,8 +553,11 @@ function renderRemoteServerInfo(): void {
   remoteServerInfoEl.style.display = 'block';
   const urlEl = remoteServerInfoEl.querySelector('.remote-info-url') as HTMLElement;
   const tokenEl = remoteServerInfoEl.querySelector('.remote-info-token')!;
-  urlEl.textContent = remoteServerInfo.publicUrl || remoteServerInfo.lanUrl;
-  urlEl.title = remoteServerInfo.publicUrl ? remoteServerInfo.lanUrl : '';
+  const tunnelReady = Boolean(remoteServerInfo.tunnel?.running && remoteServerInfo.publicUrl);
+  urlEl.textContent = tunnelReady
+    ? remoteServerInfo.publicUrl!
+    : `${remoteServerInfo.lanUrl}${remoteServerInfo.tunnel?.message ? ` | ${remoteServerInfo.tunnel.message}` : ''}`;
+  urlEl.title = tunnelReady ? remoteServerInfo.lanUrl : '';
   tokenEl.textContent = `Token: ${remoteServerInfo.token}`;
 }
 
