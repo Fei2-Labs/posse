@@ -94,6 +94,14 @@ contextBridge.exposeInMainWorld('duocli', {
   claudeProvidersList: () => ipcRenderer.invoke('claude-providers:list'),
   claudeProvidersSave: (providers: any[]) => ipcRenderer.invoke('claude-providers:save', providers),
 
+  // Devin 账号管理
+  devinAccountsList: () => ipcRenderer.invoke('devin-accounts:list'),
+  devinAccountsAdd: (email: string, password: string) => ipcRenderer.invoke('devin-accounts:add', email, password),
+  devinAccountsRemove: (email: string) => ipcRenderer.invoke('devin-accounts:remove', email),
+  devinAccountsSwitch: (opts: { email?: string; next?: boolean }) => ipcRenderer.invoke('devin-accounts:switch', opts),
+  devinAccountsQuota: () => ipcRenderer.invoke('devin-accounts:quota'),
+  devinAccountsRotateDevice: () => ipcRenderer.invoke('devin-accounts:rotate-device'),
+
   // 会话状态同步：renderer → main（供手机端读取）
   syncSessionStatus: (statuses: Record<string, string>) =>
     ipcRenderer.send('session:sync-status', statuses),
@@ -131,4 +139,11 @@ contextBridge.exposeInMainWorld('duocli', {
     ipcRenderer.on('chat:error', (_e, sessionId, error) => cb(sessionId, error)),
   onChatTitleUpdate: (cb: (sessionId: string, title: string) => void) =>
     ipcRenderer.on('chat:title-update', (_e, sessionId, title) => cb(sessionId, title)),
+
+  // ========== 已关闭会话 ==========
+  closedSessionsList: () => ipcRenderer.invoke('closed-sessions:list'),
+  closedSessionsRemove: (id: string) => ipcRenderer.invoke('closed-sessions:remove', id),
+  closedSessionsClear: () => ipcRenderer.invoke('closed-sessions:clear'),
+  onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; displayName: string; closedAt: number }>) => void) =>
+    ipcRenderer.on('closed-sessions:update', (_e, sessions) => cb(sessions)),
 });

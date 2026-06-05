@@ -538,13 +538,22 @@ export class TerminalManager {
   write(id: string, data: string): void {
     const inst = this.instances.get(id);
     if (!inst) return;
-    // 写入前判断是否在底部附近（容差 3 行），是则写入后自动滚到底
+    // 记录写入前是否在底部（使用容差避免浮点/行高差异误判）
     const buf = inst.terminal.buffer.active;
-    const nearBottom = buf.baseY - buf.viewportY <= 3;
+    const wasAtBottom = buf.viewportY >= buf.baseY - 2;
     inst.terminal.write(data, () => {
-      if (nearBottom || inst.pendingInputScroll) {
+      // 写入后双重判断：写入前在底部 或 pendingInputScroll → 滚到底
+      // 第二个条件兜底：若 fit() 在两次 write 之间改变了 viewport，
+      // wasAtBottom 仍记录着上一次真正的用户位置
+      const currentBuf = inst.terminal.buffer.active;
+      const stillAtBottom = currentBuf.viewportY >= currentBuf.baseY - 2;
+      if (wasAtBottom || inst.pendingInputScroll) {
         inst.terminal.scrollToBottom();
         inst.pendingInputScroll = false;
+      } else if (stillAtBottom && currentBuf.baseY > 0) {
+        // 如果用户之前不在底部，但写完后恰好在底部了（说明内容自动滚到底了），
+        // 且 buffer 已有内容，则保持在底部（正常追屏行为）
+        inst.terminal.scrollToBottom();
       }
     });
   }
@@ -579,7 +588,14 @@ export class TerminalManager {
     if (!this.activeId) return;
     const inst = this.instances.get(this.activeId);
     if (inst) {
+      // fit() 会调用 terminal.resize()，可能改变行列数导致 viewport 意外移位。
+      // 记录 fit 前是否在底部，fit 后恢复，避免跳到 buffer 顶部。
+      const buf = inst.terminal.buffer.active;
+      const wasAtBottom = buf.baseY > 0 && buf.viewportY >= buf.baseY - 2;
       inst.fitAddon.fit();
+      if (wasAtBottom) {
+        inst.terminal.scrollToBottom();
+      }
       // 记录当前容器尺寸，供定时检查使用
       const rect = inst.container.getBoundingClientRect();
       this.lastFitSize = { w: rect.width, h: rect.height };

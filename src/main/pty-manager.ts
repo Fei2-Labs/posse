@@ -1,7 +1,9 @@
 import * as pty from 'node-pty';
 import * as os from 'os';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import { execSync, spawn } from 'child_process';
 import { requestTitleFromConfiguredAI, TitleAIConfig } from './title-ai';
 
 export interface PtySession {
@@ -21,6 +23,11 @@ export interface PtySession {
   themeId: string;
   provider: string | null;    // 实际使用的模型提供商 (如 MiniMax, GLM 等)
   createdAt: number;          // 创建时间戳
+  resumeId: string | null;    // 捕获的 resume session ID (UUID)
+  resumeCommand: string | null; // 完整 resume 命令 (如 "claude --resume xxx")
+  autoRetryCooldown: number;    // 自动重试冷却截止时间戳
+  prevData: string;              // 上一个 PTY 分片，与当前分片合并检测 rate limit
+  retryTimer: NodeJS.Timeout | null;  // 自动重试 / 切号延迟定时器
   disposables: pty.IDisposable[];
 }
 
@@ -39,6 +46,9 @@ const PRESET_DISPLAY_NAMES: Record<string, string> = {
   'claude --dangerously-skip-permissions': 'Claude全自动',
   'codex --full-auto': 'Codex全自动',
   'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"': 'Codex全自动',
+  'devin --permission-mode bypass': 'Devin全自动',
+  'opencode': 'OpenCode',
+  'kiro-cli chat --trust-all-tools': 'Kiro全自动',
 };
 
 function stripTerminalControlSequences(text: string): string {
@@ -53,6 +63,41 @@ function stripTerminalControlSequences(text: string): string {
     .replace(/\x1b[@-_]/g, '')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
 }
+
+// Devin 设备指纹旋转（防止跨账号限流关联）
+const DEVIN_INSTALLATION_ID_PATHS = [
+  path.join(os.homedir(), '.local', 'share', 'devin', 'cli', 'installation_id'),
+  path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next', 'installation_id'),
+];
+
+export function rotateDevinInstallationId(): void {
+  const newId = crypto.randomUUID().toUpperCase();
+  for (const p of DEVIN_INSTALLATION_ID_PATHS) {
+    try {
+      if (fs.existsSync(p)) {
+        fs.writeFileSync(p, newId);
+        console.log(`[PTY] Rotated installation_id: ${p} → ${newId}`);
+      } else {
+        const dir = path.dirname(p);
+        if (fs.existsSync(dir)) {
+          fs.writeFileSync(p, newId);
+          console.log(`[PTY] Created installation_id: ${p} → ${newId}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[PTY] Failed to rotate installation_id ${p}:`, (e as Error).message);
+    }
+  }
+}
+
+// 解析 session-sync 的绝对路径（避免 Dock 启动时 PATH 缺失导致 ENOENT）
+const sessionSyncPath = (() => {
+  try {
+    const syncSymlink = path.join(os.homedir(), '.local', 'bin', 'session-sync');
+    if (fs.existsSync(syncSymlink)) return fs.realpathSync(syncSymlink);
+  } catch { /* ignore */ }
+  return 'session-sync'; // fallback to PATH lookup
+})();
 
 export function getDisplayName(presetCommand: string): string {
   return PRESET_DISPLAY_NAMES[presetCommand] || presetCommand || '终端';
@@ -120,6 +165,11 @@ export class PtyManager {
       themeId,
       provider: null,
       createdAt: Date.now(),
+      resumeId: null,
+      resumeCommand: null,
+      autoRetryCooldown: 0,
+      prevData: '',
+      retryTimer: null,
       disposables: [],
     };
 
@@ -170,6 +220,91 @@ export class PtyManager {
             void this.triggerSummarize(id);
           }, 800);
         }
+      }
+
+      // 实时捕获 resume session ID（Claude Code 退出时输出 "claude --resume <uuid>"）
+      if (!session.resumeId && data.toLowerCase().includes('resume')) {
+        const stripped = stripTerminalControlSequences(data);
+        const resumeMatch = stripped.match(/(\S+)\s+--resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (resumeMatch) {
+          session.resumeId = resumeMatch[2];
+          session.resumeCommand = `${resumeMatch[1]} --resume ${resumeMatch[2]}`;
+        }
+      }
+
+      // Devin 终端专属：自动重试与切号
+      // 仅对 devin presetCommand 生效，其他终端不触发
+      if (session.presetCommand.startsWith('devin')) {
+        const combinedLower = (session.prevData + data).toLowerCase();
+        session.prevData = data;
+
+        // 统一用 ⚠ / 错误关键字检测 Devin 报错
+        const hasWarningSign = combinedLower.includes('⚠')
+          || combinedLower.includes('something went wrong')
+          || combinedLower.includes('permission denied');
+
+        // 1) 硬限流（需切号）→ 后台切号 + 旋转设备指纹，完成后自动发"继续"（不中断当前会话）
+        //    "quota exhausted" / "usage is exhausted" — 日/周额度用完
+        //    "overall message rate limit" / "permission denied" — 账号级硬限制
+        if (hasWarningSign && (
+          combinedLower.includes('quota exhausted') ||
+          combinedLower.includes('usage is exhausted') ||
+          combinedLower.includes('overall message rate limit') ||
+          (combinedLower.includes('permission denied') && combinedLower.includes('rate limit'))
+        )) {
+          session.prevData = '';
+          if (Date.now() > session.autoRetryCooldown) {
+            session.autoRetryCooldown = Date.now() + 30000;
+            console.log(`[PTY] 检测到 ⚠ 硬限流（需切号），后台切号 + 旋转设备指纹 (session: ${id})`);
+            // 旋转 Devin 设备指纹，防止跨账号限流关联
+            rotateDevinInstallationId();
+            // 使用绝对路径避免 Dock 启动时 PATH 不包含 ~/.local/bin
+            // stdio: 'ignore' + unref() 防止 pipe 缓冲区阻塞和进程泄漏
+            const sw = spawn(sessionSyncPath, ['switch'], { stdio: 'ignore', detached: true });
+            sw.unref();
+            sw.on('close', (code) => {
+              if (!this.sessions.has(id)) return;
+              if (code === 0) {
+                console.log(`[PTY] 后台切号成功，3 秒后发送"继续" (session: ${id})`);
+                session.retryTimer = setTimeout(() => {
+                  session.retryTimer = null;
+                  if (!this.sessions.has(id)) return;
+                  ptyProcess.write('继续\r');
+                  session.autoRetryCooldown = 0;
+                }, 3000);
+              } else {
+                const errMsg = `\n⚠️ [DuoCLI] 自动切号失败 (exit code: ${code})，请手动切换账号\n`;
+                ptyProcess.write(errMsg);
+                console.error(`[PTY] 后台切号失败 (exit code: ${code})`);
+                // 失败时保持 30s 冷却，防止死循环
+                session.autoRetryCooldown = Date.now() + 30000;
+              }
+            });
+            sw.on('error', (err) => {
+              if (!this.sessions.has(id)) return;
+              const errMsg = `\n⚠️ [DuoCLI] 自动切号异常: ${err.message}，请手动切换账号\n`;
+              ptyProcess.write(errMsg);
+              console.error(`[PTY] 后台切号异常:`, err.message);
+              session.autoRetryCooldown = Date.now() + 30000;
+            });
+          }
+        }
+        // 2) Rate limit → 8 秒后自动发"继续"，发完后清除冷却期以便下次报错能立即触发
+        else if (hasWarningSign && combinedLower.includes('rate limit')) {
+          session.prevData = '';
+          if (Date.now() > session.autoRetryCooldown) {
+            console.log(`[PTY] 检测到 ⚠ Rate limit，8 秒后自动发送"继续" (session: ${id})`);
+            session.autoRetryCooldown = Date.now() + 10000;  // 冷却期仅防止 8s 等待期间重复排队
+            session.retryTimer = setTimeout(() => {
+              session.retryTimer = null;
+              if (!this.sessions.has(id)) return;
+              ptyProcess.write('继续\r');
+              session.autoRetryCooldown = 0;  // 发完后立即解除冷却，允许下次报错立刻触发
+            }, 8000);
+          }
+        }
+      } else {
+        session.prevData = data;
       }
 
       this.events.onData(id, data);
@@ -244,6 +379,10 @@ export class PtyManager {
       clearTimeout(session.summarizeTimer);
       session.summarizeTimer = null;
     }
+    if (session.retryTimer) {
+      clearTimeout(session.retryTimer);
+      session.retryTimer = null;
+    }
     session.disposables.forEach(d => d.dispose());
     session.disposables = [];
     session.ptyProcess.kill();
@@ -276,7 +415,22 @@ export class PtyManager {
   }
 
   getAllSessions(): PtySession[] {
-    return Array.from(this.sessions.values());
+    return Array.from(this.sessions.values())
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /**
+   * 从 buffer 中提取 resume ID（关闭前的兜底，处理 resume 输出跨 chunk 的情况）
+   */
+  captureResumeFromBuffer(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.resumeId) return;
+    const stripped = stripTerminalControlSequences(session.buffer);
+    const match = stripped.match(/(\S+)\s+--resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    if (match) {
+      session.resumeId = match[2];
+      session.resumeCommand = `${match[1]} --resume ${match[2]}`;
+    }
   }
 
   getCwd(id: string): string {

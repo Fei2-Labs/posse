@@ -1837,3 +1837,182 @@ select.ai-form-input {
   gap: 12px;
   font-size: 14px;
 }
+
+/* ========== Devin 账号管理 ========== */
+#devin-accounts-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  gap: 6px;
+}
+
+.devin-current-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.devin-header-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+
+.devin-header-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.devin-header-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.devin-accounts-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.devin-accounts-empty {
+  padding: 24px 14px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.devin-account-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px 6px 13px;
+  border-left: 3px solid transparent;
+  cursor: default;
+  transition: background 0.1s;
+}
+
+.devin-account-item.active {
+  background: rgba(56, 132, 244, 0.12);
+  border-left-color: var(--accent, #3884f4);
+}
+
+.devin-account-item:hover {
+  background: var(--hover-bg);
+}
+
+.devin-account-item.active:hover {
+  background: rgba(56, 132, 244, 0.18);
+}
+
+.devin-account-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.devin-account-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.devin-account-dot.ok { background: #4caf50; }
+.devin-account-dot.err { background: #f44747; }
+.devin-account-dot.idle { background: #666; }
+
+.devin-account-email {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.devin-account-quota-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  border: 1px solid var(--border-color);
+}
+
+.devin-account-quota-tag.low {
+  color: #f44747;
+  border-color: #f4474740;
+}
+
+.devin-account-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding-left: 13px;
+}
+
+.devin-account-meta {
+  font-size: 10px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.devin-account-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.devin-account-actions button {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.devin-account-actions button:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+.devin-account-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.devin-account-actions .devin-delete-btn:hover {
+  border-color: #f44747;
+  color: #f44747;
+}
+
+#devin-accounts-add {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.devin-btn {
+  width: 100%;
+  font-size: 12px;
+}

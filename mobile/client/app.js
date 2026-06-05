@@ -1239,7 +1239,13 @@ function createTerminal() {
 
 function handleResize() {
   if (!fitAddon || !term) return;
+  // fit() 会改变终端行列数，可能导致 viewport 意外跳到顶部。
+  // 记录 fit 前是否在底部，fit 后恢复。
+  const wasAtBottom = isAtBottom();
   fitAddon.fit();
+  if (wasAtBottom) {
+    term.scrollToBottom();
+  }
   if (ws && ws.readyState === WebSocket.OPEN && term.cols > 0 && term.rows > 0) {
     wsSend({ type: 'resize', cols: term.cols, rows: term.rows });
   }
@@ -1248,11 +1254,177 @@ function handleResize() {
 function closeTerminal() {
   window.removeEventListener('resize', handleResize);
   closeWebSocket();
+  // 重置 spinner 拦截状态
+  resetSpinnerState();
   if (term) {
     term.dispose();
     term = null;
     fitAddon = null;
   }
+}
+
+// ========== Spinner 拦截（手机窄屏优化） ==========
+
+// 手机端列数少（40-50），CLI spinner（如 ⠋⠙⠹ braille 动画或逐字变色）
+// 用 \r 覆盖同一行，但内容超宽 wrap 后 \r 无法清除上方残留行，导致重复多行。
+// 此模块在 term.write 前拦截 spinner 帧，替换为截断的静态文本。
+
+const spinnerState = {
+  active: false,          // 当前是否处于 spinner 拦截模式
+  consecutiveCRFrames: 0, // 连续只含 \r 不含 \n 的帧计数
+  spinnerLine: '',        // 当前拦截到的 spinner 纯文本
+  cooldownUntil: 0,       // 冷却期截止时间（避免 spinner 结束后误拦截）
+  lastRefreshTime: 0,     // 上次刷新终端显示的时间戳（限频用）
+};
+
+/** 重置 spinner 拦截状态（退出 spinner 模式或关闭终端时调用） */
+function resetSpinnerState(cooldownMs) {
+  spinnerState.active = false;
+  spinnerState.consecutiveCRFrames = 0;
+  spinnerState.spinnerLine = '';
+  spinnerState.cooldownUntil = cooldownMs ? Date.now() + cooldownMs : 0;
+  spinnerState.lastRefreshTime = 0;
+}
+
+/** 去除 ANSI escape sequences，返回纯文本 */
+function stripAnsi(str) {
+  return str
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI 序列 (含 ? 私有参数, 如 \x1b[?25l)
+    .replace(/\x1b\][^\x07]*\x07/g, '')        // OSC + BEL
+    .replace(/\x1b\][^\x1b]*\x1b\\/g, '')      // OSC + ST
+    .replace(/\x1b\([B0UK]/g, '')               // 字符集指定
+    .replace(/\x1b[()][B0UK]/g, '');           // 字符集指定 (另一形式)
+}
+
+/** 从 spinner 原始数据中提取纯文本 */
+function extractSpinnerText(rawData) {
+  let text = rawData;
+  text = text.replace(/^\r+/, '');  // 去掉开头的 \r
+  text = stripAnsi(text);
+  text = text.trimEnd();
+  return text;
+}
+
+/** 将 braille spinner 等动画字符替换为简化的省略号 */
+function simplifySpinnerText(text) {
+  // Braille spinner 字符
+  text = text.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]+/g, '…');
+  // 旋转线 spinner（至少 3 个连续字符才匹配，避免误伤 |- 或 -- 等短组合）
+  text = text.replace(/[|/\\-]{3,}/g, '…');
+  // 合并连续省略号
+  text = text.replace(/…{2,}/g, '…');
+  return text;
+}
+
+/**
+ * 判断 output 帧类型
+ * 返回: 'spinner' | 'spinner-final' | 'normal'
+ */
+function classifyOutputFrame(data) {
+  if (!data || data.length === 0) return 'normal';
+
+  const hasCR = data.includes('\r');
+  const hasNewline = data.includes('\n');
+
+  // 含 \n 不含 \r：正常输出
+  if (hasNewline && !hasCR) return 'normal';
+
+  // 含 \n 且含 \r：
+  //   - spinner 模式下：视为 spinner 最终帧
+  //   - 非 spinner 模式：正常输出
+  if (hasNewline && hasCR) {
+    if (spinnerState.active) return 'spinner-final';
+    return 'normal';
+  }
+
+  // 只含 \r 不含 \n：spinner 的典型特征
+  if (hasCR) {
+    const strippedLen = stripAnsi(data).length;
+    // 内容太长（> 300）不太可能是典型 spinner，保守放行
+    if (strippedLen > 300) return 'normal';
+    return 'spinner';
+  }
+
+  // 没有 \r 也没有 \n：正常输出分片
+  return 'normal';
+}
+
+/**
+ * 核心：拦截处理 spinner 帧
+ * 返回应写入 term 的数据；返回 null 表示丢弃该帧
+ */
+function interceptSpinnerData(rawData) {
+  const classification = classifyOutputFrame(rawData);
+  const now = Date.now();
+
+  // 冷却期内非 spinner 帧直接放行
+  if (spinnerState.cooldownUntil > now && classification !== 'spinner') {
+    return rawData;
+  }
+
+  // --- normal：如果正在 spinner 模式则退出，否则直接放行 ---
+  if (classification === 'normal') {
+    if (spinnerState.active) {
+      // spinner 模式结束，清行退出
+      resetSpinnerState(300);
+      // 先清掉之前写到终端的 spinner 行
+      return '\r\x1b[K' + rawData;
+    }
+    return rawData;
+  }
+
+  // --- spinner-final：spinner 结束帧 ---
+  if (classification === 'spinner-final') {
+    if (spinnerState.active) {
+      resetSpinnerState(300);
+      // 清行后写最终内容
+      return '\r\x1b[K' + rawData;
+    }
+    return rawData;
+  }
+
+  // --- spinner：含 \r 不含 \n 的帧 ---
+  if (classification === 'spinner') {
+    spinnerState.consecutiveCRFrames++;
+
+    // 连续 2 帧 \r-only 才激活拦截（避免单次 \r 误触）
+    if (!spinnerState.active && spinnerState.consecutiveCRFrames < 2) {
+      return rawData; // 还在确认阶段，先正常输出
+    }
+
+    // 激活 spinner 模式
+    if (!spinnerState.active) {
+      spinnerState.active = true;
+      spinnerState.spinnerLine = '';
+    }
+
+    // 提取并简化文本
+    const newText = simplifySpinnerText(extractSpinnerText(rawData));
+
+    // 内容没变化就不刷新
+    if (newText === spinnerState.spinnerLine) {
+      return null;
+    }
+    spinnerState.spinnerLine = newText;
+
+    // 200ms 限频，避免高频渲染
+    if (spinnerState.lastRefreshTime && now - spinnerState.lastRefreshTime < 200) {
+      return null;
+    }
+    spinnerState.lastRefreshTime = now;
+
+    // 截断到终端列宽 - 4，防止再次 wrap
+    const maxLen = (term ? term.cols : 40) - 4;
+    let display = newText;
+    if (display.length > maxLen) {
+      display = display.substring(0, maxLen) + '…';
+    }
+
+    // \r 回到行首，\x1b[K 清除整行，然后写简化文本
+    return '\r\x1b[K' + display;
+  }
+
+  return rawData;
 }
 
 // ========== WebSocket ==========
@@ -1349,14 +1521,22 @@ function connectWebSocket(sessionId) {
       } else if (msg.type === 'output') {
         hideTerminalLoading();
         hideWeakNetworkPrompt();
-        const shouldStickToBottom = !isUserScrolling && isAtBottom();
-        term.write(msg.data);
-        // 用户手动滚动时不自动滚到底部，避免死循环
-        if (shouldStickToBottom) {
-          if (scrollToBottomTimer) clearTimeout(scrollToBottomTimer);
-          scrollToBottomTimer = setTimeout(() => {
-            term.scrollToBottom();
-          }, 50);
+
+        // 手机窄屏 spinner 拦截：避免 \r 覆盖帧 wrap 后产生多行残留
+        let writeData = msg.data;
+        if (term && term.cols <= 60) {
+          writeData = interceptSpinnerData(msg.data);
+        }
+
+        if (writeData !== null) {
+          const shouldStickToBottom = !isUserScrolling && isAtBottom();
+          term.write(writeData);
+          if (shouldStickToBottom) {
+            if (scrollToBottomTimer) clearTimeout(scrollToBottomTimer);
+            scrollToBottomTimer = setTimeout(() => {
+              term.scrollToBottom();
+            }, 50);
+          }
         }
       }
     } catch {}
@@ -1823,7 +2003,6 @@ const BUILTIN_OPTIONS = [
   { value: '', label: '纯终端 (shell)' },
   { value: 'claude --dangerously-skip-permissions', label: 'Claude 全自动' },
   { value: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"', label: 'Codex 全自动' },
-  { value: '__windsurf__', label: 'Windsurf 对话' },
 ];
 
 let customPresetNextId = 1;
@@ -2126,14 +2305,6 @@ $('modal-create').onclick = async () => {
   $('new-session-modal').classList.remove('active');
 
   try {
-    // Windsurf 特殊处理：创建 Chat 会话而非 PTY 终端
-    if (preset === '__windsurf__') {
-      await createChatSession(cwd || undefined);
-      localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
-      localStorage.setItem(MOBILE_LAST_PRESET_KEY, preset);
-      return;
-    }
-
     const session = await api('/api/sessions', {
       method: 'POST',
       body: JSON.stringify({ cwd: cwd || undefined, presetCommand: preset, themeId }),
@@ -2386,7 +2557,7 @@ async function fetchChatSessions() {
   } catch { return []; }
 }
 
-/** 创建 Chat 会话（支持指定工作目录），用于 Windsurf 入口 */
+/** 创建 Chat 会话（支持指定工作目录） */
 async function createChatSession(workspace) {
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -2594,11 +2765,35 @@ function initChatEvents() {
   $('chat-send-btn').addEventListener('click', sendChatMessage);
 
   $('chat-msg-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendChatMessage();
     }
   });
+
+  // iOS/部分 Agent 键盘点发送时不触发 keydown Enter，而是直接插入换行符
+  // 用轮询检测换行并自动发送，与终端输入区保持一致
+  let chatPending = '';
+  setInterval(() => {
+    const input = $('chat-msg-input');
+    if (!input || !activeChatId) return;
+    const val = input.value;
+    if (val && (val.includes('\n') || val.includes('\r'))) {
+      const cleaned = val.replace(/[\r\n]/g, '').trim();
+      input.value = '';
+      input.style.height = 'auto';
+      const textToSend = cleaned || chatPending;
+      chatPending = '';
+      if (textToSend) {
+        input.value = textToSend;
+        sendChatMessage();
+      }
+    } else if (val) {
+      chatPending = val;
+    } else {
+      chatPending = '';
+    }
+  }, 50);
 
   $('chat-msg-input').addEventListener('input', function() {
     this.style.height = 'auto';

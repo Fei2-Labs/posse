@@ -908,6 +908,8 @@ header h2 {
   flex-direction: column;
   gap: 10px;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
 }
 
 .chat-welcome {
@@ -1217,6 +1219,8 @@ header h2 {
   flex-direction: column;
   gap: 8px;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
 }
 
 .chat-bubble-mobile {

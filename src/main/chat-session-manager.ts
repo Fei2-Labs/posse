@@ -598,9 +598,10 @@ export class ChatSessionManager extends EventEmitter {
       'with', session.messages.length, 'messages');
 
     try {
-      // 拼接所有历史消息（每条截断到 200 字，避免 token 爆炸）
+      // 只用用户发送的消息来起标题（每条截断到 200 字，避免 token 爆炸）
       const history = session.messages
-        .map(m => `${m.role === 'user' ? '用户' : 'AI'}：${m.content.slice(0, 200)}`)
+        .filter(m => m.role === 'user')
+        .map(m => m.content.slice(0, 200))
         .join('\n');
 
       const prompt = `请为以下对话生成一个简短标题（不超过15个字，直接输出标题，不要加引号或任何解释）：\n\n${history}`;

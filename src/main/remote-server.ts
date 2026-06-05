@@ -77,6 +77,14 @@ function getCliProvider(presetCommand: string): string | null {
     return 'OpenCode';
   }
 
+  if (presetCommand.startsWith('devin')) {
+    return 'Devin';
+  }
+
+  if (presetCommand.startsWith('kiro-cli')) {
+    return 'Kiro';
+  }
+
   if (presetCommand.startsWith('agent') || presetCommand.includes('cursor')) {
     return 'Cursor';
   }
@@ -109,6 +117,27 @@ function resolveSessionDisplayName(presetCommand: string, customPresets: CustomP
 }
 
 const PORT = parseInt(process.env.DUOCLI_REMOTE_PORT || '9800');
+
+/** 杀掉占用指定端口的残留进程（旧 DuoCLI 实例崩溃残留） */
+function killPortOccupants(port: number): void {
+  try {
+    const out = execSync(`lsof -i :${port} -t -sTCP:LISTEN 2>/dev/null || true`, {
+      encoding: 'utf-8',
+      timeout: 5000,
+    });
+    const pids = out.trim().split('\n').filter(Boolean).map(Number).filter(n => !isNaN(n));
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+        console.log(`[RemoteServer] Killed port ${port} occupant PID ${pid}`);
+      } catch {
+        // 进程可能已不存在
+      }
+    }
+  } catch {
+    // lsof 失败，忽略
+  }
+}
 
 // 获取本机局域网 IP
 function getLocalIP(): string {
@@ -875,8 +904,25 @@ export function startRemoteServer(
 
   // ========== 启动 ==========
 
+  // 启动前清理：杀掉旧 DuoCLI 实例残留的 9800 端口进程
+  killPortOccupants(PORT);
+
   server.on('error', (err: any) => {
     console.error('[RemoteServer] Server error:', err.code, err.message);
+    // 端口被占用（旧实例崩溃残留），杀掉占用进程后重试一次
+    if (err.code === 'EADDRINUSE') {
+      console.log('[RemoteServer] Port in use, killing occupant and retrying...');
+      killPortOccupants(PORT);
+      setTimeout(() => {
+        server.listen(PORT, '0.0.0.0', () => {
+          const lanUrl = `http://${LOCAL_IP}:${PORT}`;
+          console.log('[RemoteServer] Server started (retry), URL:', lanUrl);
+          if (onServerStarted) {
+            onServerStarted({ lanUrl, token: config.token, port: PORT });
+          }
+        });
+      }, 500);
+    }
   });
 
   server.listen(PORT, '0.0.0.0', () => {

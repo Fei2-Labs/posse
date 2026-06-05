@@ -162,6 +162,7 @@
       <div id="sidebar-tabs">
         <button class="sidebar-tab active" data-tab="sessions">会话</button>
         <button class="sidebar-tab" data-tab="ai-config">&#128295; AI</button>
+        <button class="sidebar-tab" data-tab="devin-accounts">&#128100; Devin</button>
       </div>
 
       <!-- 会话 Tab -->
@@ -200,6 +201,23 @@
         <div id="ai-config-actions">
           <button id="ai-test-btn" class="toolbar-btn ai-btn">测试</button>
           <button id="ai-apply-btn" class="toolbar-btn ai-btn ai-apply-btn">保存</button>
+        </div>
+      </div>
+
+      <!-- Devin 账号 Tab -->
+      <div id="tab-devin-accounts" class="tab-content">
+        <div id="devin-accounts-header">
+          <span id="devin-current-label" class="devin-current-label">当前: --</span>
+          <button id="devin-refresh-btn" class="devin-header-btn" title="刷新">&#8635;</button>
+          <button id="devin-quota-btn" class="devin-header-btn" title="查询配额">配额</button>
+        </div>
+        <div id="devin-accounts-list" class="devin-accounts-list">
+          <div class="devin-accounts-empty">加载中...</div>
+        </div>
+        <div id="devin-accounts-add" class="devin-accounts-add">
+          <input id="devin-add-email" class="ai-form-input" type="text" placeholder="邮箱" />
+          <input id="devin-add-password" class="ai-form-input" type="password" placeholder="密码" />
+          <button id="devin-add-btn" class="toolbar-btn devin-btn">添加账号</button>
         </div>
       </div>
 

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, glo
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import { PtyManager, getDisplayName } from './pty-manager';
+import { PtyManager, getDisplayName, rotateDevinInstallationId } from './pty-manager';
 import { AIConfigManager } from './ai-config';
 import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
@@ -36,6 +36,49 @@ const IMESSAGE_SERVICE = ((process.env.DUOCLI_IMESSAGE_SERVICE || 'iMessage').tr
   : 'iMessage';
 
 const sessionOutputTail: Map<string, string> = new Map();
+
+// ========== 已关闭会话持久化 ==========
+interface ClosedSession {
+  id: string;
+  title: string;
+  cwd: string;
+  presetCommand: string;
+  resumeId: string;
+  displayName: string;
+  closedAt: number;
+}
+const CLOSED_SESSIONS_FILE = path.join(app.getPath('userData'), 'closed-sessions.json');
+const MAX_CLOSED_SESSIONS = 20;
+
+function loadClosedSessions(): ClosedSession[] {
+  try {
+    const raw = fs.readFileSync(CLOSED_SESSIONS_FILE, 'utf-8');
+    return JSON.parse(raw);
+  } catch { return []; }
+}
+
+function saveClosedSessions(sessions: ClosedSession[]): ClosedSession[] {
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const filtered = sessions.filter(s => s.closedAt > cutoff).slice(-MAX_CLOSED_SESSIONS);
+  fs.writeFileSync(CLOSED_SESSIONS_FILE, JSON.stringify(filtered, null, 2));
+  return filtered;
+}
+
+function addClosedSession(session: { title: string; cwd: string; presetCommand: string; resumeId: string }): void {
+  const list = loadClosedSessions();
+  list.push({
+    id: `closed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    title: session.title,
+    cwd: session.cwd,
+    presetCommand: session.presetCommand,
+    resumeId: session.resumeId,
+    displayName: getDisplayName(session.presetCommand),
+    closedAt: Date.now(),
+  });
+  const saved = saveClosedSessions(list);
+  safeSend('closed-sessions:update', saved);
+}
+
 function getPreferencePath(): string {
   return path.join(app.getPath('userData'), 'ai-preference.json');
 }
@@ -172,6 +215,14 @@ function getCliProvider(presetCommand: string): string | null {
       }
     } catch { /* ignore */ }
     return 'OpenCode';
+  }
+
+  if (presetCommand.startsWith('devin')) {
+    return 'Devin';
+  }
+
+  if (presetCommand.startsWith('kiro-cli')) {
+    return 'Kiro';
   }
 
   if (presetCommand.startsWith('agent') || presetCommand.includes('cursor')) {
@@ -361,8 +412,21 @@ function setupPtyManager(): void {
       safeSend('pty:title-update', id, title);
     },
     onExit: (id) => {
-      // 用户主动关闭的会话不发通知
+      // 兜底：从 buffer 中提取 resume ID
+      ptyManager.captureResumeFromBuffer(id);
+
+      // 保存有 resume ID 的会话到已关闭列表
       const session = ptyManager.getSession(id);
+      if (session?.resumeId) {
+        addClosedSession({
+          title: session.title,
+          cwd: session.cwd,
+          presetCommand: session.presetCommand,
+          resumeId: session.resumeId,
+        });
+      }
+
+      // 用户主动关闭的会话不发通知
       if (!sessionUserClosed.has(id)) {
         const title = session?.title || '终端';
         sendUserNotification(id, '会话已结束', title);
@@ -437,6 +501,18 @@ function registerIPC(): void {
 
   // 销毁终端
   ipcMain.on('pty:destroy', (_e, id: string) => {
+    // 兜底：从 buffer 提取 resume ID，保存到已关闭列表
+    ptyManager.captureResumeFromBuffer(id);
+    const session = ptyManager.getSession(id);
+    if (session?.resumeId) {
+      addClosedSession({
+        title: session.title,
+        cwd: session.cwd,
+        presetCommand: session.presetCommand,
+        resumeId: session.resumeId,
+      });
+    }
+
     sessionUserClosed.add(id);
     ptyManager.destroy(id);
     sessionOutputTail.delete(id);
@@ -465,6 +541,18 @@ function registerIPC(): void {
       cwd: s.cwd,
       displayName: getDisplayName(s.presetCommand),
     }));
+  });
+
+  // ========== 已关闭会话 IPC ==========
+  ipcMain.handle('closed-sessions:list', () => loadClosedSessions());
+  ipcMain.handle('closed-sessions:remove', (_e, id: string) => {
+    const sessions = loadClosedSessions().filter(s => s.id !== id);
+    saveClosedSessions(sessions);
+    return sessions;
+  });
+  ipcMain.handle('closed-sessions:clear', () => {
+    saveClosedSessions([]);
+    return [];
   });
 
   // 选择工作目录
@@ -813,6 +901,79 @@ function registerIPC(): void {
   ipcMain.handle('claude-providers:save', (_e, providers: any[]) => {
     fs.writeFileSync(CLAUDE_PROVIDERS_PATH, JSON.stringify(providers, null, 2), 'utf-8');
     return true;
+  });
+
+  // ========== Devin 账号管理 ==========
+  const DEVIN_ACCOUNTS_PATH = path.join(os.homedir(), '.session-sync-manager', 'accounts.json');
+  const authCliPath = (() => {
+    try {
+      const syncPath = path.join(os.homedir(), '.local', 'bin', 'session-sync');
+      const resolved = fs.realpathSync(syncPath);
+      return path.join(path.dirname(resolved), 'auth-cli.mjs');
+    } catch { return null; }
+  })();
+
+  function runAuthCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    return new Promise((resolve) => {
+      if (!authCliPath) { resolve({ code: 1, stdout: '', stderr: 'auth-cli.mjs 未找到' }); return; }
+      const child = spawn('node', [authCliPath, ...args], { stdio: 'pipe' });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+      child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      child.on('error', (err) => resolve({ code: 1, stdout: '', stderr: err.message }));
+    });
+  }
+
+  ipcMain.handle('devin-accounts:list', () => {
+    try {
+      if (fs.existsSync(DEVIN_ACCOUNTS_PATH)) {
+        return JSON.parse(fs.readFileSync(DEVIN_ACCOUNTS_PATH, 'utf-8'));
+      }
+    } catch { /* ignore */ }
+    return { accounts: [], currentIndex: 0 };
+  });
+
+  ipcMain.handle('devin-accounts:add', async (_e, email: string, password: string) => {
+    const { code, stderr } = await runAuthCli(['add', email, password]);
+    return { ok: code === 0, error: code !== 0 ? stderr.trim() : undefined };
+  });
+
+  ipcMain.handle('devin-accounts:remove', async (_e, email: string) => {
+    const { code, stderr } = await runAuthCli(['remove', email]);
+    return { ok: code === 0, error: code !== 0 ? stderr.trim() : undefined };
+  });
+
+  ipcMain.handle('devin-accounts:switch', async (_e, opts: { email?: string; next?: boolean }) => {
+    // next 为 true 或不传 email 时，auth-cli.mjs 默认执行轮转切到下一个账号
+    const args = opts.email ? ['switch', '--force', opts.email] : ['switch'];
+    const { code, stdout, stderr } = await runAuthCli([...args, '--json']);
+    // auth-cli.mjs 内部也会旋转 installation_id，这里作为兜底再旋转一次
+    rotateDevinInstallationId();
+    if (code !== 0) return { ok: false, error: stderr.trim() };
+    // 重新读取更新后的账号状态
+    try {
+      const updated = JSON.parse(fs.readFileSync(DEVIN_ACCOUNTS_PATH, 'utf-8'));
+      const cur = updated.accounts[updated.currentIndex];
+      return { ok: true, email: cur?.email, quota: cur?.quota };
+    } catch {
+      return { ok: true };
+    }
+  });
+
+  ipcMain.handle('devin-accounts:quota', async () => {
+    const { code, stdout, stderr } = await runAuthCli(['quota', '--json']);
+    if (code !== 0) return { ok: false, error: stderr.trim() };
+    try {
+      return { ok: true, ...JSON.parse(stdout.trim()) };
+    } catch {
+      return { ok: false, error: '解析失败' };
+    }
+  });
+
+  ipcMain.handle('devin-accounts:rotate-device', () => {
+    rotateDevinInstallationId();
+    return { ok: true };
   });
 
   // 渲染进程主动获取远程服务器信息（解决 IPC 消息早于渲染进程加载的竞态问题）

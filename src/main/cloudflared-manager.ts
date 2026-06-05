@@ -1,4 +1,4 @@
-import { ChildProcess, execFileSync, spawn } from 'child_process';
+import { ChildProcess, execFileSync, execSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -44,6 +44,10 @@ export class CloudflaredManager {
   }
 
   start(): CloudflaredStatus {
+    // 启动前清理：杀掉旧实例残留的 cloudflared 进程
+    // 注意：9800 端口由 remote-server 启动前自行清理，此处不应再碰，否则会杀掉当前 Electron 进程
+    this.killStaleCloudflared();
+
     const bin = this.resolveBinary();
     if (!bin) return this.getStatus();
     const config = this.readConfig();
@@ -89,12 +93,58 @@ export class CloudflaredManager {
 
   stopOwnedProcess(): void {
     if (!this.child || this.child.killed) return;
-    try {
-      if (this.child.pid) process.kill(-this.child.pid, 'SIGTERM');
-    } catch {
-      try { this.child.kill('SIGTERM'); } catch { /* ignore */ }
+    // 杀掉整个进程组（cloudflared 可能 spawn 子进程）
+    if (this.child.pid) {
+      try { process.kill(-this.child.pid, 'SIGKILL'); } catch { /* ignore */ }
+      try { process.kill(this.child.pid, 'SIGKILL'); } catch { /* ignore */ }
     }
+    try { this.child.kill('SIGKILL'); } catch { /* ignore */ }
     this.child = null;
+    // 确保残留的 cloudflared 进程也被清理
+    this.killStaleCloudflared();
+  }
+
+  /** 杀掉旧 DuoCLI 实例残留的 cloudflared 进程 */
+  private killStaleCloudflared(): void {
+    try {
+      // 匹配与此 config 相关的 cloudflared tunnel 进程
+      const out = execSync(
+        `pgrep -f 'cloudflared.*cloudflared-config' 2>/dev/null || true`,
+        { encoding: 'utf-8', timeout: 5000 },
+      );
+      const pids = out.trim().split('\n').filter(Boolean).map(Number).filter(n => !isNaN(n));
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+          console.log(`[Cloudflared] Killed stale cloudflared PID ${pid}`);
+        } catch {
+          // 进程可能已不存在
+        }
+      }
+    } catch {
+      // pgrep 失败，忽略
+    }
+  }
+
+  /** 杀掉占用指定端口的进程 */
+  private killPortOccupants(port: number): void {
+    try {
+      const out = execSync(`lsof -i :${port} -t -sTCP:LISTEN 2>/dev/null || true`, {
+        encoding: 'utf-8',
+        timeout: 5000,
+      });
+      const pids = out.trim().split('\n').filter(Boolean).map(Number).filter(n => !isNaN(n));
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+          console.log(`[Cloudflared] Killed port ${port} occupant PID ${pid}`);
+        } catch {
+          // 进程可能已不存在
+        }
+      }
+    } catch {
+      // lsof 失败，忽略
+    }
   }
 
   private resolveConfigPath(projectRoot: string): string {
