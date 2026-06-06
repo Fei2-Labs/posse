@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('duocli', {
   // Devin 账号管理
   devinAccountsList: () => ipcRenderer.invoke('devin-accounts:list'),
   devinAccountsAdd: (email: string, password: string) => ipcRenderer.invoke('devin-accounts:add', email, password),
+  devinAccountsAddBatch: (text: string) => ipcRenderer.invoke('devin-accounts:add-batch', text),
   devinAccountsRemove: (email: string) => ipcRenderer.invoke('devin-accounts:remove', email),
   devinAccountsSwitch: (opts: { email?: string; next?: boolean }) => ipcRenderer.invoke('devin-accounts:switch', opts),
   devinAccountsQuota: () => ipcRenderer.invoke('devin-accounts:quota'),
@@ -146,4 +147,8 @@ contextBridge.exposeInMainWorld('duocli', {
   closedSessionsClear: () => ipcRenderer.invoke('closed-sessions:clear'),
   onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; displayName: string; closedAt: number }>) => void) =>
     ipcRenderer.on('closed-sessions:update', (_e, sessions) => cb(sessions)),
+
+  // 自动切号状态
+  onAutoSwitchStatus: (cb: (id: string, status: string, detail?: string) => void) =>
+    ipcRenderer.on('pty:auto-switch-status', (_e, id, status, detail) => cb(id, status, detail)),
 });

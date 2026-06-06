@@ -944,6 +944,45 @@ html, body {
   background: #66bb6a;
 }
 
+/* 自动切号状态标签 */
+.session-switch-status {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  cursor: default;
+  white-space: nowrap;
+  flex-shrink: 0;
+  align-self: center;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.session-switch-status.switching {
+  background: rgba(229, 161, 0, 0.18);
+  color: #e5a100;
+  animation: switch-pulse 1.2s ease-in-out infinite;
+}
+
+.session-switch-status.switched {
+  background: rgba(76, 175, 80, 0.18);
+  color: #4caf50;
+}
+
+.session-switch-status.exhausted {
+  background: rgba(244, 71, 71, 0.18);
+  color: #f44747;
+}
+
+.session-switch-status.error {
+  background: rgba(244, 71, 71, 0.18);
+  color: #f44747;
+}
+
+@keyframes switch-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
 /* 配置按钮 */
 .session-auto-continue-config-btn {
   background: none;
@@ -2015,4 +2054,58 @@ select.ai-form-input {
 .devin-btn {
   width: 100%;
   font-size: 12px;
+}
+
+.devin-batch-separator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.devin-batch-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-color);
+  white-space: nowrap;
+}
+
+.devin-batch-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.devin-batch-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--input-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-color);
+  font-size: 11px;
+  font-family: monospace;
+  padding: 6px 8px;
+  resize: vertical;
+  min-height: 80px;
+}
+
+.devin-batch-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.devin-batch-input::placeholder {
+  color: var(--text-muted);
+}
+
+.devin-batch-btn {
+  background: var(--accent-color);
+  color: #fff;
+  border: none;
+}
+
+.devin-batch-btn:hover:not(:disabled) {
+  opacity: 0.85;
 }

@@ -443,6 +443,9 @@ function setupPtyManager(): void {
       sessionLastInputAt.set(id, Date.now());
       sessionArmedForNotify.add(id);
     },
+    onAutoSwitchStatus: (id, status, detail) => {
+      safeSend('pty:auto-switch-status', id, status, detail);
+    },
   }, () => loadAiPreferenceData().manualConfig || null);
 }
 
@@ -913,7 +916,7 @@ function registerIPC(): void {
     } catch { return null; }
   })();
 
-  function runAuthCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  function runAuthCli(args: string[], stdin?: string): Promise<{ code: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
       if (!authCliPath) { resolve({ code: 1, stdout: '', stderr: 'auth-cli.mjs 未找到' }); return; }
       const child = spawn('node', [authCliPath, ...args], { stdio: 'pipe' });
@@ -922,6 +925,10 @@ function registerIPC(): void {
       child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
       child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
       child.on('error', (err) => resolve({ code: 1, stdout: '', stderr: err.message }));
+      if (stdin !== undefined) {
+        child.stdin.write(stdin);
+        child.stdin.end();
+      }
     });
   }
 
@@ -937,6 +944,12 @@ function registerIPC(): void {
   ipcMain.handle('devin-accounts:add', async (_e, email: string, password: string) => {
     const { code, stderr } = await runAuthCli(['add', email, password]);
     return { ok: code === 0, error: code !== 0 ? stderr.trim() : undefined };
+  });
+
+  ipcMain.handle('devin-accounts:add-batch', async (_e, text: string) => {
+    const { code, stderr } = await runAuthCli(['add', '--batch'], text);
+    // auth-cli.mjs 的 add --batch 把统计信息输出到 stderr
+    return { ok: code === 0, output: stderr.trim(), error: code !== 0 ? stderr.trim() : undefined };
   });
 
   ipcMain.handle('devin-accounts:remove', async (_e, email: string) => {

@@ -45,6 +45,7 @@ declare global {
       // Devin 账号管理
       devinAccountsList: () => Promise<{ accounts: Array<{ email: string; enabled: boolean; addedAt: number; lastLogin?: string; lastError?: string; quota?: { daily: number; weekly: number }; planName?: string; lastSwitchAt?: number }>; currentIndex: number }>;
       devinAccountsAdd: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+      devinAccountsAddBatch: (text: string) => Promise<{ ok: boolean; output?: string; error?: string }>;
       devinAccountsRemove: (email: string) => Promise<{ ok: boolean; error?: string }>;
       devinAccountsSwitch: (opts: { email?: string; next?: boolean }) => Promise<{ ok: boolean; error?: string; email?: string; quota?: { daily: number; weekly: number } }>;
       devinAccountsQuota: () => Promise<{ ok: boolean; daily?: number; weekly?: number; planName?: string; error?: string }>;
@@ -77,6 +78,8 @@ declare global {
       closedSessionsRemove: (id: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; displayName: string; closedAt: number }>>;
       closedSessionsClear: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; displayName: string; closedAt: number }>>;
       onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; displayName: string; closedAt: number }>) => void) => void;
+      // 自动切号状态
+      onAutoSwitchStatus: (cb: (id: string, status: string, detail?: string) => void) => void;
     };
   }
 }
@@ -116,6 +119,9 @@ interface ClosedSessionInfo {
 }
 let closedSessions: ClosedSessionInfo[] = [];
 let closedSessionsCollapsed = false;
+
+// 自动切号状态：sessionId → { status, detail }
+const sessionAutoSwitchStatus: Map<string, { status: string; detail?: string }> = new Map();
 
 // 自动继续配置
 const sessionAutoContinue: Map<string, { enabled: boolean; messages: string[]; intervalMs: number; commandIntervalMs: number; lastSendTime: number; autoAgree: boolean; autoAgreeDelaySec: number; sendDelaySec: number; maxDurationMs: number; enabledAt: number }> = new Map();
@@ -869,6 +875,8 @@ const devinQuotaBtn = document.getElementById('devin-quota-btn') as HTMLButtonEl
 const devinAddEmail = document.getElementById('devin-add-email') as HTMLInputElement;
 const devinAddPassword = document.getElementById('devin-add-password') as HTMLInputElement;
 const devinAddBtn = document.getElementById('devin-add-btn') as HTMLButtonElement;
+const devinBatchInput = document.getElementById('devin-batch-input') as HTMLTextAreaElement;
+const devinBatchBtn = document.getElementById('devin-batch-btn') as HTMLButtonElement;
 const aiApplyBtn = document.getElementById('ai-apply-btn')!;
 const aiTestBtn = document.getElementById('ai-test-btn')!;
 const aiFormatSelect = document.getElementById('ai-format-select') as HTMLSelectElement;
@@ -1608,10 +1616,21 @@ function renderSessionList(): void {
         showAutoContinueConfigDialog(id);
       });
 
+      // 自动切号状态标签（显示在"催"胶囊右侧）
+      const switchStatus = sessionAutoSwitchStatus.get(id);
+      let switchStatusLabel: HTMLSpanElement | null = null;
+      if (switchStatus) {
+        switchStatusLabel = document.createElement('span');
+        switchStatusLabel.className = 'session-switch-status ' + switchStatus.status;
+        switchStatusLabel.textContent = switchStatus.detail || (switchStatus.status === 'switching' ? '换号中...' : switchStatus.status === 'switched' ? '已切换' : switchStatus.status === 'exhausted' ? '账号耗尽' : '切号失败');
+        switchStatusLabel.title = `自动切号: ${switchStatus.status}`;
+      }
+
       const bottomRow = document.createElement('div');
       bottomRow.className = 'session-item-bottom';
       bottomRow.appendChild(metaRow);
       bottomRow.appendChild(autoContinueLabel);
+      if (switchStatusLabel) bottomRow.appendChild(switchStatusLabel);
 
       // 右键菜单
       item.addEventListener('contextmenu', (e) => {
@@ -1905,6 +1924,7 @@ function clearSessionState(id: string): void {
   sessionProviders.delete(id);
   sessionClaudeProviderIds.delete(id);
   sessionAutoContinue.delete(id);
+  sessionAutoSwitchStatus.delete(id);
 }
 
 function destroySession(id: string): void {
@@ -2608,6 +2628,16 @@ window.duocli.onClosedSessionsUpdate((sessions) => {
   renderSessionList();
 });
 
+// 自动切号状态监听
+window.duocli.onAutoSwitchStatus((id, status, detail) => {
+  if (status === 'idle') {
+    sessionAutoSwitchStatus.delete(id);
+  } else {
+    sessionAutoSwitchStatus.set(id, { status, detail });
+  }
+  renderSessionList();
+});
+
 // 催工配置：手机端通过 main 进程读取桌面端配置
 window.duocli.onGetAutoContinueConfig((sessionId) => {
   const config = sessionAutoContinue.get(sessionId);
@@ -2915,4 +2945,38 @@ devinAddBtn.addEventListener('click', async () => {
     devinAddBtn.textContent = '失败';
   }
   setTimeout(() => { devinAddBtn.textContent = '添加账号'; devinAddBtn.disabled = false; }, 1500);
+});
+
+// 批量添加账号
+devinBatchBtn.addEventListener('click', async () => {
+  const text = devinBatchInput.value.trim();
+  if (!text) return;
+  // 基本校验：至少包含一个 @
+  if (!text.includes('@')) {
+    alert('请输入有效的账号数据（每行：邮箱 密码）');
+    return;
+  }
+  devinBatchBtn.textContent = '导入中...';
+  devinBatchBtn.disabled = true;
+  try {
+    const result = await window.duocli.devinAccountsAddBatch(text);
+    if (result.ok) {
+      devinBatchInput.value = '';
+      devinBatchBtn.textContent = '✓ 完成';
+      await refreshDevinAccounts();
+      // 显示统计信息
+      if (result.output) {
+        const statsMatch = result.output.match(/已添加\s*\d+\s*\|.*/);
+        if (statsMatch) {
+          devinBatchBtn.textContent = statsMatch[0];
+        }
+      }
+    } else {
+      devinBatchBtn.textContent = '失败';
+      alert('批量导入失败：' + (result.error || '未知错误'));
+    }
+  } catch {
+    devinBatchBtn.textContent = '失败';
+  }
+  setTimeout(() => { devinBatchBtn.textContent = '批量导入'; devinBatchBtn.disabled = false; }, 3000);
 });

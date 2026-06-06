@@ -29,6 +29,8 @@ export interface PtySession {
   prevData: string;              // 上一个 PTY 分片，与当前分片合并检测 rate limit
   retryTimer: NodeJS.Timeout | null;  // 自动重试 / 切号延迟定时器
   disposables: pty.IDisposable[];
+  switchAttempts: number;        // 本轮自动切号已尝试次数
+  lastAutoSwitchAt: number;      // 上次自动切号时间戳
 }
 
 interface PtyManagerEvents {
@@ -37,6 +39,7 @@ interface PtyManagerEvents {
   onExit: (id: string) => void;
   onPasteInput?: (id: string, cwd: string) => void;
   onRawData?: (id: string, data: string) => void;
+  onAutoSwitchStatus?: (id: string, status: string, detail?: string) => void;
 }
 
 export type TitleAIConfigProvider = () => TitleAIConfig | null;
@@ -62,6 +65,18 @@ function stripTerminalControlSequences(text: string): string {
     // Single-character ESC sequences.
     .replace(/\x1b[@-_]/g, '')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+}
+
+// 读取 Devin 可用账号数（用于限制自动切号轮次）
+function getDevinAccountCount(): number {
+  try {
+    const accountsPath = path.join(os.homedir(), '.session-sync-manager', 'accounts.json');
+    if (fs.existsSync(accountsPath)) {
+      const data = JSON.parse(fs.readFileSync(accountsPath, 'utf-8'));
+      return (data.accounts || []).filter((a: any) => a.enabled !== false).length || 1;
+    }
+  } catch { /* ignore */ }
+  return 1;
 }
 
 // Devin 设备指纹旋转（防止跨账号限流关联）
@@ -170,6 +185,8 @@ export class PtyManager {
       autoRetryCooldown: 0,
       prevData: '',
       retryTimer: null,
+      switchAttempts: 0,
+      lastAutoSwitchAt: 0,
       disposables: [],
     };
 
@@ -194,6 +211,8 @@ export class PtyManager {
 
       // 拦截 OSC 0/1/2 窗口/图标标题序列：ESC ] 0;<title> BEL  或 ESC ] 0;<title> ESC \
       // 仅在用户未配置 AI 时使用 — 配了 AI 就让 AI 起标题，OSC 仅作兜底
+      // 注意：OSC 标题可能是 shell 启动时自动设置的（如当前目录），不算用户意图
+      //       所以不设 titleGenerated，让后续 AI 生成可以覆盖
       const titleCfg = this.getTitleAIConfig?.();
       const aiConfigured = !!(titleCfg?.baseUrl && titleCfg.apiKey && titleCfg.model);
       if (!aiConfigured) {
@@ -201,9 +220,9 @@ export class PtyManager {
         if (oscMatch && oscMatch[1]) {
           const oscTitle = oscMatch[1].trim();
           if (oscTitle && oscTitle.length >= 2 && oscTitle.length <= 80
-              && !session.titleLocked && !session.titleGenerated) {
+              && !session.titleLocked) {
             session.title = oscTitle.length > 40 ? oscTitle.slice(0, 40) + '…' : oscTitle;
-            session.titleGenerated = true;
+            // 不设 titleGenerated — OSC 可能只是 shell 启动信息，等用户有输入后再确认
             this.events.onTitleUpdate(id, session.title);
           }
         }
@@ -243,63 +262,90 @@ export class PtyManager {
           || combinedLower.includes('something went wrong')
           || combinedLower.includes('permission denied');
 
-        // 1) 硬限流（需切号）→ 后台切号 + 旋转设备指纹，完成后自动发"继续"（不中断当前会话）
-        //    "quota exhausted" / "usage is exhausted" — 日/周额度用完
-        //    "overall message rate limit" / "permission denied" — 账号级硬限制
-        if (hasWarningSign && (
-          combinedLower.includes('quota exhausted') ||
-          combinedLower.includes('usage is exhausted') ||
-          combinedLower.includes('overall message rate limit') ||
-          (combinedLower.includes('permission denied') && combinedLower.includes('rate limit'))
-        )) {
+        // 1) 硬限流（需切号）
+        //    quota exhausted / usage is exhausted — 足够特异，不需要 ⚠ 门控
+        //    overall message rate limit / permission denied + rate limit — 账号级硬限制
+        const isHardLimit = combinedLower.includes('quota exhausted')
+          || combinedLower.includes('usage is exhausted')
+          || combinedLower.includes('overall message rate limit')
+          || (combinedLower.includes('permission denied') && combinedLower.includes('rate limit'));
+
+        if (isHardLimit) {
           session.prevData = '';
-          if (Date.now() > session.autoRetryCooldown) {
-            session.autoRetryCooldown = Date.now() + 30000;
-            console.log(`[PTY] 检测到 ⚠ 硬限流（需切号），后台切号 + 旋转设备指纹 (session: ${id})`);
+          const maxAccounts = getDevinAccountCount();
+          const now = Date.now();
+
+          if (session.switchAttempts >= maxAccounts) {
+            // 所有账号都试过了，停止切号
+            const errMsg = `\n⚠️ [DuoCLI] 全部 ${maxAccounts} 个账号已耗尽，请稍后再试\n`;
+            ptyProcess.write(errMsg);
+            this.events.onAutoSwitchStatus?.(id, 'exhausted', `全部 ${maxAccounts} 个号已耗尽`);
+            console.log(`[PTY] 全部 ${maxAccounts} 个账号已耗尽，停止自动切号 (session: ${id})`);
+            session.switchAttempts = 0;
+            session.autoRetryCooldown = now + 60000; // 1 分钟后再允许重试
+          } else if (now > session.autoRetryCooldown) {
+            session.switchAttempts++;
+            session.lastAutoSwitchAt = now;
+            session.autoRetryCooldown = now + 30000;
+
+            const statusMsg = `换号中 (${session.switchAttempts}/${maxAccounts})`;
+            this.events.onAutoSwitchStatus?.(id, 'switching', statusMsg);
+            console.log(`[PTY] 检测到硬限流，自动切号 ${session.switchAttempts}/${maxAccounts} (session: ${id})`);
+
             // 旋转 Devin 设备指纹，防止跨账号限流关联
             rotateDevinInstallationId();
-            // 使用绝对路径避免 Dock 启动时 PATH 不包含 ~/.local/bin
-            // stdio: 'ignore' + unref() 防止 pipe 缓冲区阻塞和进程泄漏
             const sw = spawn(sessionSyncPath, ['switch'], { stdio: 'ignore', detached: true });
             sw.unref();
             sw.on('close', (code) => {
               if (!this.sessions.has(id)) return;
               if (code === 0) {
+                const doneMsg = `已切换 (${session.switchAttempts}/${maxAccounts})`;
+                this.events.onAutoSwitchStatus?.(id, 'switched', doneMsg);
                 console.log(`[PTY] 后台切号成功，3 秒后发送"继续" (session: ${id})`);
                 session.retryTimer = setTimeout(() => {
                   session.retryTimer = null;
                   if (!this.sessions.has(id)) return;
                   ptyProcess.write('继续\r');
+                  // 清除冷却，允许立刻响应下一次 quota 报错（连续切号）
                   session.autoRetryCooldown = 0;
+                  // 10 秒后如果没再触发 quota，重置计数（说明切到的号还有额度）
+                  session.retryTimer = setTimeout(() => {
+                    session.retryTimer = null;
+                    if (this.sessions.has(id)) {
+                      session.switchAttempts = 0;
+                      this.events.onAutoSwitchStatus?.(id, 'idle');
+                    }
+                  }, 10000);
                 }, 3000);
               } else {
+                this.events.onAutoSwitchStatus?.(id, 'error', `切号失败 exit=${code}`);
                 const errMsg = `\n⚠️ [DuoCLI] 自动切号失败 (exit code: ${code})，请手动切换账号\n`;
                 ptyProcess.write(errMsg);
                 console.error(`[PTY] 后台切号失败 (exit code: ${code})`);
-                // 失败时保持 30s 冷却，防止死循环
-                session.autoRetryCooldown = Date.now() + 30000;
+                session.autoRetryCooldown = now + 30000;
               }
             });
             sw.on('error', (err) => {
               if (!this.sessions.has(id)) return;
+              this.events.onAutoSwitchStatus?.(id, 'error', err.message);
               const errMsg = `\n⚠️ [DuoCLI] 自动切号异常: ${err.message}，请手动切换账号\n`;
               ptyProcess.write(errMsg);
               console.error(`[PTY] 后台切号异常:`, err.message);
-              session.autoRetryCooldown = Date.now() + 30000;
+              session.autoRetryCooldown = now + 30000;
             });
           }
         }
-        // 2) Rate limit → 8 秒后自动发"继续"，发完后清除冷却期以便下次报错能立即触发
+        // 2) Rate limit（软限流）→ 8 秒后自动发"继续"
         else if (hasWarningSign && combinedLower.includes('rate limit')) {
           session.prevData = '';
           if (Date.now() > session.autoRetryCooldown) {
             console.log(`[PTY] 检测到 ⚠ Rate limit，8 秒后自动发送"继续" (session: ${id})`);
-            session.autoRetryCooldown = Date.now() + 10000;  // 冷却期仅防止 8s 等待期间重复排队
+            session.autoRetryCooldown = Date.now() + 10000;
             session.retryTimer = setTimeout(() => {
               session.retryTimer = null;
               if (!this.sessions.has(id)) return;
               ptyProcess.write('继续\r');
-              session.autoRetryCooldown = 0;  // 发完后立即解除冷却，允许下次报错立刻触发
+              session.autoRetryCooldown = 0;
             }, 8000);
           }
         }
@@ -332,6 +378,9 @@ export class PtyManager {
     const session = this.sessions.get(id);
     if (!session) return;
 
+    // 用户手动输入 → 重置自动切号计数（用户接管了）
+    session.switchAttempts = 0;
+
     // 检测粘贴输入（语音输入法通过粘贴方式输入，一次性写入多个字符）
     if (data.length > 5 && data !== '\r') {
       const cleaned = data.replace(/[\r\n]/g, ' ').trim();
@@ -349,8 +398,14 @@ export class PtyManager {
     if (data === '\r') {
       session.commandCount++;
       // 前3轮命令自动生成标题（与 buffer 阈值触发互为兜底）
-      if (!session.titleGenerated && !session.titleLocked
-          && !session.summarizeScheduled && session.commandCount <= 3) {
+      // 如果标题还没最终确认（titleGenerated=false），即使用户输入前已调度过，
+      // 也要重新调度——因为现在有了用户输入，生成结果会更准确
+      if (!session.titleGenerated && !session.titleLocked && session.commandCount <= 3) {
+        // 清除之前的调度，重新安排
+        if (session.summarizeTimer) {
+          clearTimeout(session.summarizeTimer);
+          session.summarizeTimer = null;
+        }
         session.summarizeScheduled = true;
         session.summarizeTimer = setTimeout(() => {
           session.summarizeTimer = null;
@@ -469,6 +524,7 @@ export class PtyManager {
     const lastUserInput = session.userInputs.length > 0
       ? session.userInputs[session.userInputs.length - 1]
       : '';
+    const hasUserInput = session.userInputs.length > 0 || session.commandCount > 0;
 
     // 素材太少则不浪费 API 调用，等下一轮触发
     if (cleanBuffer.length < 20 && lastUserInput.length < 4) {
@@ -476,6 +532,8 @@ export class PtyManager {
       return;
     }
 
+    // 如果用户还没有实际输入，只设临时标题，不锁死 titleGenerated
+    // 这样用户输入后可以重新生成更准确的标题
     const config = this.getTitleAIConfig?.();
     if (config?.baseUrl && config.apiKey && config.model) {
       try {
@@ -492,7 +550,8 @@ export class PtyManager {
         const latest = this.sessions.get(id);
         if (latest && !latest.titleLocked && title) {
           latest.title = title.slice(0, 50);
-          latest.titleGenerated = true;
+          // 只有用户有实际输入时才锁死标题，否则只是临时标题
+          latest.titleGenerated = hasUserInput;
           latest.summarizeScheduled = false;
           this.events.onTitleUpdate(id, latest.title);
           return;
@@ -510,7 +569,8 @@ export class PtyManager {
     const fallback = lastUserInput || cleanBuffer.split('\n').map(s => s.trim()).find(s => s.length >= 3) || '';
     if (!fallback) return;
     latest.title = fallback.length > 40 ? fallback.slice(0, 40) + '…' : fallback;
-    latest.titleGenerated = true;
+    // 只有用户有实际输入时才锁死标题
+    latest.titleGenerated = hasUserInput;
     this.events.onTitleUpdate(id, latest.title);
   }
 }
