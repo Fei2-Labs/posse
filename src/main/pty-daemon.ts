@@ -77,6 +77,31 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, pid: process.pid, port: config.port });
 });
 
+app.post('/shutdown', requireAuth, (_req, res) => {
+  // Capture resume info for every active session BEFORE exiting so they are
+  // recoverable: each session's resumeId/resumeCommand is written into its
+  // snapshot, and the resulting exit events let the main app persist
+  // closed-session records on respawn.
+  for (const session of ptyManager.getAllSessions()) {
+    try {
+      ptyManager.captureResumeFromBuffer(session.id);
+    } catch {
+      // ignore per-session capture failures; keep shutting down cleanly
+    }
+  }
+  res.json({ ok: true });
+  // Respond first, then exit after a short delay so the HTTP response flushes
+  // and the client can observe a clean 200 before the process goes away.
+  setTimeout(() => {
+    try {
+      server.close();
+    } catch {
+      // ignore
+    }
+    process.exit(0);
+  }, 200);
+});
+
 app.get('/terminal/config', (_req, res) => {
   res.json({
     token: config.token,

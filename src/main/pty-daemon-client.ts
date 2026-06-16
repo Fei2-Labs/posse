@@ -85,6 +85,48 @@ export class PtyDaemonClient implements PtyBackend {
     if (session) this.sessions.set(id, { ...session, provider });
   }
 
+  /**
+   * Gracefully restart the daemon: stop the old instance, wait for the port to
+   * free, spawn a fresh daemon (new code), then re-establish the event stream.
+   * Callers are responsible for persisting resumable session metadata BEFORE
+   * calling this, since all live PTY sessions are terminated.
+   */
+  async restart(): Promise<void> {
+    // Tear down the current event stream so reconnect logic doesn't race us.
+    if (this.ws) {
+      try {
+        this.ws.removeAllListeners();
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+    this.sessions.clear();
+
+    // Ask the old daemon to exit cleanly. It responds 200 then exits shortly.
+    try {
+      await this.request('POST', '/shutdown');
+    } catch {
+      // If the daemon is already gone, proceed to wait-for-down.
+    }
+
+    await this.waitForDown();
+    this.startDaemon();
+    await this.waitForHealthy();
+    await this.refreshSessions().catch(() => undefined);
+    this.connectEvents();
+  }
+
+  private async waitForDown(): Promise<void> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 10000) {
+      if (!await this.isHealthy()) return;
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    // Proceed anyway; startDaemon will fail loudly if the port is still bound.
+  }
+
   async refreshSessions(): Promise<PtySessionSnapshot[]> {
     const sessions = await this.request<PtySessionSnapshot[]>('GET', '/api/sessions');
     this.sessions.clear();

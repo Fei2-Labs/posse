@@ -142,6 +142,32 @@ button:disabled {
   border-color: var(--border);
 }
 
+.rail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.ghost-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ghost-btn:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.ghost-btn:disabled {
+  opacity: 0.5;
+}
+
 .session-list {
   overflow: auto;
   padding: 8px;

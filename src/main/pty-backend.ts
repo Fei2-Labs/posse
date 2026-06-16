@@ -38,5 +38,6 @@ export interface PtyBackend {
   setProvider(id: string, provider: string | null): Promise<void>;
   refreshSessions(): Promise<PtySessionSnapshot[]>;
   getRawBuffer(id: string): Promise<string>;
+  restart(): Promise<void>;
 }
 

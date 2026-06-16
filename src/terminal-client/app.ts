@@ -39,6 +39,7 @@ const activeMetaEl = getRequiredElement('active-meta');
 const cwdInputEl = getRequiredInput('cwd-input');
 const presetSelectEl = getRequiredSelect('preset-select');
 const refreshBtn = getRequiredButton('refresh-btn');
+const restartDaemonBtn = getRequiredButton('restart-daemon-btn');
 const renameBtn = getRequiredButton('rename-btn');
 const closeBtn = getRequiredButton('close-btn');
 const newSessionForm = getRequiredForm('new-session-form');
@@ -51,6 +52,7 @@ let daemonConfig: DaemonConfig | null = null;
 let eventSocket: WebSocket | null = null;
 let activeSessionId: string | null = null;
 let pendingRenameResolve: ((title: string | null) => void) | null = null;
+let restarting = false;
 const terminals = new Map<string, TerminalInstance>();
 
 function getRequiredElement(id: string): HTMLElement {
@@ -290,6 +292,8 @@ function connectEvents(): void {
   eventSocket.addEventListener('open', () => setStatus(`Daemon ${daemonConfig?.port || ''}`, 'online'));
   eventSocket.addEventListener('close', () => {
     eventSocket = null;
+    // During an explicit restart, restartDaemon() owns status + recovery.
+    if (restarting) return;
     setStatus('Reconnecting', '');
     setTimeout(connectEvents, 1000);
   });
@@ -366,6 +370,80 @@ function closeRenameDialog(title: string | null): void {
   if (resolve) resolve(title);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function isDaemonUp(): Promise<boolean> {
+  try {
+    const response = await fetch('/terminal/config', { cache: 'no-store' });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function restartDaemon(): Promise<void> {
+  if (restarting || !daemonConfig) return;
+  // Lightweight inline confirm — live terminals drop but are saved as resumable.
+  const confirmed = window.confirm(
+    'Restart the daemon? Live terminals will drop, but sessions are saved as resumable and reappear once the daemon is back.',
+  );
+  if (!confirmed) return;
+
+  restarting = true;
+  restartDaemonBtn.disabled = true;
+  refreshBtn.disabled = true;
+  setStatus('Restarting…', '');
+
+  try {
+    await fetch('/shutdown', { method: 'POST', headers: authHeaders() });
+  } catch {
+    // The daemon may drop the connection while exiting — that's expected.
+  }
+
+  // Close the current event socket so reconnect logic re-establishes against
+  // the fresh daemon once it binds the port.
+  if (eventSocket) {
+    try {
+      eventSocket.close();
+    } catch {
+      // ignore
+    }
+    eventSocket = null;
+  }
+
+  // Poll /terminal/config until the respawned daemon (started by the main
+  // Posse app's reconnect logic) is up, with a ~15s timeout.
+  const deadlineMs = Date.now() + 15000;
+  // Give the old process a moment to exit and free the port first.
+  await sleep(600);
+  while (Date.now() < deadlineMs) {
+    if (await isDaemonUp()) {
+      try {
+        await loadConfig();
+        await loadSessions();
+        connectEvents();
+        setStatus(`Daemon ${daemonConfig?.port || ''}`, 'online');
+      } catch (error) {
+        console.error('[TerminalClient] post-restart reload failed', error);
+        setStatus('Reload failed', 'error');
+      }
+      restarting = false;
+      restartDaemonBtn.disabled = false;
+      refreshBtn.disabled = false;
+      return;
+    }
+    await sleep(700);
+  }
+
+  // Timed out — the main app likely isn't running to respawn the daemon.
+  setStatus('Daemon down — open the Posse app', 'error');
+  restarting = false;
+  restartDaemonBtn.disabled = false;
+  refreshBtn.disabled = false;
+}
+
 newSessionForm.addEventListener('submit', (event) => {
   event.preventDefault();
   void createSession().catch((error: unknown) => {
@@ -378,6 +456,16 @@ refreshBtn.addEventListener('click', () => {
   void loadSessions().catch((error: unknown) => {
     console.error('[TerminalClient] refresh failed', error);
     setStatus('Refresh failed', 'error');
+  });
+});
+
+restartDaemonBtn.addEventListener('click', () => {
+  void restartDaemon().catch((error: unknown) => {
+    console.error('[TerminalClient] restart failed', error);
+    setStatus('Restart failed', 'error');
+    restarting = false;
+    restartDaemonBtn.disabled = false;
+    refreshBtn.disabled = false;
   });
 });
 

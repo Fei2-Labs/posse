@@ -33,6 +33,9 @@ contextBridge.exposeInMainWorld('posse', {
   // Get all sessions
   getSessions: () => ipcRenderer.invoke('pty:sessions'),
 
+  // Gracefully restart the background PTY daemon (saves live sessions as resumable first)
+  daemonRestart: () => ipcRenderer.invoke('daemon:restart'),
+
   // Select folder
   selectFolder: (currentPath?: string) => ipcRenderer.invoke('dialog:select-folder', currentPath),
   // Read directory tree (for the left-side file tree)
@@ -55,6 +58,9 @@ contextBridge.exposeInMainWorld('posse', {
 
   onPtyExit: (cb: (id: string) => void) =>
     ipcRenderer.on('pty:exit', (_e, id) => cb(id)),
+
+  onDaemonRestarted: (cb: () => void) =>
+    ipcRenderer.on('daemon:restarted', () => cb()),
 
   onRemoteCreated: (cb: (sessionInfo: any) => void) =>
     ipcRenderer.on('pty:remote-created', (_e, info) => cb(info)),

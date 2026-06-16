@@ -28,6 +28,7 @@ declare global {
       renamePty: (id: string, title: string) => void;
       regenerateTitle: (id: string) => Promise<void>;
       getSessions: () => Promise<PtySessionInfo[]>;
+      daemonRestart: () => Promise<{ ok: boolean; error?: string }>;
       selectFolder: (currentPath?: string) => Promise<string | null>;
       fileTreeListDir: (dirPath: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>;
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
@@ -45,6 +46,7 @@ declare global {
       onPtyData: (cb: (id: string, data: string) => void) => void;
       onTitleUpdate: (cb: (id: string, title: string) => void) => void;
       onPtyExit: (cb: (id: string) => void) => void;
+      onDaemonRestarted: (cb: () => void) => void;
       onRemoteCreated: (cb: (sessionInfo: PtySessionInfo) => void) => void;
       onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } }) => void) => void;
       getRemoteServerInfo: () => Promise<{ lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null>;
@@ -1188,6 +1190,7 @@ const themeDisplay = document.getElementById('theme-display')!;
 const themeDropdown = document.getElementById('theme-dropdown')!;
 const toolbarNewBtn = document.getElementById('toolbar-new-btn')!;
 const toolbarTerminalClientBtn = document.getElementById('toolbar-terminal-client-btn')!;
+const toolbarRestartDaemonBtn = document.getElementById('toolbar-restart-daemon-btn') as HTMLButtonElement | null;
 const remoteServerInfoEl = document.getElementById('remote-server-info')!;
 const newSessionOverlay = document.getElementById('new-session-overlay')!;
 const newSessionCloseBtn = document.getElementById('new-session-close')!;
@@ -3244,6 +3247,78 @@ toolbarNewBtn.addEventListener('click', () => { openNewSessionDialog(); });
 toolbarTerminalClientBtn.addEventListener('click', async () => {
   const url = await window.posse.getTerminalClientUrl();
   await window.posse.openUrl(url);
+});
+
+// Remove every locally-attached terminal session (used after a daemon restart,
+// when all live PTYs are gone but saved as resumable history).
+function clearAllLocalSessions(): void {
+  for (const id of Array.from(sessionTitles.keys())) {
+    clearSessionState(id);
+    termManager.destroy(id);
+  }
+  saveAutoContinueToStorage();
+  updateEmptyState();
+  renderSessionList();
+  updateSessionTitleBar();
+  void renderFileTree();
+}
+
+// Graceful daemon restart: confirm inline, save+restart, then refresh navigator.
+if (toolbarRestartDaemonBtn) {
+  let restartConfirmArmed = false;
+  let restartConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  const restartDefaultLabel = 'Restart daemon';
+
+  const disarmRestartConfirm = (): void => {
+    restartConfirmArmed = false;
+    if (restartConfirmTimer) { clearTimeout(restartConfirmTimer); restartConfirmTimer = null; }
+    if (toolbarRestartDaemonBtn) toolbarRestartDaemonBtn.textContent = restartDefaultLabel;
+  };
+
+  toolbarRestartDaemonBtn.addEventListener('click', async () => {
+    if (!restartConfirmArmed) {
+      // First click: arm an inline confirm (live terminals close but are saved as resumable).
+      restartConfirmArmed = true;
+      toolbarRestartDaemonBtn.textContent = 'Click again to restart';
+      restartConfirmTimer = setTimeout(disarmRestartConfirm, 4000);
+      return;
+    }
+    disarmRestartConfirm();
+
+    toolbarRestartDaemonBtn.disabled = true;
+    toolbarRestartDaemonBtn.textContent = 'Restarting…';
+    try {
+      const result = await window.posse.daemonRestart();
+      if (result.ok) {
+        // Live sessions are gone; drop their terminals locally, then re-pull
+        // daemon sessions (now empty) and refresh the saved-session history.
+        clearAllLocalSessions();
+        await restoreDaemonSessions();
+        await refreshProjectsData();
+      } else {
+        console.error('[Renderer] Daemon restart failed:', result.error);
+        toolbarRestartDaemonBtn.textContent = 'Restart failed';
+        setTimeout(() => { if (toolbarRestartDaemonBtn) toolbarRestartDaemonBtn.textContent = restartDefaultLabel; }, 3000);
+        return;
+      }
+    } catch (error) {
+      console.error('[Renderer] Daemon restart error:', error);
+      toolbarRestartDaemonBtn.textContent = 'Restart failed';
+      setTimeout(() => { if (toolbarRestartDaemonBtn) toolbarRestartDaemonBtn.textContent = restartDefaultLabel; }, 3000);
+      return;
+    } finally {
+      toolbarRestartDaemonBtn.disabled = false;
+    }
+    toolbarRestartDaemonBtn.textContent = restartDefaultLabel;
+  });
+}
+
+// Main process signals a completed daemon restart (e.g. triggered elsewhere):
+// drop stale local terminals and re-pull the now-empty live session list.
+window.posse.onDaemonRestarted(() => {
+  clearAllLocalSessions();
+  void restoreDaemonSessions();
+  void refreshProjectsData();
 });
 newSessionCloseBtn.addEventListener('click', () => { closeNewSessionDialog(); });
 newSessionCancelBtn.addEventListener('click', () => { closeNewSessionDialog(); });

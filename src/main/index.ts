@@ -1323,6 +1323,44 @@ function registerIPC(): void {
     }));
   });
 
+  // Gracefully restart the background PTY daemon.
+  // Saves every live session as resumable FIRST so nothing is lost, then
+  // stops the old daemon and starts a fresh one (picks up new daemon code).
+  ipcMain.handle('daemon:restart', async (): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      // 1. Persist every live session as resumable before stopping the daemon.
+      const liveSessions = ptyManager.getAllSessions();
+      for (const live of liveSessions) {
+        try {
+          await ptyManager.captureResumeFromBuffer(live.id);
+        } catch {
+          // Best-effort: keep going even if one capture fails.
+        }
+        const session = ptyManager.getSession(live.id) || live;
+        if (session.resumeId) {
+          addClosedSession({
+            title: session.title,
+            cwd: session.cwd,
+            presetCommand: session.presetCommand,
+            resumeId: session.resumeId,
+            resumeCommand: session.resumeCommand || '',
+          });
+        }
+      }
+
+      // 2-3. Stop the old daemon and start a fresh one, reconnecting events.
+      await ptyManager.restart();
+
+      // 5. Tell the renderer the live list is now empty so it refreshes.
+      safeSend('daemon:restarted');
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Main] Failed to restart PTY daemon:', message);
+      return { ok: false, error: message };
+    }
+  });
+
   // ========== Closed session IPC ==========
   ipcMain.handle('closed-sessions:list', () => loadClosedSessions());
   ipcMain.handle('closed-sessions:remove', (_e, id: string) => {

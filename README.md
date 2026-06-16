@@ -65,6 +65,8 @@ The desktop app connects to the PTY daemon as a client. Closing or restarting th
 
 The PTY daemon also serves an independent local terminal client at `http://127.0.0.1:9811/terminal/`. Use the desktop sidebar button labeled `Standalone Terminal` to open it. This client talks directly to the daemon over local HTTP/WebSocket APIs, so it remains usable while the main Electron window is updated or restarted. The mobile remote UI remains served separately by the remote server.
 
+Because the daemon is long-lived, new daemon code only takes effect after a restart. The sidebar button labeled `Restart daemon` performs a **graceful** restart: it first saves every live session as resumable (so nothing is lost — they reappear in the Projects history with one-click resume), then stops the old daemon and starts a fresh one running the updated code, and finally refreshes the navigator.
+
 Posse itself is single-instance on macOS; launching it again while it is already running brings the existing window to the front and shows a "Posse is already running" message in the new process.
 
 The desktop sidebar footer shows the running app version so you can verify the newest build at a glance.
