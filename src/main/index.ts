@@ -775,6 +775,13 @@ function registerIPC(): void {
     saveClosedSessions([]);
     return [];
   });
+  ipcMain.handle('closed-sessions:rename', (_e, id: string, title: string) => {
+    const sessions = loadClosedSessions().map(s =>
+      s.id === id ? { ...s, title: String(title || '').slice(0, 200) } : s
+    );
+    saveClosedSessions(sessions);
+    return sessions;
+  });
 
   // ========== 已关闭 Chat 会话 IPC ==========
   ipcMain.handle('closed-chat:list', () => loadClosedChatSessions());
@@ -841,6 +848,33 @@ function registerIPC(): void {
       return items;
     } catch {
       return [];
+    }
+  });
+
+  // 读取文件内容用于右侧预览面板（只读，带大小/二进制保护）
+  ipcMain.handle('fs:read-file', (_e, filePath: string) => {
+    const MAX_PREVIEW_BYTES = 1024 * 1024; // 1MB 上限，避免卡顿
+    try {
+      const abs = path.resolve(String(filePath || ''));
+      const st = fs.statSync(abs);
+      if (!st.isFile()) return { ok: false, error: 'not-a-file' };
+      if (st.size > MAX_PREVIEW_BYTES) {
+        return { ok: false, error: 'too-large', size: st.size };
+      }
+      const buf = fs.readFileSync(abs);
+      // 简易二进制检测：前 8000 字节含 NUL 视为二进制
+      const sniff = buf.subarray(0, 8000);
+      if (sniff.includes(0)) {
+        return { ok: false, error: 'binary', size: st.size };
+      }
+      return {
+        ok: true,
+        content: buf.toString('utf-8'),
+        size: st.size,
+        ext: path.extname(abs).slice(1).toLowerCase(),
+      };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
     }
   });
 
@@ -1021,6 +1055,7 @@ function registerIPC(): void {
     shell.openExternal(url);
   });
 
+  ipcMain.handle('app:get-version', () => app.getVersion());
   ipcMain.handle('terminal-client:get-url', () => getTerminalClientUrl());
 
   // ========== AI 配置 IPC ==========

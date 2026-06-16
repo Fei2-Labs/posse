@@ -550,6 +550,67 @@ html, body {
   display: flex;
   flex-direction: column;
   background: var(--bg-primary);
+  position: relative;
+}
+
+/* 文件预览面板：覆盖在终端区域上方 */
+#file-preview-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+#file-preview-panel[hidden] {
+  display: none;
+}
+
+#file-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  flex: 0 0 auto;
+}
+
+.file-preview-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-preview-meta {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  margin-right: auto;
+  white-space: nowrap;
+}
+
+#file-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#file-preview-body .cm-editor {
+  height: 100%;
+}
+
+#file-preview-body .cm-scroller {
+  overflow: auto;
+}
+
+.file-preview-error {
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
 }
 
 #terminal-area.drag-over {
@@ -704,6 +765,37 @@ html, body {
 
 .tab-content.active {
   display: flex;
+}
+
+#session-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  flex: 0 0 auto;
+}
+
+.group-toggle-label {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  margin-right: 2px;
+}
+
+.group-toggle-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+}
+
+.group-toggle-btn.active {
+  background: var(--accent-color, #0078d4);
+  border-color: var(--accent-color, #0078d4);
+  color: #fff;
 }
 
 #session-list {
@@ -1480,6 +1572,11 @@ select.ai-form-input {
 
 .footer-line {
   white-space: nowrap;
+}
+
+.footer-version {
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
 .footer-line a {

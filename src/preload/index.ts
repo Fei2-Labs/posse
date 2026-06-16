@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld('duocli', {
   selectFolder: (currentPath?: string) => ipcRenderer.invoke('dialog:select-folder', currentPath),
   // 读取目录树（用于左侧文件树）
   fileTreeListDir: (dirPath: string) => ipcRenderer.invoke('file-tree:list-dir', dirPath),
+  // 读取文件内容（用于右侧只读预览面板）
+  readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
   // 同步最近目录到手机端远程服务
   remoteAddRecentCwd: (cwd: string) => ipcRenderer.invoke('remote:add-recent-cwd', cwd),
 
@@ -84,6 +86,7 @@ contextBridge.exposeInMainWorld('duocli', {
 
   // 打开外部链接
   openUrl: (url: string) => ipcRenderer.invoke('shell:open-url', url),
+  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   getTerminalClientUrl: () => ipcRenderer.invoke('terminal-client:get-url'),
 
   // AI 配置 API
@@ -149,6 +152,7 @@ contextBridge.exposeInMainWorld('duocli', {
   // ========== 已关闭会话 ==========
   closedSessionsList: () => ipcRenderer.invoke('closed-sessions:list'),
   closedSessionsRemove: (id: string) => ipcRenderer.invoke('closed-sessions:remove', id),
+  closedSessionsRename: (id: string, title: string) => ipcRenderer.invoke('closed-sessions:rename', id, title),
   closedSessionsClear: () => ipcRenderer.invoke('closed-sessions:clear'),
   onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>) => void) =>
     ipcRenderer.on('closed-sessions:update', (_e, sessions) => cb(sessions)),

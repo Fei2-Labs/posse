@@ -1,5 +1,6 @@
 import { TerminalManager } from './terminal-manager';
 import { ChatView } from './chat-view';
+import { createFilePreview, type FilePreview } from './file-preview';
 
 let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null = null;
 
@@ -28,6 +29,7 @@ declare global {
       getSessions: () => Promise<PtySessionInfo[]>;
       selectFolder: (currentPath?: string) => Promise<string | null>;
       fileTreeListDir: (dirPath: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>;
+      readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
       remoteAddRecentCwd: (cwd: string) => Promise<boolean>;
       onPtyData: (cb: (id: string, data: string) => void) => void;
       onTitleUpdate: (cb: (id: string, title: string) => void) => void;
@@ -45,6 +47,7 @@ declare global {
       filewatcherGetEditor: () => Promise<string | null>;
       openFolder: (folderPath: string) => Promise<void>;
       openUrl: (url: string) => Promise<void>;
+      getAppVersion: () => Promise<string>;
       getTerminalClientUrl: () => Promise<string>;
       onFileChange: (cb: (filename: string, eventType: string) => void) => void;
       // AI 配置 API
@@ -91,6 +94,7 @@ declare global {
       // 已关闭会话
       closedSessionsList: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsRemove: (id: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
+      closedSessionsRename: (id: string, title: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsClear: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>) => void) => void;
       // 已关闭 Chat 会话
@@ -142,6 +146,18 @@ interface ClosedSessionInfo {
 }
 let closedSessions: ClosedSessionInfo[] = [];
 let closedSessionsCollapsed = false;
+
+// 会话分组方式：按 agent（默认）或按目录
+type SessionGroupMode = 'agent' | 'folder';
+let sessionGroupMode: SessionGroupMode = (localStorage.getItem('sessionGroupMode') as SessionGroupMode) || 'agent';
+
+// 返回某个存活会话的分组键（agent 模式用 displayName，folder 模式用归一化 cwd）
+function sessionGroupKey(id: string): string {
+  if (sessionGroupMode === 'agent') {
+    return sessionDisplayNames.get(id) || '其他';
+  }
+  return normalizeCwd(sessionCwds.get(id) || '');
+}
 
 // ========== 已关闭 Chat 会话（可恢复） ==========
 interface ClosedChatSessionInfo {
@@ -877,6 +893,69 @@ const newSessionCancelBtn = document.getElementById('new-session-cancel')!;
 const newSessionCreateBtn = document.getElementById('new-session-create')!;
 const fileTreeList = document.getElementById('file-tree-list')!;
 const fileTreeRefreshBtn = document.getElementById('file-tree-refresh-btn')!;
+
+// 文件预览面板
+const filePreviewPanel = document.getElementById('file-preview-panel')! as HTMLElement;
+const filePreviewName = document.getElementById('file-preview-name')!;
+const filePreviewMeta = document.getElementById('file-preview-meta')!;
+const filePreviewBody = document.getElementById('file-preview-body')!;
+const filePreviewCloseBtn = document.getElementById('file-preview-close')!;
+const filePreviewExternalBtn = document.getElementById('file-preview-external')!;
+let filePreview: FilePreview | null = null;
+let filePreviewPath = '';
+
+function closeFilePreview(): void {
+  filePreviewPanel.hidden = true;
+  filePreviewPath = '';
+}
+
+async function openFilePreview(filePath: string, name: string): Promise<void> {
+  let res: { ok: boolean; content?: string; size?: number; ext?: string; error?: string };
+  try {
+    res = await window.duocli.readFile(filePath);
+  } catch (err) {
+    // IPC 失败 → 回退到外部编辑器打开
+    console.error('readFile failed', err);
+    window.duocli.openFile(filePath);
+    return;
+  }
+  if (!res.ok) {
+    // 二进制 / 过大 / 读取失败 → 回退到外部编辑器打开
+    window.duocli.openFile(filePath);
+    return;
+  }
+  filePreviewPath = filePath;
+  filePreviewName.textContent = name;
+  filePreviewName.title = filePath;
+  const kb = res.size ? (res.size / 1024).toFixed(1) : '0';
+  filePreviewMeta.textContent = `${res.ext || 'txt'} · ${kb} KB`;
+  filePreviewPanel.hidden = false;
+  if (!filePreview) filePreview = createFilePreview(filePreviewBody);
+  filePreview.show(res.content || '', res.ext || '');
+}
+
+filePreviewCloseBtn.addEventListener('click', closeFilePreview);
+filePreviewExternalBtn.addEventListener('click', () => {
+  if (filePreviewPath) window.duocli.openFile(filePreviewPath);
+});
+
+// 分组方式切换（按 Agent / 按目录）
+const groupByAgentBtn = document.getElementById('group-by-agent')!;
+const groupByFolderBtn = document.getElementById('group-by-folder')!;
+function syncGroupToggleUI(): void {
+  groupByAgentBtn.classList.toggle('active', sessionGroupMode === 'agent');
+  groupByFolderBtn.classList.toggle('active', sessionGroupMode === 'folder');
+}
+function setSessionGroupMode(mode: SessionGroupMode): void {
+  if (sessionGroupMode === mode) return;
+  sessionGroupMode = mode;
+  localStorage.setItem('sessionGroupMode', mode);
+  syncGroupToggleUI();
+  renderSessionList();
+}
+groupByAgentBtn.addEventListener('click', () => setSessionGroupMode('agent'));
+groupByFolderBtn.addEventListener('click', () => setSessionGroupMode('folder'));
+syncGroupToggleUI();
 const fileTreeOpenBtn = document.getElementById('file-tree-open-btn')!;
 const fileTreePath = document.getElementById('file-tree-path')!;
 const fileTreePanel = document.getElementById('file-tree-panel')!;
@@ -895,6 +974,7 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
 // 文件状态栏 DOM
 const fileStatusbar = document.getElementById('file-statusbar')!;
 const fileStatusbarFiles = document.getElementById('file-statusbar-files')!;
+const appVersionEl = document.getElementById('app-version')!;
 
 const sidebarTabs = document.querySelectorAll('.sidebar-tab');
 const tabSessions = document.getElementById('tab-sessions')!;
@@ -1327,7 +1407,7 @@ async function renderFileTree(): Promise<void> {
             });
           }
         } else {
-          window.duocli.openFile(item.path);
+          void openFilePreview(item.path, item.name);
         }
       });
 
@@ -1510,14 +1590,14 @@ function renderSessionList(): void {
     ...allIds.filter(id => !pinnedSessions.has(id)).sort(byCreated),
   ];
 
-  // 按 cwd 分组（组间顺序固定：按该组最早会话的创建时间排序，新建不改变组顺序）
-  // 同一目录可能因末尾斜杠 / macOS /private 前缀差异被拆成多组，先归一化再分组
+  // 按当前分组模式（agent / folder）分组
+  // folder 模式下同一目录可能因末尾斜杠 / macOS /private 前缀差异被拆成多组，sessionGroupKey 已归一化
   const groups: Map<string, string[]> = new Map();
-  const groupDisplayCwd: Map<string, string> = new Map();
+  const groupDisplayCwd: Map<string, string> = new Map(); // 该组代表性 cwd（用于新建按钮 / folder 显示）
   const groupFirstCreatedAt: Map<string, number> = new Map(); // 组排序键：该组最早会话的创建时间
   for (const id of sortedIds) {
     const rawCwd = sessionCwds.get(id) || '';
-    const key = normalizeCwd(rawCwd);
+    const key = sessionGroupKey(id);
     if (!groups.has(key)) {
       groups.set(key, []);
       groupDisplayCwd.set(key, rawCwd);
@@ -1530,8 +1610,7 @@ function renderSessionList(): void {
   // 组间排序：置顶组优先，其余按首个会话创建时间升序（先创建的组在上面）
   const pinnedGroupKeys = new Set<string>();
   for (const id of pinnedSessions) {
-    const key = normalizeCwd(sessionCwds.get(id) || '');
-    if (key) pinnedGroupKeys.add(key);
+    pinnedGroupKeys.add(sessionGroupKey(id));
   }
   const sortedGroupKeys = Array.from(groups.keys()).sort((a, b) => {
     const aPinned = pinnedGroupKeys.has(a);
@@ -1543,7 +1622,8 @@ function renderSessionList(): void {
   for (const groupKey of sortedGroupKeys) {
     const ids = groups.get(groupKey)!;
     const cwd = groupDisplayCwd.get(groupKey) || groupKey;
-    const color = cwdToColor(cwd);
+    const isAgentMode = sessionGroupMode === 'agent';
+    const color = isAgentMode ? getCliTagColors(groupKey)[0] : cwdToColor(cwd);
 
     // 分组头
     const groupHeader = document.createElement('div');
@@ -1551,16 +1631,16 @@ function renderSessionList(): void {
     groupHeader.style.borderLeftColor = color;
     const groupName = document.createElement('span');
     groupName.className = 'session-group-name';
-    groupName.textContent = cwdShortName(cwd);
-    groupName.title = cwd;
-    // 添加按钮：点击在该目录下创建新终端
+    groupName.textContent = isAgentMode ? groupKey : cwdShortName(cwd);
+    groupName.title = isAgentMode ? groupKey : cwd;
+    // 添加按钮：agent 模式开默认新建框，folder 模式在该目录下新建
     const groupAddBtn = document.createElement('button');
     groupAddBtn.className = 'session-group-add-btn';
     groupAddBtn.textContent = '+';
-    groupAddBtn.title = '在此目录下创建新终端';
+    groupAddBtn.title = isAgentMode ? '新建终端' : '在此目录下创建新终端';
     groupAddBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      openNewSessionDialog(cwd);
+      openNewSessionDialog(isAgentMode ? undefined : cwd);
     });
     const groupCount = document.createElement('span');
     groupCount.className = 'session-group-count';
@@ -1834,6 +1914,18 @@ function renderSessionList(): void {
           restoreClosedSession(cs);
         });
 
+        const renameBtn = document.createElement('button');
+        renameBtn.className = 'session-edit-btn';
+        renameBtn.textContent = '✏️';
+        renameBtn.title = '重命名';
+        renameBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const next = window.prompt('重命名会话', cs.title || '');
+          if (next === null) return;
+          closedSessions = await window.duocli.closedSessionsRename(cs.id, next.trim());
+          renderSessionList();
+        });
+
         const delBtn = document.createElement('button');
         delBtn.className = 'session-close';
         delBtn.textContent = '×';
@@ -1848,6 +1940,7 @@ function renderSessionList(): void {
         titleRow.className = 'session-title-row';
         titleRow.appendChild(titleSpan);
         titleRow.appendChild(restoreBtn);
+        titleRow.appendChild(renameBtn);
 
         const topRow = document.createElement('div');
         topRow.className = 'session-item-top';
@@ -3057,6 +3150,12 @@ window.duocli.onCloseCurrentSession(() => {
 document.getElementById('footer-github')!.addEventListener('click', (e) => {
   e.preventDefault();
   window.duocli.openUrl('https://github.com/saddism/DuoCLI');
+});
+
+window.duocli.getAppVersion().then((version) => {
+  appVersionEl.textContent = `v${version}`;
+}).catch(() => {
+  appVersionEl.textContent = 'v?';
 });
 
 // 点击提示文字弹出二维码

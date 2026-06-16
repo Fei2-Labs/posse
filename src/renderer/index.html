@@ -131,6 +131,16 @@
       <div id="terminal-content">
         <div id="empty-state">选择工作目录后点击「新建终端」开始</div>
       </div>
+      <!-- 文件预览面板（只读，覆盖在终端上方） -->
+      <div id="file-preview-panel" hidden>
+        <div id="file-preview-header">
+          <span id="file-preview-name" class="file-preview-name">文件预览</span>
+          <span id="file-preview-meta" class="file-preview-meta"></span>
+          <button id="file-preview-external" class="toolbar-icon-btn" title="在外部编辑器打开">&#8599;</button>
+          <button id="file-preview-close" class="toolbar-icon-btn" title="关闭预览">&times;</button>
+        </div>
+        <div id="file-preview-body"></div>
+      </div>
       <div id="chat-content" style="display:none;">
         <div id="chat-empty-state" class="chat-empty-state">
           <p>选择聊天会话或点击「新建聊天」开始</p>
@@ -169,6 +179,11 @@
 
       <!-- 会话 Tab -->
       <div id="tab-sessions" class="tab-content active">
+        <div id="session-group-toggle">
+          <span class="group-toggle-label">分组</span>
+          <button id="group-by-agent" class="group-toggle-btn" data-mode="agent">按 Agent</button>
+          <button id="group-by-folder" class="group-toggle-btn" data-mode="folder">按目录</button>
+        </div>
         <div id="session-list"></div>
       </div>
 
@@ -235,6 +250,7 @@
         <div class="footer-line">DuoCLI — 多开 CLI 神器</div>
         <div class="footer-line">by 大壮好大</div>
         <div class="footer-line"><a id="footer-github" href="#">GitHub</a></div>
+        <div class="footer-line footer-version">Version <span id="app-version">v?</span></div>
         <div class="footer-tip">如果你喜欢这个软件，只需关注公众号「壮哥的壮」，然后心中默念"大壮好大"，每天祈祷 +1</div>
       </div>
     </div>

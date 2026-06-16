@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/frontend/components.md", "reason": "Verify session rail / status pill / group header / preview panel follow component conventions"}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "Verify layout uses design tokens, no ad-hoc styling regressions"}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Verify IPC for fs read + resume/rename/delete is correctly wired and scoped"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Verify renderer type safety for new session/preview shapes"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Verify logging on resume relaunch, persistence, and fs read failures"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "Verify main-process handler + session store type safety"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Verify TS consistency across layers"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Verify maintainability and scoped, rollback-safe changes"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify cross-layer data flow pty-manager -> main -> preload -> renderer, no missed update sites"}
+{"file": ".trellis/spec/guides/semantic-change-checklist.md", "reason": "Verify resume/delete semantics (live vs closed sessions) handled consistently"}
+{"file": ".trellis/tasks/06-16-warp-style-terminal-client-ui/research/file-preview-and-grouping.md", "reason": "Verify preview + grouping implementation matches chosen patterns"}

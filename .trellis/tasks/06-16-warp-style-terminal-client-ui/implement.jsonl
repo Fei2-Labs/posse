@@ -1,0 +1,15 @@
+{"file": ".trellis/spec/frontend/components.md", "reason": "Renderer component conventions for the new session rail, status pills, group headers, and file-preview panel"}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "Design tokens and styling conventions for the 3-zone Warp-style layout"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "How session list / grouping / active-session state is held in the no-React renderer"}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Renderer<->main IPC for file-content reads, session metadata, resume/rename/delete actions"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Renderer type-safety rules for new session/preview data shapes"}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Where new renderer modules (session rail, preview) should live"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Logging for session persistence, resume relaunch, and fs read failures in main process"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "Main-process IPC handler and session-store type safety"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Shared TS conventions across renderer, preload, and main"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "General quality bar for the multi-file workspace change"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer flow: pty-manager session metadata -> main IPC -> preload -> renderer rail/preview"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing title-ai, rename flow, pty-manager resumeCommand capture instead of duplicating"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "Required pre-implementation checklist"}
+{"file": ".trellis/tasks/06-16-warp-style-terminal-client-ui/research/multi-agent-workspace-oss.md", "reason": "OSS blueprint for grouped session list + center terminal + right panel layout"}
+{"file": ".trellis/tasks/06-16-warp-style-terminal-client-ui/research/file-preview-and-grouping.md", "reason": "CodeMirror 6 read-only preview choice + flat-list collapsible grouping + 3-state status pill"}
