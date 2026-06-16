@@ -961,18 +961,20 @@ function discoverCodexSessions(): DiscoveredSession[] {
 
     files.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
+    // The Codex session_meta first line embeds the full system prompt and can be
+    // >20KB, so a bounded JSON.parse of the line fails. Extract the uuid from the
+    // filename and the cwd via regex over a generous head read instead.
+    const uuidRe = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
     for (const f of files.slice(0, MAX_FILES)) {
       try {
-        const firstLine = readFirstLine(f.full).trim();
-        if (!firstLine) continue;
-        const obj = JSON.parse(firstLine) as {
-          type?: string;
-          payload?: { id?: string; cwd?: string };
-        };
-        if (obj.type !== 'session_meta' || !obj.payload) continue;
-        const id = String(obj.payload.id || '');
-        if (!id) continue;
-        const cwdRaw = String(obj.payload.cwd || '');
+        const base = path.basename(f.full);
+        const idMatch = base.match(uuidRe);
+        if (!idMatch) continue;
+        const id = idMatch[1];
+        const head = readFirstLine(f.full, 64 * 1024);
+        // cwd appears in payload before the giant base_instructions block.
+        const cwdMatch = head.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        const cwdRaw = cwdMatch ? cwdMatch[1].replace(/\\(.)/g, '$1') : '';
         out.push({
           agent: 'codex',
           cwd: cwdRaw ? path.resolve(cwdRaw) : '',
