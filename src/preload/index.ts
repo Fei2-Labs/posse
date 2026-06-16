@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld('duocli', {
 
   // 打开外部链接
   openUrl: (url: string) => ipcRenderer.invoke('shell:open-url', url),
+  getTerminalClientUrl: () => ipcRenderer.invoke('terminal-client:get-url'),
 
   // AI 配置 API
   aiApplyConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('ai:apply-config', config),

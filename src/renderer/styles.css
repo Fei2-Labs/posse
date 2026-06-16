@@ -292,10 +292,20 @@ html, body {
   opacity: 0.85;
 }
 
-#toolbar-new-btn {
-  width: 100%;
+#sidebar-topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+#toolbar-new-btn,
+#toolbar-terminal-client-btn {
   text-align: center;
   flex-shrink: 0;
+}
+
+#toolbar-terminal-client-btn {
+  padding: 0 10px;
 }
 
 /* 新建终端弹窗 */

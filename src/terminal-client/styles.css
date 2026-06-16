@@ -1,0 +1,317 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #111316;
+  --panel: #181b20;
+  --panel-2: #20242b;
+  --panel-3: #282d35;
+  --border: #343a44;
+  --text: #e6e8eb;
+  --muted: #8f98a3;
+  --accent: #47d18c;
+  --accent-2: #65a8ff;
+  --danger: #f66b6b;
+  --radius: 8px;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+#app-shell {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+}
+
+#session-rail {
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+}
+
+.rail-header {
+  min-height: 64px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.app-title {
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.daemon-status {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.daemon-status.online {
+  color: var(--accent);
+}
+
+.daemon-status.error {
+  color: var(--danger);
+}
+
+.new-session-form {
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.field {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 0 10px;
+  outline: none;
+}
+
+.field:focus {
+  border-color: var(--accent-2);
+}
+
+.primary-btn,
+.secondary-btn,
+.danger-btn,
+.icon-btn {
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.primary-btn {
+  background: var(--accent);
+  color: #07130d;
+  font-weight: 650;
+}
+
+.secondary-btn {
+  border-color: var(--border);
+}
+
+.danger-btn {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
+.icon-btn {
+  width: 32px;
+  flex: 0 0 auto;
+  border-color: var(--border);
+}
+
+.session-list {
+  overflow: auto;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.session-item {
+  width: 100%;
+  min-height: 56px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  padding: 8px 10px;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.session-item:hover {
+  background: var(--panel-2);
+}
+
+.session-item.active {
+  background: var(--panel-3);
+  border-color: var(--border);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  margin-top: 6px;
+}
+
+.session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.session-meta {
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#workspace {
+  min-width: 0;
+  background: var(--bg);
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr);
+}
+
+#workspace-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  padding: 9px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.active-title {
+  font-weight: 700;
+}
+
+.active-meta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workspace-actions {
+  display: flex;
+  gap: 8px;
+}
+
+#terminal-stage {
+  min-height: 0;
+  position: relative;
+}
+
+.terminal-container {
+  position: absolute;
+  inset: 0;
+  display: none;
+  padding: 8px;
+}
+
+.terminal-container.active {
+  display: block;
+}
+
+.terminal-container .xterm {
+  height: 100%;
+}
+
+.terminal-container .xterm-viewport {
+  border-radius: 6px;
+}
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  padding: 24px;
+}
+
+.empty-title {
+  color: var(--text);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.empty-copy {
+  max-width: 420px;
+  line-height: 1.5;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.56);
+}
+
+.modal-overlay[hidden] {
+  display: none;
+}
+
+.modal-dialog {
+  width: min(360px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+}
+
+.modal-title {
+  font-weight: 700;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  #app-shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+}

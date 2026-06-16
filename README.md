@@ -8,6 +8,7 @@ Desktop and mobile-synced terminal for AI coding CLIs, including Claude Code, Co
 - 💬 **Interactive chat** – `duo chat` for quick terminal conversations
 - 🔍 **Built-in AI CLI presets** – Start Claude Code, Codex, GitHub Copilot CLI, Devin, OpenCode, Kiro, or custom commands
 - 🧵 **Background PTY daemon** – Terminal processes keep running when the Electron window closes or restarts for an update
+- 🖥️ **Independent terminal client** – Open the daemon-served terminal UI at `http://127.0.0.1:9811/terminal/` while the Electron shell restarts
 - ⚙️ **Persistent config** – `duo config` to set defaults
 
 ## Quick Start
@@ -56,6 +57,8 @@ IDE (Cascade-compatible)
 ```
 
 The desktop app connects to the PTY daemon as a client. Closing or restarting the Electron UI disconnects the client, but existing PTY sessions remain alive in the daemon and are reattached on the next launch.
+
+The PTY daemon also serves an independent local terminal client at `http://127.0.0.1:9811/terminal/`. Use the desktop sidebar button labeled `独立终端` to open it. This client talks directly to the daemon over local HTTP/WebSocket APIs, so it remains usable while the main Electron window is updated or restarted. The mobile remote UI remains served separately by the remote server.
 
 ## Development
 

@@ -45,6 +45,7 @@ declare global {
       filewatcherGetEditor: () => Promise<string | null>;
       openFolder: (folderPath: string) => Promise<void>;
       openUrl: (url: string) => Promise<void>;
+      getTerminalClientUrl: () => Promise<string>;
       onFileChange: (cb: (filename: string, eventType: string) => void) => void;
       // AI 配置 API
       aiApplyConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => Promise<boolean>;
@@ -868,6 +869,7 @@ const themeSelect = document.getElementById('theme-select')!;
 const themeDisplay = document.getElementById('theme-display')!;
 const themeDropdown = document.getElementById('theme-dropdown')!;
 const toolbarNewBtn = document.getElementById('toolbar-new-btn')!;
+const toolbarTerminalClientBtn = document.getElementById('toolbar-terminal-client-btn')!;
 const remoteServerInfoEl = document.getElementById('remote-server-info')!;
 const newSessionOverlay = document.getElementById('new-session-overlay')!;
 const newSessionCloseBtn = document.getElementById('new-session-close')!;
@@ -2611,6 +2613,10 @@ function closeNewSessionDialog(): void {
 }
 
 toolbarNewBtn.addEventListener('click', () => { openNewSessionDialog(); });
+toolbarTerminalClientBtn.addEventListener('click', async () => {
+  const url = await window.duocli.getTerminalClientUrl();
+  await window.duocli.openUrl(url);
+});
 newSessionCloseBtn.addEventListener('click', () => { closeNewSessionDialog(); });
 newSessionCancelBtn.addEventListener('click', () => { closeNewSessionDialog(); });
 newSessionOverlay.addEventListener('click', (e) => {

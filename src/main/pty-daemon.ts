@@ -1,5 +1,7 @@
 import express from 'express';
 import http from 'http';
+import * as os from 'os';
+import * as path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { PtyManager } from './pty-manager';
 import { loadOrCreatePtyDaemonConfig, savePtyDaemonConfig } from './pty-daemon-config';
@@ -74,6 +76,24 @@ app.use(express.json({ limit: '2mb' }));
 app.get('/health', (_req, res) => {
   res.json({ ok: true, pid: process.pid, port: config.port });
 });
+
+app.get('/terminal/config', (_req, res) => {
+  res.json({
+    token: config.token,
+    port: config.port,
+    homeDir: os.homedir(),
+  });
+});
+
+const terminalClientDir = path.join(__dirname, '../terminal-client');
+app.get('/terminal', (req, res, next) => {
+  if (req.originalUrl !== '/terminal') {
+    next();
+    return;
+  }
+  res.redirect('/terminal/');
+});
+app.use('/terminal', express.static(terminalClientDir));
 
 app.use('/api', requireAuth);
 

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DuoCLI Terminal</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23111316'/%3E%3Cpath d='M4 5l3 3-3 3' stroke='%2347d18c' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 11h3.5' stroke='%23e6e8eb' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="xterm.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app-shell">
+    <aside id="session-rail">
+      <div class="rail-header">
+        <div>
+          <div class="app-title">DuoCLI</div>
+          <div id="daemon-status" class="daemon-status">Connecting</div>
+        </div>
+        <button id="refresh-btn" class="icon-btn" title="Refresh sessions">↻</button>
+      </div>
+
+      <form id="new-session-form" class="new-session-form">
+        <input id="cwd-input" class="field" type="text" autocomplete="off" placeholder="Working directory" />
+        <select id="preset-select" class="field">
+          <option value="">Empty shell</option>
+          <option value="claude --dangerously-skip-permissions">Claude full auto</option>
+          <option value="codex -c sandbox_mode=&quot;danger-full-access&quot; -c approval=&quot;never&quot; -c network=&quot;enabled&quot;">Codex full auto</option>
+          <option value="copilot --allow-all --autopilot">Copilot full auto</option>
+          <option value="devin --permission-mode bypass">Devin full auto</option>
+        </select>
+        <button class="primary-btn" type="submit">New Terminal</button>
+      </form>
+
+      <div id="session-list" class="session-list"></div>
+    </aside>
+
+    <main id="workspace">
+      <header id="workspace-header">
+        <div>
+          <div id="active-title" class="active-title">No session</div>
+          <div id="active-meta" class="active-meta">Create or select a terminal</div>
+        </div>
+        <div class="workspace-actions">
+          <button id="rename-btn" class="secondary-btn" type="button" disabled>Rename</button>
+          <button id="close-btn" class="danger-btn" type="button" disabled>Close</button>
+        </div>
+      </header>
+
+      <section id="terminal-stage">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-title">No terminal selected</div>
+          <div class="empty-copy">Active daemon sessions appear in the rail. This client keeps working while the DuoCLI app restarts.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div id="rename-overlay" class="modal-overlay" hidden>
+    <form id="rename-dialog" class="modal-dialog">
+      <div class="modal-title">Rename session</div>
+      <input id="rename-input" class="field" type="text" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="rename-cancel-btn" type="button" class="secondary-btn">Cancel</button>
+        <button type="submit" class="primary-btn">Save</button>
+      </div>
+    </form>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

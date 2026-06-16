@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Renderer/preload boundaries and IPC restrictions for keeping terminal client independent"}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "Browser/Electron API constraints for client separation"}
+{"file": ".trellis/spec/frontend/react-pitfalls.md", "reason": "Frontend pitfalls relevant to stateful UI changes"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "Backend daemon and API type safety"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "Backend quality rules for daemon endpoint changes"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Logging expectations for daemon/client startup failures"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Shared TypeScript conventions across main and client code"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "General code quality constraints"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer validation for daemon, main app, and browser client"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "Required pre-implementation checklist"}
+{"file": ".trellis/tasks/06-15-terminal-client-separation/research/warp-ui-architecture.md", "reason": "Research notes for Warp-inspired but non-copying client architecture"}

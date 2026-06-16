@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import { getDisplayName, rotateDevinInstallationId } from './pty-manager';
 import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
+import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
 import { AIConfigManager } from './ai-config';
 import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, type RemoteConnectionStatus } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
@@ -404,6 +405,11 @@ function copyRemoteUrl(): void {
   if (url) clipboard.writeText(url);
 }
 
+function getTerminalClientUrl(): string {
+  const config = loadOrCreatePtyDaemonConfig();
+  return `http://127.0.0.1:${config.port}/terminal/`;
+}
+
 function createTrayIcon(): Electron.NativeImage {
   const icon = currentAppIcon || nativeImage.createEmpty();
   if (icon.isEmpty()) return icon;
@@ -431,6 +437,7 @@ function updateTray(): void {
     ...(trayState.publicUrl ? [{ label: `Public: ${trayState.publicUrl}`, enabled: false }] : []),
     { type: 'separator' },
     { label: 'Open DuoCLI', click: showMainWindow },
+    { label: 'Open Terminal Client', click: () => { shell.openExternal(getTerminalClientUrl()); } },
     { label: 'Copy Remote URL', enabled: Boolean(url), click: copyRemoteUrl },
     { label: 'Open Remote URL', enabled: Boolean(url), click: () => { if (url) shell.openExternal(url); } },
     { type: 'separator' },
@@ -995,6 +1002,8 @@ function registerIPC(): void {
   ipcMain.handle('shell:open-url', (_e, url: string) => {
     shell.openExternal(url);
   });
+
+  ipcMain.handle('terminal-client:get-url', () => getTerminalClientUrl());
 
   // ========== AI 配置 IPC ==========
 

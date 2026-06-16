@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Verify independent terminal client does not depend on Electron IPC"}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "Verify browser/Electron API boundaries"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "Verify daemon API type safety"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "Verify daemon endpoint quality and failure behavior"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Verify startup/connectivity logging"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Verify TypeScript consistency"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Verify maintainability and scoped changes"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify cross-layer data flow across daemon, main app, terminal client, and mobile"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "Verify implementation followed checklist"}
+{"file": ".trellis/tasks/06-15-terminal-client-separation/research/warp-ui-architecture.md", "reason": "Verify UI split aligns with research and scope"}
