@@ -8,16 +8,35 @@
   --file-tree-width: 220px;
   --sidebar-width: 260px;
   --toolbar-height: 44px;
-  --bg-primary: #1e1e1e;
-  --bg-sidebar: #252526;
-  --bg-toolbar: #2d2d2d;
-  --text-primary: #cccccc;
-  --text-secondary: #888888;
-  --accent: #0078d4;
-  --border-color: #3c3c3c;
-  --hover-bg: #2a2d2e;
-  --active-bg: #37373d;
-  --danger: #f44747;
+
+  /* ===== Codex-inspired palette: deep near-black with a cool green tint ===== */
+  --bg-primary: #0d1117;        /* app / terminal background */
+  --bg-panel: #11171a;          /* panels (sidebar, file tree) slightly lighter */
+  --bg-sidebar: #11171a;
+  --bg-toolbar: #0f1418;
+  --bg-secondary: #161d20;      /* inputs / raised rows */
+  --bg-active: #16221b;         /* selected row green-tinted bg */
+  --text-primary: #c9d1d1;      /* soft off-white */
+  --text-secondary: #6e7a73;    /* muted cool grey-green */
+  --text-muted: #6e7a73;
+
+  /* Green accent replaces the old blue */
+  --accent-green: #3fb950;
+  --accent-green-dim: #2ea043;
+  --accent: #3fb950;
+  --accent-color: #3fb950;
+
+  --border-color: #1f2a24;      /* very subtle low-contrast borders */
+  --border-subtle: #182019;
+  --hover-bg: #161d20;          /* subtle hover, slightly lighter */
+  --active-bg: #16221b;
+  --row-selected: #16221b;      /* green-tinted selection */
+  --danger: #f85149;
+  --input-bg: #161d20;
+  --text-color: #c9d1d1;
+
+  /* Monospace stack for the Codex-style navigator */
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
 }
 
 /* Panel collapse/expand button */
@@ -42,8 +61,8 @@
 }
 
 .panel-toggle.collapsed {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-green);
+  color: #0d1117;
 }
 
 /* Resizer bar */
@@ -278,18 +297,34 @@ html, body {
 }
 
 .toolbar-btn {
-  padding: 4px 12px;
-  background: var(--accent);
+  padding: 5px 12px;
+  background: var(--accent-green);
   border: none;
-  border-radius: 4px;
-  color: #fff;
+  border-radius: 6px;
+  color: #0d1117;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.15s;
 }
 
 .toolbar-btn:hover {
-  opacity: 0.85;
+  background: var(--accent-green-dim);
+}
+
+/* Secondary / quiet button variant */
+.toolbar-btn.secondary {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.toolbar-btn.secondary:hover {
+  background: var(--hover-bg);
+  border-color: var(--accent-green);
+  color: var(--text-primary);
 }
 
 #sidebar-topbar {
@@ -426,7 +461,7 @@ html, body {
 /* Left file tree */
 #file-tree-panel {
   width: var(--file-tree-width);
-  background: #212224;
+  background: var(--bg-panel);
   display: flex;
   flex-direction: column;
   min-width: 160px;
@@ -473,6 +508,7 @@ html, body {
   flex: 1;
   overflow: auto;
   padding: 6px 4px;
+  font-family: var(--font-mono);
 }
 
 .file-tree-empty {
@@ -497,7 +533,7 @@ html, body {
 }
 
 .file-tree-row.active-dir {
-  background: #2a3340;
+  background: var(--row-selected);
 }
 
 .file-tree-arrow {
@@ -518,7 +554,7 @@ html, body {
 }
 
 .file-tree-row.dir .file-tree-name {
-  color: #d8c38a;
+  color: #8aa394;
 }
 
 .file-tree-row.file .file-tree-name {
@@ -614,7 +650,7 @@ html, body {
 }
 
 #terminal-area.drag-over {
-  box-shadow: inset 0 0 0 2px rgba(0, 120, 212, 0.9);
+  box-shadow: inset 0 0 0 2px rgba(63, 185, 80, 0.9);
 }
 
 
@@ -670,8 +706,8 @@ html, body {
 
 .scroll-bottom-btn:hover {
   opacity: 1;
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-green);
+  color: #0d1117;
 }
 
 /* Right sidebar */
@@ -772,6 +808,24 @@ html, body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0 8px;
+  font-family: var(--font-mono);
+}
+
+#project-nav::-webkit-scrollbar {
+  width: 8px;
+}
+
+#project-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#project-nav::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+#project-nav::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
 }
 
 /* Section header (Pinned / Projects / Chat) */
@@ -968,7 +1022,12 @@ html, body {
 }
 
 .nav-session.active {
-  background: var(--bg-active, #094771);
+  background: var(--row-selected);
+  box-shadow: inset 2px 0 0 var(--accent-green);
+}
+
+.nav-session.active .nav-session-title {
+  color: var(--accent-green);
 }
 
 .nav-session-dot {
@@ -1055,7 +1114,7 @@ html, body {
 }
 
 .session-item.active {
-  background: #1a3a5c;
+  background: var(--row-selected);
   border-left-color: transparent;
 }
 
@@ -1391,25 +1450,26 @@ html, body {
 }
 
 .session-restore:hover {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-green);
+  color: #0d1117;
 }
 
 /* New button */
 #new-term-btn {
   margin: 8px 12px;
   padding: 8px;
-  background: var(--accent);
+  background: var(--accent-green);
   border: none;
-  border-radius: 4px;
-  color: #fff;
+  border-radius: 6px;
+  color: #0d1117;
   font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   text-align: center;
 }
 
 #new-term-btn:hover {
-  opacity: 0.85;
+  background: var(--accent-green-dim);
 }
 
 /* Scrollbar */
@@ -1491,8 +1551,8 @@ html, body {
 }
 
 .file-statusbar-item:hover {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-green);
+  color: #0d1117;
 }
 
 /* Session group header */
@@ -1554,7 +1614,7 @@ html, body {
 
 /* Active-state background override for session items within a group */
 .session-item.active {
-  background: #1a3a5c;
+  background: var(--row-selected);
   border-left-color: transparent;
 }
 
@@ -1661,7 +1721,7 @@ html, body {
 
 .ai-form-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.15);
+  box-shadow: 0 0 0 2px rgba(63, 185, 80, 0.2);
 }
 
 .ai-form-input::placeholder {
@@ -1745,31 +1805,51 @@ select.ai-form-input {
   width: 100%;
 }
 
-/* Terminal context menu */
+/* Terminal context menu + Codex-style nav popovers (sort / agent / add-project) */
 .term-context-menu {
   position: fixed;
   z-index: 10000;
-  background: var(--bg-secondary, #252526);
-  border: 1px solid var(--border-color, #3c3c3c);
-  border-radius: 4px;
-  padding: 4px 0;
-  min-width: 160px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 5px;
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.nav-popup-menu {
+  font-family: var(--font-mono);
 }
 
 .term-context-item {
-  padding: 6px 16px;
+  padding: 6px 10px;
   font-size: 12px;
-  color: var(--text-primary, #ccc);
+  color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .term-context-item:hover {
-  background: var(--accent, #0078d4);
-  color: #fff;
+  background: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+/* Selected option shows a green check (set ::before content via .selected) */
+.term-context-item.selected {
+  color: var(--accent-green);
+}
+
+.term-context-item.selected::after {
+  content: '\2713';
+  margin-left: auto;
+  color: var(--accent-green);
+  font-size: 12px;
 }
 
 /* Sidebar footer / copyright */
@@ -1920,9 +2000,9 @@ select.ai-form-input {
 }
 
 .preset-manage-item-actions button:hover {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--accent-green);
+  border-color: var(--accent-green);
+  color: #0d1117;
 }
 
 .preset-manage-item-actions button.danger:hover {
@@ -2017,9 +2097,9 @@ select.ai-form-input {
 }
 
 .chat-bubble-user .chat-bubble-body {
-  background: var(--accent);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--accent-green);
+  color: #0d1117;
+  border: 1px solid rgba(0, 0, 0, 0.12);
 }
 
 .chat-bubble-assistant .chat-bubble-body {
@@ -2047,7 +2127,7 @@ select.ai-form-input {
 
 .chat-bubble.streaming .chat-bubble-body {
   border-color: var(--accent);
-  box-shadow: 0 0 6px rgba(0, 120, 212, 0.12);
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.18);
 }
 
 /* Chat Input */
@@ -2108,17 +2188,18 @@ select.ai-form-input {
 .chat-send-btn {
   padding: 6px 14px;
   font-size: 12px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-green);
+  color: #0d1117;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
   height: 32px;
 }
 
 .chat-send-btn:hover {
-  opacity: 0.85;
+  background: var(--accent-green-dim);
 }
 
 .chat-send-btn:active {
@@ -2230,7 +2311,7 @@ select.ai-form-input {
 }
 
 .devin-account-item.active {
-  background: rgba(56, 132, 244, 0.12);
+  background: rgba(63, 185, 80, 0.12);
   border-left-color: var(--accent, #3884f4);
 }
 
@@ -2239,7 +2320,7 @@ select.ai-form-input {
 }
 
 .devin-account-item.active:hover {
-  background: rgba(56, 132, 244, 0.18);
+  background: rgba(63, 185, 80, 0.18);
 }
 
 .devin-account-top {
@@ -2406,8 +2487,8 @@ select.ai-form-input {
 }
 
 .devin-batch-btn {
-  background: var(--accent-color);
-  color: #fff;
+  background: var(--accent-green);
+  color: #0d1117;
   border: none;
 }
 
@@ -2427,13 +2508,15 @@ select.ai-form-input {
 #project-search {
   flex: 1;
   min-width: 0;
-  background: var(--bg-primary);
+  background: var(--input-bg);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
-  border-radius: 4px;
-  padding: 4px 8px;
+  border-radius: 7px;
+  padding: 5px 9px;
   font-size: 12px;
+  font-family: var(--font-mono);
   outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 #project-search::placeholder {
@@ -2441,22 +2524,25 @@ select.ai-form-input {
 }
 
 #project-search:focus {
-  border-color: var(--accent);
+  border-color: var(--accent-green);
+  box-shadow: 0 0 0 2px rgba(63, 185, 80, 0.18);
 }
 
 #project-sort {
   flex: 0 0 auto;
-  background: var(--bg-primary);
+  background: var(--input-bg);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  border-radius: 4px;
-  padding: 4px 8px;
+  border-radius: 7px;
+  padding: 5px 9px;
   font-size: 11px;
+  font-family: var(--font-mono);
   cursor: pointer;
   white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
 }
 
 #project-sort:hover {
   color: var(--text-primary);
-  border-color: var(--accent);
+  border-color: var(--accent-green);
 }
