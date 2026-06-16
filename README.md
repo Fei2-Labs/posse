@@ -60,6 +60,8 @@ The desktop app connects to the PTY daemon as a client. Closing or restarting th
 
 The PTY daemon also serves an independent local terminal client at `http://127.0.0.1:9811/terminal/`. Use the desktop sidebar button labeled `独立终端` to open it. This client talks directly to the daemon over local HTTP/WebSocket APIs, so it remains usable while the main Electron window is updated or restarted. The mobile remote UI remains served separately by the remote server.
 
+DuoCLI itself is single-instance on macOS; launching it again while it is already running brings the existing window to the front and shows a "DuoCLI 已在运行" message in the new process.
+
 ## Development
 
 ```bash

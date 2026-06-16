@@ -19,6 +19,24 @@ if (process.platform === 'darwin') {
   app.setActivationPolicy('regular');
 }
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  dialog.showErrorBox('DuoCLI 已在运行', 'DuoCLI 已经在运行，请切换到已有窗口。');
+  app.exit(0);
+}
+
+app.on('second-instance', () => {
+  const windows = BrowserWindow.getAllWindows();
+  const mainWindow = windows[0];
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  createWindow(currentAppIcon);
+});
+
 // 文件监听器
 let fileWatcher: fs.FSWatcher | null = null;
 let watchingCwd: string | null = null;
