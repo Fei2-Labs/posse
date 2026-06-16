@@ -41,6 +41,8 @@ contextBridge.exposeInMainWorld('posse', {
   readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
   // List a directory's native session history in Claude Code
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke('claude-sessions:list', cwd),
+  // Projects-first discovery: every AI-CLI session bucketed by project folder
+  projectsList: (extra?: { extraFolders?: string[] }) => ipcRenderer.invoke('projects:list', extra),
   // Sync recent directories to the mobile remote service
   remoteAddRecentCwd: (cwd: string) => ipcRenderer.invoke('remote:add-recent-cwd', cwd),
 

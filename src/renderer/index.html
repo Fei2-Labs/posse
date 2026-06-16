@@ -110,56 +110,8 @@
 
   <!-- Main body -->
   <div id="main">
-    <!-- Left file-tree collapse button -->
-    <div id="file-tree-toggle" class="panel-toggle" title="Collapse/expand file tree">&#9664;</div>
-
-    <div id="file-tree-panel">
-      <div id="file-tree-header">
-        <button id="file-tree-open-btn" class="toolbar-icon-btn" title="Reveal in Finder">&#128193;</button>
-        <button id="file-tree-pick-btn" class="toolbar-icon-btn" title="Switch directory">&#128194;</button>
-        <span id="file-tree-path">Directory</span>
-        <button id="file-tree-refresh-btn" class="toolbar-icon-btn" title="Refresh directory">&#8635;</button>
-      </div>
-      <div id="file-tree-list">
-        <div class="file-tree-empty">Select a session to show the current directory</div>
-      </div>
-    </div>
-
-    <!-- Left resizer -->
-    <div id="file-tree-resizer" class="resizer"></div>
-
-    <div id="terminal-area">
-      <div id="terminal-content">
-        <div id="empty-state">Select a working directory, then click "New Terminal" to start</div>
-      </div>
-      <!-- File preview panel (read-only, overlays the terminal) -->
-      <div id="file-preview-panel" hidden>
-        <div id="file-preview-header">
-          <span id="file-preview-name" class="file-preview-name">File Preview</span>
-          <span id="file-preview-meta" class="file-preview-meta"></span>
-          <button id="file-preview-external" class="toolbar-icon-btn" title="Open in external editor">&#8599;</button>
-          <button id="file-preview-close" class="toolbar-icon-btn" title="Close preview">&times;</button>
-        </div>
-        <div id="file-preview-body"></div>
-      </div>
-      <div id="chat-content" style="display:none;">
-        <div id="chat-empty-state" class="chat-empty-state">
-          <p>Select a chat session or click "New Chat" to start</p>
-        </div>
-      </div>
-      <div id="file-statusbar">
-        <span id="file-statusbar-icon">&#9998;</span>
-        <div id="file-statusbar-files">
-          <span class="file-statusbar-placeholder">Waiting for file changes...</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Right resizer -->
-    <div id="sidebar-resizer" class="resizer"></div>
-
-    <!-- Right sidebar collapse button -->
-    <div id="sidebar-toggle" class="panel-toggle" title="Collapse/expand session list">&#9654;</div>
+    <!-- Left sidebar collapse button -->
+    <div id="sidebar-toggle" class="panel-toggle" title="Collapse/expand session list">&#9664;</div>
 
     <div id="sidebar">
       <div id="sidebar-topbar">
@@ -178,14 +130,9 @@
         <button class="sidebar-tab" data-tab="devin-accounts">&#128100; Devin</button>
       </div>
 
-      <!-- Sessions Tab -->
+      <!-- Sessions Tab: Codex-style project navigator -->
       <div id="tab-sessions" class="tab-content active">
-        <div id="session-group-toggle">
-          <span class="group-toggle-label">Group</span>
-          <button id="group-by-agent" class="group-toggle-btn" data-mode="agent">By Agent</button>
-          <button id="group-by-folder" class="group-toggle-btn" data-mode="folder">By Folder</button>
-        </div>
-        <div id="session-list"></div>
+        <div id="project-nav"></div>
       </div>
 
       <!-- AI Config Tab -->
@@ -254,6 +201,54 @@
         <div class="footer-line footer-version">Version <span id="app-version">v?</span></div>
       </div>
     </div>
+
+    <!-- Sidebar resizer (between sessions sidebar and terminal) -->
+    <div id="sidebar-resizer" class="resizer"></div>
+
+    <div id="terminal-area">
+      <div id="terminal-content">
+        <div id="empty-state">Select a working directory, then click "New Terminal" to start</div>
+      </div>
+      <!-- File preview panel (read-only, overlays the terminal) -->
+      <div id="file-preview-panel" hidden>
+        <div id="file-preview-header">
+          <span id="file-preview-name" class="file-preview-name">File Preview</span>
+          <span id="file-preview-meta" class="file-preview-meta"></span>
+          <button id="file-preview-external" class="toolbar-icon-btn" title="Open in external editor">&#8599;</button>
+          <button id="file-preview-close" class="toolbar-icon-btn" title="Close preview">&times;</button>
+        </div>
+        <div id="file-preview-body"></div>
+      </div>
+      <div id="chat-content" style="display:none;">
+        <div id="chat-empty-state" class="chat-empty-state">
+          <p>Select a chat session or click "New Chat" to start</p>
+        </div>
+      </div>
+      <div id="file-statusbar">
+        <span id="file-statusbar-icon">&#9998;</span>
+        <div id="file-statusbar-files">
+          <span class="file-statusbar-placeholder">Waiting for file changes...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- File-tree resizer (between terminal and right file tree) -->
+    <div id="file-tree-resizer" class="resizer"></div>
+
+    <div id="file-tree-panel">
+      <div id="file-tree-header">
+        <button id="file-tree-open-btn" class="toolbar-icon-btn" title="Reveal in Finder">&#128193;</button>
+        <button id="file-tree-pick-btn" class="toolbar-icon-btn" title="Switch directory">&#128194;</button>
+        <span id="file-tree-path">Directory</span>
+        <button id="file-tree-refresh-btn" class="toolbar-icon-btn" title="Refresh directory">&#8635;</button>
+      </div>
+      <div id="file-tree-list">
+        <div class="file-tree-empty">Select a session to show the current directory</div>
+      </div>
+    </div>
+
+    <!-- Right file-tree collapse button -->
+    <div id="file-tree-toggle" class="panel-toggle" title="Collapse/expand file tree">&#9654;</div>
   </div>
 
   <script src="app.js"></script>

@@ -31,6 +31,15 @@ declare global {
       fileTreeListDir: (dirPath: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>;
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
       claudeSessionsList: (cwd: string) => Promise<Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string }>>;
+      projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
+        path: string;
+        name: string;
+        agents: Array<{
+          agent: 'claude' | 'codex' | 'kiro' | 'copilot';
+          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string }>;
+        }>;
+        lastActiveMs: number;
+      }>>;
       remoteAddRecentCwd: (cwd: string) => Promise<boolean>;
       onPtyData: (cb: (id: string, data: string) => void) => void;
       onTitleUpdate: (cb: (id: string, title: string) => void) => void;
@@ -154,16 +163,173 @@ let claudeHistorySessions: ClaudeHistorySession[] = [];
 let claudeHistoryCollapsed = false;
 let claudeHistoryCwd = '';
 
-// Session grouping mode: by agent (default) or by folder
-type SessionGroupMode = 'agent' | 'folder';
-let sessionGroupMode: SessionGroupMode = (localStorage.getItem('sessionGroupMode') as SessionGroupMode) || 'agent';
+// ========== Project navigator (Codex-style) ==========
+interface ProjectEntry {
+  path: string;
+  pinned: boolean;
+  addedAt: number;
+  name?: string; // optional display-name override
+}
+const PROJECTS_STORAGE_KEY = 'posse_projects';
+let projects: ProjectEntry[] = loadProjects();
 
-// Return the grouping key for a live session (agent mode uses displayName, folder mode uses normalized cwd)
-function sessionGroupKey(id: string): string {
-  if (sessionGroupMode === 'agent') {
-    return sessionDisplayNames.get(id) || 'Other';
+// In-memory UI state (not persisted): which projects are expanded, which agent groups are collapsed
+const expandedProjects: Set<string> = new Set(); // key = normalized project path
+const collapsedAgentGroups: Set<string> = new Set(); // key = `${normPath}::${agentFamily}`
+let projectsSectionCollapsed = false;
+
+// Currently selected project (drives the RIGHT file panel root + highlight). Independent of the
+// active terminal session: selecting a project switches the file tree even with no session open.
+let selectedProjectPath: string | null = null;
+
+// ========== Multi-agent project history (backend projects:list) ==========
+// Backend-discovered, multi-agent (Claude/Codex/Kiro/Copilot) session history keyed by normalized
+// project path. Loaded via window.posse.projectsList({ extraFolders }) — see refreshProjectsData().
+type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
+interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string }
+interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
+interface BackendProject { path: string; name: string; agents: BackendProjectAgent[]; lastActiveMs: number }
+
+// Normalized-path -> backend project record (merged with user-added folders in refreshProjectsData)
+const backendProjects: Map<string, BackendProject> = new Map();
+let projectsDataLoading = false;
+
+// Display label per backend agent id
+const AGENT_ID_LABEL: Record<ProjectsAgentId, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  kiro: 'Kiro',
+  copilot: 'Copilot',
+};
+
+// Fetch the multi-agent project list from the backend, merging in the user's added folders so they
+// always appear, then refresh the navigator. Also ensures every discovered folder with sessions
+// shows up in the navigator even if the user never explicitly added it.
+async function refreshProjectsData(): Promise<void> {
+  if (projectsDataLoading) return;
+  projectsDataLoading = true;
+  try {
+    const extraFolders = projects.map(p => p.path);
+    const list = await window.posse.projectsList({ extraFolders });
+    backendProjects.clear();
+    for (const proj of list) {
+      backendProjects.set(normalizeCwd(proj.path), proj as BackendProject);
+      // Auto-register discovered folders (with a real path) so they render in the Projects list.
+      if (proj.path && !findProject(proj.path)) {
+        projects.push({ path: proj.path, pinned: false, addedAt: proj.lastActiveMs || Date.now() });
+      }
+    }
+    saveProjects();
+  } catch (err) {
+    console.error('projects:list failed', err);
+  } finally {
+    projectsDataLoading = false;
+    renderSessionList();
   }
-  return normalizeCwd(sessionCwds.get(id) || '');
+}
+
+function loadProjects(): ProjectEntry[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((p: any) => p && typeof p.path === 'string')
+      .map((p: any) => ({
+        path: p.path,
+        pinned: Boolean(p.pinned),
+        addedAt: typeof p.addedAt === 'number' ? p.addedAt : Date.now(),
+        name: typeof p.name === 'string' ? p.name : undefined,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function saveProjects(): void {
+  localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+}
+
+function findProject(path: string): ProjectEntry | undefined {
+  const key = normalizeCwd(path);
+  return projects.find(p => normalizeCwd(p.path) === key);
+}
+
+function addProject(path: string): void {
+  if (!path) return;
+  if (findProject(path)) {
+    // Already exists: just expand it
+    expandedProjects.add(normalizeCwd(path));
+    renderSessionList();
+    return;
+  }
+  projects.push({ path, pinned: false, addedAt: Date.now() });
+  expandedProjects.add(normalizeCwd(path));
+  saveProjects();
+  renderSessionList();
+}
+
+function removeProject(path: string): void {
+  const key = normalizeCwd(path);
+  projects = projects.filter(p => normalizeCwd(p.path) !== key);
+  expandedProjects.delete(key);
+  if (selectedProjectPath && normalizeCwd(selectedProjectPath) === key) {
+    selectedProjectPath = null;
+    updateSessionTitleBar();
+    void renderFileTree();
+  }
+  saveProjects();
+  renderSessionList();
+}
+
+function togglePinProject(path: string): void {
+  const p = findProject(path);
+  if (!p) return;
+  p.pinned = !p.pinned;
+  saveProjects();
+  renderSessionList();
+}
+
+function renameProject(path: string): void {
+  const p = findProject(path);
+  if (!p) return;
+  const next = window.prompt('Project name', p.name || cwdShortName(p.path));
+  if (next === null) return;
+  const trimmed = next.trim();
+  p.name = trimmed || undefined;
+  saveProjects();
+  renderSessionList();
+}
+
+function projectDisplayName(p: ProjectEntry): string {
+  return p.name || cwdShortName(p.path);
+}
+
+// Map a session displayName / preset family to a coarse agent group label
+function agentFamilyFromDisplayName(displayName: string): string {
+  const d = (displayName || '').toLowerCase();
+  if (d.includes('claude')) return 'Claude';
+  if (d.includes('codex')) return 'Codex';
+  if (d.includes('copilot')) return 'Copilot';
+  if (d.includes('kiro')) return 'Kiro';
+  if (d.includes('devin')) return 'Devin';
+  if (d.includes('opencode')) return 'OpenCode';
+  if (!displayName) return 'Terminal';
+  return displayName;
+}
+
+// Compact relative time: <n>m / <n>h / <n>d / <n>w
+function relativeTimeShort(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  return `${wk}w`;
 }
 
 // ========== Closed chat sessions (resumable) ==========
@@ -946,23 +1112,6 @@ filePreviewExternalBtn.addEventListener('click', () => {
   if (filePreviewPath) window.posse.openFile(filePreviewPath);
 });
 
-// Group mode toggle (By Agent / By Folder)
-const groupByAgentBtn = document.getElementById('group-by-agent')!;
-const groupByFolderBtn = document.getElementById('group-by-folder')!;
-function syncGroupToggleUI(): void {
-  groupByAgentBtn.classList.toggle('active', sessionGroupMode === 'agent');
-  groupByFolderBtn.classList.toggle('active', sessionGroupMode === 'folder');
-}
-function setSessionGroupMode(mode: SessionGroupMode): void {
-  if (sessionGroupMode === mode) return;
-  sessionGroupMode = mode;
-  localStorage.setItem('sessionGroupMode', mode);
-  syncGroupToggleUI();
-  renderSessionList();
-}
-groupByAgentBtn.addEventListener('click', () => setSessionGroupMode('agent'));
-groupByFolderBtn.addEventListener('click', () => setSessionGroupMode('folder'));
-syncGroupToggleUI();
 const fileTreeOpenBtn = document.getElementById('file-tree-open-btn')!;
 const fileTreePickBtn = document.getElementById('file-tree-pick-btn')!;
 const fileTreePath = document.getElementById('file-tree-path')!;
@@ -972,7 +1121,8 @@ const fileTreeResizer = document.getElementById('file-tree-resizer')!;
 const terminalArea = document.getElementById('terminal-area')!;
 const terminalContent = document.getElementById('terminal-content')!;
 const emptyState = document.getElementById('empty-state')!;
-const sessionList = document.getElementById('session-list')!;
+// The Sessions tab now renders the Codex-style project navigator into this container.
+const sessionList = document.getElementById('project-nav')!;
 const chatContent = document.getElementById('chat-content')!;
 const chatEmptyState = document.getElementById('chat-empty-state')!;
 const sidebar = document.getElementById('sidebar')!;;
@@ -1243,6 +1393,12 @@ function updateSessionTitleBar(): void {
     // 'New session' / 'New conversation' are default titles produced by the backend (kept for the comparison to work)
     if (title && title !== 'New session' && title !== 'New conversation') parts.push(title);
     window.posse.setWindowTitle(parts.join('-'));
+  } else if (selectedProjectPath) {
+    // No active session but a project is selected: label the file panel with the project folder.
+    const cwdDisplay = selectedProjectPath.split('/').filter(Boolean).pop() || '';
+    fileTreePath.textContent = cwdDisplay || 'Directory';
+    fileTreePath.title = selectedProjectPath;
+    window.posse.setWindowTitle(cwdDisplay ? `Posse-${cwdDisplay}` : 'Posse');
   } else {
     fileTreePath.textContent = 'Directory';
     fileTreePath.title = '';
@@ -1255,9 +1411,25 @@ function getActiveSessionId(): string | null {
 }
 
 function getActiveSessionCwd(): string {
+  // An explicitly selected project takes precedence so the RIGHT file panel follows the project
+  // the user clicked, even when no terminal session is open in it yet.
+  if (selectedProjectPath) return selectedProjectPath;
   const activeId = getActiveSessionId();
   if (activeId) return sessionCwds.get(activeId) || currentCwd;
   return currentCwd;
+}
+
+// Select a project: drives the RIGHT file panel root + highlight, and expands it in the navigator.
+function selectProject(projPath: string): void {
+  if (!projPath) return;
+  selectedProjectPath = projPath;
+  const key = normalizeCwd(projPath);
+  expandedProjects.add(key);
+  // Lazily load this project's multi-agent history the first time it expands.
+  if (!backendProjects.has(key) && !projectsDataLoading) void refreshProjectsData();
+  renderSessionList();
+  updateSessionTitleBar();
+  void renderFileTree();
 }
 
 function quotePathForShell(filePath: string): string {
@@ -1574,6 +1746,345 @@ function showSessionContextMenu(e: MouseEvent, targetId: string): void {
   setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
 }
 
+// ========== Project navigator rendering ==========
+
+// Status dot color for a live session
+function sessionStatusColor(id: string): string {
+  if (sessionBusy.has(id)) return '#e5a100';
+  if (sessionUnread.has(id)) return '#73c991';
+  return '#666';
+}
+
+// Build a session row for a LIVE PTY session inside a project (compact: title + relative time)
+function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
+  const title = sessionTitles.get(id) || '';
+  const isPinned = pinnedSessions.has(id);
+  const item = document.createElement('div');
+  item.className = 'nav-session' + (id === activeId ? ' active' : '');
+  item.dataset.sessionId = id;
+  item.dataset.sessionType = 'pty';
+
+  const dot = document.createElement('span');
+  dot.className = 'nav-session-dot';
+  dot.style.backgroundColor = sessionStatusColor(id);
+
+  const titleSpan = document.createElement('span');
+  titleSpan.className = 'nav-session-title';
+  titleSpan.textContent = title || 'Terminal';
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'nav-session-time';
+  timeSpan.textContent = relativeTimeShort(sessionUpdateTimes.get(id) || Date.now());
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'nav-session-action';
+  editBtn.textContent = '✏️';
+  editBtn.title = 'Rename';
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    startTitleEdit(id, titleSpan);
+  });
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'nav-session-action';
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Close';
+  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleCloseClick(id); });
+
+  if (isPinned) item.classList.add('pinned');
+
+  item.appendChild(dot);
+  item.appendChild(titleSpan);
+  item.appendChild(timeSpan);
+  item.appendChild(editBtn);
+  item.appendChild(closeBtn);
+
+  item.addEventListener('click', () => switchSession(id));
+  item.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showSessionContextMenu(e, id);
+  });
+  return item;
+}
+
+// Build a session row for a CLOSED (resumable) DuoCLI session
+function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'nav-session nav-session-closed';
+
+  const dot = document.createElement('span');
+  dot.className = 'nav-session-dot';
+  dot.style.backgroundColor = '#555';
+
+  const titleSpan = document.createElement('span');
+  titleSpan.className = 'nav-session-title';
+  titleSpan.textContent = cs.title || 'Session';
+  titleSpan.style.opacity = cs.title ? '1' : '0.6';
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'nav-session-time';
+  timeSpan.textContent = relativeTimeShort(cs.closedAt);
+
+  const resumeBtn = document.createElement('button');
+  resumeBtn.className = 'nav-session-action';
+  resumeBtn.textContent = '↩';
+  resumeBtn.title = 'Resume session';
+  resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void restoreClosedSession(cs); });
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'nav-session-action';
+  delBtn.textContent = '×';
+  delBtn.title = 'Delete record';
+  delBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    closedSessions = await window.posse.closedSessionsRemove(cs.id);
+    renderSessionList();
+  });
+
+  item.appendChild(dot);
+  item.appendChild(titleSpan);
+  item.appendChild(timeSpan);
+  item.appendChild(resumeBtn);
+  item.appendChild(delBtn);
+  item.addEventListener('click', () => { void restoreClosedSession(cs); });
+  return item;
+}
+
+// Build a session row for a native Claude/Codex history session
+function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'nav-session nav-session-closed';
+
+  const dot = document.createElement('span');
+  dot.className = 'nav-session-dot';
+  dot.style.backgroundColor = '#d9775788';
+
+  const titleSpan = document.createElement('span');
+  titleSpan.className = 'nav-session-title';
+  titleSpan.textContent = s.title || s.id;
+  titleSpan.style.opacity = s.title ? '1' : '0.6';
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'nav-session-time';
+  timeSpan.textContent = relativeTimeShort(s.mtimeMs);
+
+  const resumeBtn = document.createElement('button');
+  resumeBtn.className = 'nav-session-action';
+  resumeBtn.textContent = '↩';
+  resumeBtn.title = 'Resume history session';
+  resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void resumeAgentSession(s); });
+
+  item.appendChild(dot);
+  item.appendChild(titleSpan);
+  item.appendChild(timeSpan);
+  item.appendChild(resumeBtn);
+  item.addEventListener('click', () => { void resumeAgentSession(s); });
+  return item;
+}
+
+// Collect & group a project's sessions by agent family.
+// Returns Map<agentFamily, { lives, closed, history }> with time-desc ordering applied per group.
+interface ProjectAgentGroup {
+  lives: string[];
+  closed: ClosedSessionInfo[];
+  history: ClaudeHistorySession[];
+  latest: number;
+}
+
+function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup> {
+  const key = normalizeCwd(projPath);
+  const groups = new Map<string, ProjectAgentGroup>();
+  const ensure = (family: string): ProjectAgentGroup => {
+    let g = groups.get(family);
+    if (!g) { g = { lives: [], closed: [], history: [], latest: 0 }; groups.set(family, g); }
+    return g;
+  };
+
+  // 1. Live PTY sessions in this cwd
+  for (const id of sessionTitles.keys()) {
+    if (normalizeCwd(sessionCwds.get(id) || '') !== key) continue;
+    const family = agentFamilyFromDisplayName(sessionDisplayNames.get(id) || '');
+    const g = ensure(family);
+    g.lives.push(id);
+    g.latest = Math.max(g.latest, sessionUpdateTimes.get(id) || 0);
+  }
+
+  // 2. Closed DuoCLI sessions in this cwd
+  for (const cs of closedSessions) {
+    if (normalizeCwd(cs.cwd || '') !== key) continue;
+    const family = agentFamilyFromDisplayName(cs.displayName || '');
+    const g = ensure(family);
+    g.closed.push(cs);
+    g.latest = Math.max(g.latest, cs.closedAt || 0);
+  }
+
+  // 3. Native multi-agent history from the backend projects:list (Claude/Codex/Kiro/Copilot)
+  const backend = backendProjects.get(key);
+  if (backend) {
+    for (const agentGroup of backend.agents) {
+      const family = AGENT_ID_LABEL[agentGroup.agent] || agentFamilyFromDisplayName(agentGroup.agent);
+      const g = ensure(family);
+      for (const s of agentGroup.sessions) {
+        g.history.push({
+          id: s.id,
+          title: s.title,
+          cwd: backend.path,
+          mtimeMs: s.mtimeMs,
+          // ClaudeHistorySession.agent is a narrow union; only claude/codex are typed there.
+          agent: agentGroup.agent === 'codex' ? 'codex' : 'claude',
+          resumeCommand: s.resumeCommand,
+        });
+        g.latest = Math.max(g.latest, s.mtimeMs || 0);
+      }
+    }
+  }
+
+  // Sort each group's entries time-desc
+  for (const g of groups.values()) {
+    g.lives.sort((a, b) => (sessionUpdateTimes.get(b) || 0) - (sessionUpdateTimes.get(a) || 0));
+    g.closed.sort((a, b) => b.closedAt - a.closedAt);
+    g.history.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  }
+  return groups;
+}
+
+// Render a single project entry (collapsed by default)
+function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
+  const key = normalizeCwd(p.path);
+  const isExpanded = expandedProjects.has(key);
+
+  const isSelected = selectedProjectPath != null && normalizeCwd(selectedProjectPath) === key;
+  const row = document.createElement('div');
+  row.className = 'nav-project-row' + (isExpanded ? ' expanded' : '') + (isSelected ? ' selected' : '');
+
+  const chevron = document.createElement('span');
+  chevron.className = 'nav-project-chevron';
+  chevron.textContent = isExpanded ? '▾' : '▸';
+
+  const icon = document.createElement('span');
+  icon.className = 'nav-project-icon';
+  icon.textContent = '\u{1F4C1}';
+
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'nav-project-name';
+  nameSpan.textContent = projectDisplayName(p);
+  nameSpan.title = p.path;
+
+  const actions = document.createElement('span');
+  actions.className = 'nav-project-actions';
+
+  const pinBtn = document.createElement('button');
+  pinBtn.className = 'nav-project-action' + (p.pinned ? ' active' : '');
+  pinBtn.textContent = '\u{1F4CC}';
+  pinBtn.title = p.pinned ? 'Unpin' : 'Pin';
+  pinBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePinProject(p.path); });
+
+  const moreBtn = document.createElement('button');
+  moreBtn.className = 'nav-project-action';
+  moreBtn.textContent = '⋯'; // ...
+  moreBtn.title = 'More';
+  moreBtn.addEventListener('click', (e) => { e.stopPropagation(); showProjectMenu(e, p); });
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'nav-project-action';
+  editBtn.textContent = '✏️';
+  editBtn.title = 'Rename project';
+  editBtn.addEventListener('click', (e) => { e.stopPropagation(); renameProject(p.path); });
+
+  const newBtn = document.createElement('button');
+  newBtn.className = 'nav-project-action';
+  newBtn.textContent = '+';
+  newBtn.title = 'New conversation';
+  newBtn.addEventListener('click', (e) => { e.stopPropagation(); showAgentPicker(e, p.path); });
+
+  actions.appendChild(pinBtn);
+  actions.appendChild(moreBtn);
+  actions.appendChild(editBtn);
+  actions.appendChild(newBtn);
+
+  row.appendChild(chevron);
+  row.appendChild(icon);
+  row.appendChild(nameSpan);
+  row.appendChild(actions);
+
+  // Chevron toggles collapse/expand only (without changing selection)
+  chevron.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (expandedProjects.has(key)) {
+      expandedProjects.delete(key);
+    } else {
+      expandedProjects.add(key);
+      if (!backendProjects.has(key) && !projectsDataLoading) void refreshProjectsData();
+    }
+    renderSessionList();
+  });
+
+  // Clicking the row selects the project (drives the RIGHT file panel) and expands it.
+  row.addEventListener('click', () => {
+    selectProject(p.path);
+  });
+
+  sessionList.appendChild(row);
+
+  if (!isExpanded) return;
+
+  // Expanded: sessions grouped by agent
+  const groups = collectProjectSessions(p.path);
+  if (groups.size === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'nav-project-empty';
+    empty.textContent = 'No conversations yet';
+    sessionList.appendChild(empty);
+    return;
+  }
+
+  // Order agent groups by most-recent activity desc
+  const sortedFamilies = Array.from(groups.keys()).sort(
+    (a, b) => (groups.get(b)!.latest) - (groups.get(a)!.latest)
+  );
+
+  for (const family of sortedFamilies) {
+    const g = groups.get(family)!;
+    const groupKey = `${key}::${family}`;
+    const groupCollapsed = collapsedAgentGroups.has(groupKey);
+    const count = g.lives.length + g.closed.length + g.history.length;
+
+    const groupHeader = document.createElement('div');
+    groupHeader.className = 'nav-agent-header';
+    const [tagColor] = getCliTagColors(family);
+    groupHeader.style.borderLeftColor = tagColor;
+
+    const gChevron = document.createElement('span');
+    gChevron.className = 'nav-agent-chevron';
+    gChevron.textContent = groupCollapsed ? '▸' : '▾';
+
+    const gName = document.createElement('span');
+    gName.className = 'nav-agent-name';
+    gName.textContent = family;
+
+    const gCount = document.createElement('span');
+    gCount.className = 'nav-agent-count';
+    gCount.textContent = String(count);
+
+    groupHeader.appendChild(gChevron);
+    groupHeader.appendChild(gName);
+    groupHeader.appendChild(gCount);
+    groupHeader.addEventListener('click', () => {
+      if (collapsedAgentGroups.has(groupKey)) collapsedAgentGroups.delete(groupKey);
+      else collapsedAgentGroups.add(groupKey);
+      renderSessionList();
+    });
+    sessionList.appendChild(groupHeader);
+
+    if (groupCollapsed) continue;
+
+    for (const id of g.lives) sessionList.appendChild(buildLiveSessionRow(id, activeId));
+    for (const cs of g.closed) sessionList.appendChild(buildClosedSessionRow(cs));
+    for (const s of g.history) sessionList.appendChild(buildHistorySessionRow(s));
+  }
+}
+
 function renderSessionList(): void {
   const activeId = termManager.getActiveId();
 
@@ -1587,311 +2098,87 @@ function renderSessionList(): void {
       // Currently editing; skip rendering to preserve the edit state
       return;
     }
-    // The input is no longer in the DOM or has lost focus; clear the edit state
     editingTitleId = null;
   }
   sessionList.innerHTML = '';
 
-  // ========== Claude Code native history (currently opened directory) ==========
-  if (claudeHistorySessions.length > 0) {
+  const pinned = projects.filter(p => p.pinned);
+  const rest = projects.filter(p => !p.pinned);
+
+  // ========== Pinned section ==========
+  if (pinned.length > 0) {
     const header = document.createElement('div');
-    header.className = 'session-group-header closed-sessions-header';
-    header.style.borderLeftColor = '#d97757';
-
-    const name = document.createElement('span');
-    name.className = 'session-group-name';
-    name.textContent = `📁 ${cwdShortName(claudeHistoryCwd)} · History (${claudeHistorySessions.length})`;
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'session-group-add-btn';
-    toggleBtn.textContent = claudeHistoryCollapsed ? '▸' : '▾';
-    toggleBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      claudeHistoryCollapsed = !claudeHistoryCollapsed;
-      renderSessionList();
-    });
-
-    const refreshBtn = document.createElement('button');
-    refreshBtn.className = 'session-group-add-btn';
-    refreshBtn.textContent = '↻';
-    refreshBtn.title = 'Refresh history';
-    refreshBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      void loadClaudeHistory(claudeHistoryCwd);
-    });
-
-    header.appendChild(name);
-    header.appendChild(toggleBtn);
-    header.appendChild(refreshBtn);
+    header.className = 'nav-section-header';
+    const label = document.createElement('span');
+    label.className = 'nav-section-label';
+    label.textContent = 'Pinned';
+    header.appendChild(label);
     sessionList.appendChild(header);
-
-    if (!claudeHistoryCollapsed) {
-      for (const s of claudeHistorySessions) {
-        const item = document.createElement('div');
-        item.className = 'session-item session-item-closed';
-        item.style.setProperty('--group-color', '#d9775712');
-
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'session-title';
-        titleSpan.textContent = s.title || s.id;
-        titleSpan.style.opacity = s.title ? '1' : '0.5';
-
-        const metaRow = document.createElement('div');
-        metaRow.className = 'session-meta-row';
-        const timeSpan = document.createElement('span');
-        timeSpan.className = 'session-time';
-        timeSpan.textContent = friendlyTime(s.mtimeMs);
-        metaRow.appendChild(timeSpan);
-        const agentLabel = s.agent === 'codex' ? 'Codex' : 'Claude';
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'session-display-name';
-        nameSpan.textContent = agentLabel;
-        const [tagColor, tagBg] = getCliTagColors(agentLabel);
-        nameSpan.style.setProperty('--cli-tag-color', tagColor);
-        nameSpan.style.setProperty('--cli-tag-bg', tagBg);
-        metaRow.appendChild(nameSpan);
-
-        const resumeBtn = document.createElement('button');
-        resumeBtn.className = 'session-edit-btn';
-        resumeBtn.textContent = '↩';
-        resumeBtn.title = `Resume ${agentLabel} session`;
-        resumeBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          void resumeAgentSession(s);
-        });
-
-        const titleRow = document.createElement('div');
-        titleRow.className = 'session-title-row';
-        titleRow.appendChild(titleSpan);
-        titleRow.appendChild(resumeBtn);
-
-        const topRow = document.createElement('div');
-        topRow.className = 'session-item-top';
-        const dot = document.createElement('span');
-        dot.className = 'session-color-dot';
-        dot.style.backgroundColor = tagColor;
-        topRow.appendChild(dot);
-        topRow.appendChild(titleRow);
-
-        item.appendChild(topRow);
-        item.appendChild(metaRow);
-        item.addEventListener('click', () => { void resumeAgentSession(s); });
-        sessionList.appendChild(item);
-      }
-    }
+    for (const p of pinned) renderProjectEntry(p, activeId);
   }
 
-  // Pinned first, the rest sorted by creation time descending (newest on top)
-  const allIds = Array.from(sessionTitles.keys());
-  const byCreated = (a: string, b: string) =>
-    getSessionCreateTime(b) - getSessionCreateTime(a);
-  const sortedIds = [
-    ...allIds.filter(id => pinnedSessions.has(id)).sort(byCreated),
-    ...allIds.filter(id => !pinnedSessions.has(id)).sort(byCreated),
-  ];
+  // ========== Projects section ==========
+  const header = document.createElement('div');
+  header.className = 'nav-section-header';
+  const label = document.createElement('span');
+  label.className = 'nav-section-label';
+  label.textContent = 'Projects';
 
-  // Group by the current grouping mode (agent / folder)
-  // In folder mode the same directory could be split into multiple groups due to a trailing slash or the macOS /private prefix; sessionGroupKey already normalizes it
-  const groups: Map<string, string[]> = new Map();
-  const groupDisplayCwd: Map<string, string> = new Map(); // Representative cwd for the group (used by the new button / folder display)
-  const groupFirstCreatedAt: Map<string, number> = new Map(); // Group sort key: creation time of the group's earliest session
-  for (const id of sortedIds) {
-    const rawCwd = sessionCwds.get(id) || '';
-    const key = sessionGroupKey(id);
-    if (!groups.has(key)) {
-      groups.set(key, []);
-      groupDisplayCwd.set(key, rawCwd);
-      // Record the creation time of the first session in this group (sortedIds is already sorted by time, so the first is the earliest)
-      groupFirstCreatedAt.set(key, getSessionCreateTime(id));
-    }
-    groups.get(key)!.push(id);
-  }
+  const actions = document.createElement('span');
+  actions.className = 'nav-section-actions';
 
-  // Sort groups: pinned groups first, the rest by their first session's creation time ascending (earlier groups on top)
-  const pinnedGroupKeys = new Set<string>();
-  for (const id of pinnedSessions) {
-    pinnedGroupKeys.add(sessionGroupKey(id));
-  }
-  const sortedGroupKeys = Array.from(groups.keys()).sort((a, b) => {
-    const aPinned = pinnedGroupKeys.has(a);
-    const bPinned = pinnedGroupKeys.has(b);
-    if (aPinned !== bPinned) return aPinned ? -1 : 1;
-    return (groupFirstCreatedAt.get(a) || 0) - (groupFirstCreatedAt.get(b) || 0);
+  const collapseAllBtn = document.createElement('button');
+  collapseAllBtn.className = 'nav-section-action';
+  collapseAllBtn.textContent = '≡'; // collapse-all glyph
+  collapseAllBtn.title = 'Collapse all';
+  collapseAllBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    expandedProjects.clear();
+    renderSessionList();
   });
 
-  for (const groupKey of sortedGroupKeys) {
-    const ids = groups.get(groupKey)!;
-    const cwd = groupDisplayCwd.get(groupKey) || groupKey;
-    const isAgentMode = sessionGroupMode === 'agent';
-    const color = isAgentMode ? getCliTagColors(groupKey)[0] : cwdToColor(cwd);
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'nav-section-action';
+  refreshBtn.textContent = '↻';
+  refreshBtn.title = 'Refresh projects';
+  refreshBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    void refreshProjectsData();
+  });
 
-    // Group header
-    const groupHeader = document.createElement('div');
-    groupHeader.className = 'session-group-header';
-    groupHeader.style.borderLeftColor = color;
-    const groupName = document.createElement('span');
-    groupName.className = 'session-group-name';
-    groupName.textContent = isAgentMode ? groupKey : cwdShortName(cwd);
-    groupName.title = isAgentMode ? groupKey : cwd;
-    // Add button: agent mode opens the default new-terminal dialog, folder mode creates one in this directory
-    const groupAddBtn = document.createElement('button');
-    groupAddBtn.className = 'session-group-add-btn';
-    groupAddBtn.textContent = '+';
-    groupAddBtn.title = isAgentMode ? 'New terminal' : 'Create a new terminal in this directory';
-    groupAddBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      openNewSessionDialog(isAgentMode ? undefined : cwd);
-    });
-    const groupCount = document.createElement('span');
-    groupCount.className = 'session-group-count';
-    groupCount.textContent = String(ids.length);
-    groupHeader.appendChild(groupName);
-    groupHeader.appendChild(groupAddBtn);
-    groupHeader.appendChild(groupCount);
-    sessionList.appendChild(groupHeader);
+  const addBtn = document.createElement('button');
+  addBtn.className = 'nav-section-action';
+  addBtn.textContent = '+';
+  addBtn.title = 'Add project';
+  addBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showAddProjectMenu(e as MouseEvent);
+  });
 
-    // Sessions in this group
-    for (const id of ids) {
-      const title = sessionTitles.get(id)!;
-      const isPinned = pinnedSessions.has(id);
-      const item = document.createElement('div');
-      item.className = 'session-item' + (id === activeId ? ' active' : '') + (isPinned ? ' pinned' : '');
-      item.dataset.sessionId = id;
-      item.dataset.sessionType = 'pty';
+  actions.appendChild(collapseAllBtn);
+  actions.appendChild(refreshBtn);
+  actions.appendChild(addBtn);
+  header.appendChild(label);
+  header.appendChild(actions);
+  sessionList.appendChild(header);
 
-      const dot = document.createElement('span');
-      dot.className = 'session-color-dot';
-      if (sessionBusy.has(id)) {
-        dot.style.backgroundColor = '#e5a100';
-      } else if (sessionUnread.has(id)) {
-        dot.style.backgroundColor = '#73c991';
-      } else {
-        dot.style.backgroundColor = '#666';
-      }
-
-      const pinBtn = document.createElement('button');
-      pinBtn.className = 'session-pin' + (isPinned ? ' pinned' : '');
-      pinBtn.textContent = '\u{1F4CC}';
-      pinBtn.title = isPinned ? 'Unpin' : 'Pin';
-      pinBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (pinnedSessions.has(id)) pinnedSessions.delete(id);
-        else pinnedSessions.add(id);
-        renderSessionList();
-      });
-
-      const titleSpan = document.createElement('span');
-      titleSpan.className = 'session-title';
-      titleSpan.textContent = title;
-
-      // Pencil icon button; click to rename
-      const editBtn = document.createElement('button');
-      editBtn.className = 'session-edit-btn';
-      editBtn.textContent = '✏️';
-      editBtn.title = 'Rename';
-      editBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        startTitleEdit(id, titleSpan);
-      });
-
-      const metaRow = document.createElement('div');
-      metaRow.className = 'session-meta-row';
-      const timeSpan = document.createElement('span');
-      timeSpan.className = 'session-time';
-      timeSpan.textContent = friendlyTime(sessionUpdateTimes.get(id) || Date.now());
-      metaRow.appendChild(timeSpan);
-      const displayName = sessionDisplayNames.get(id);
-      if (displayName) {
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'session-display-name';
-        nameSpan.textContent = displayName;
-        const [tagColor, tagBg] = getCliTagColors(displayName);
-        nameSpan.style.setProperty('--cli-tag-color', tagColor);
-        nameSpan.style.setProperty('--cli-tag-bg', tagBg);
-        metaRow.appendChild(nameSpan);
-      }
-
-      // Show the actual model provider in use (e.g. MiniMax, GLM, Anthropic)
-      const provider = sessionProviders.get(id);
-      if (provider) {
-        const providerSpan = document.createElement('span');
-        providerSpan.className = 'session-provider-tag';
-        providerSpan.textContent = provider;
-        providerSpan.title = 'Actual model provider in use';
-        metaRow.appendChild(providerSpan);
-      }
-
-      // First row: dot + pin + title + edit + close button
-      const topRow = document.createElement('div');
-      topRow.className = 'session-item-top';
-
-      const closeBtn = document.createElement('button');
-      closeBtn.className = 'session-close';
-      closeBtn.textContent = '\u00d7';
-      closeBtn.addEventListener('click', (e) => { e.stopPropagation(); handleCloseClick(id); });
-
-      const titleRow = document.createElement('div');
-      titleRow.className = 'session-title-row';
-      titleRow.appendChild(titleSpan);
-      titleRow.appendChild(editBtn);
-      topRow.appendChild(dot);
-      topRow.appendChild(pinBtn);
-      topRow.appendChild(titleRow);
-      topRow.appendChild(closeBtn);
-
-      // Second row: time/tags + loop button (click opens the config dialog)
-      const autoContinueConfig = sessionAutoContinue.get(id);
-      const autoContinueEnabled = autoContinueConfig?.enabled ?? false;
-
-      const autoContinueLabel = document.createElement('span');
-      autoContinueLabel.className = 'session-auto-continue-label' + (autoContinueEnabled ? ' enabled' : '');
-      autoContinueLabel.textContent = 'Loop';
-      autoContinueLabel.title = autoContinueEnabled ? 'Loop is on; click to configure' : 'Click to configure the loop';
-      autoContinueLabel.addEventListener('click', (e) => {
-        e.stopPropagation();
-        showAutoContinueConfigDialog(id);
-      });
-
-      // Auto account-switch status label (shown to the right of the "Loop" pill)
-      const switchStatus = sessionAutoSwitchStatus.get(id);
-      let switchStatusLabel: HTMLSpanElement | null = null;
-      if (switchStatus) {
-        switchStatusLabel = document.createElement('span');
-        switchStatusLabel.className = 'session-switch-status ' + switchStatus.status;
-        switchStatusLabel.textContent = switchStatus.detail || (switchStatus.status === 'switching' ? 'Switching...' : switchStatus.status === 'switched' ? 'Switched' : switchStatus.status === 'exhausted' ? 'Accounts exhausted' : 'Switch failed');
-        switchStatusLabel.title = `Auto account-switch: ${switchStatus.status}`;
-      }
-
-      const bottomRow = document.createElement('div');
-      bottomRow.className = 'session-item-bottom';
-      bottomRow.appendChild(metaRow);
-      bottomRow.appendChild(autoContinueLabel);
-      if (switchStatusLabel) bottomRow.appendChild(switchStatusLabel);
-
-      // Context menu
-      item.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        showSessionContextMenu(e, id);
-      });
-
-      // Assemble
-      item.addEventListener('click', () => switchSession(id));
-      item.appendChild(topRow);
-      item.appendChild(bottomRow);
-      sessionList.appendChild(item);
-    }
+  if (rest.length === 0 && pinned.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'nav-project-empty';
+    empty.textContent = 'Add a project folder to get started';
+    sessionList.appendChild(empty);
+  } else {
+    for (const p of rest) renderProjectEntry(p, activeId);
   }
 
-  // Chat sessions area
+  // ========== Chat sessions (project-independent) ==========
   if (chatSessionTitles.size > 0) {
     const chatHeader = document.createElement('div');
-    chatHeader.className = 'session-group-header';
-    chatHeader.style.borderLeftColor = '#a78bfa';
-    const chatName = document.createElement('span');
-    chatName.className = 'session-group-name';
-    chatName.textContent = '💬 Chat';
-    chatHeader.appendChild(chatName);
+    chatHeader.className = 'nav-section-header';
+    const chatLabel = document.createElement('span');
+    chatLabel.className = 'nav-section-label';
+    chatLabel.textContent = '💬 Chat';
+    chatHeader.appendChild(chatLabel);
     sessionList.appendChild(chatHeader);
 
     const sortedChatIds = Array.from(chatSessionTitles.keys()).sort((a, b) =>
@@ -1901,217 +2188,85 @@ function renderSessionList(): void {
     for (const id of sortedChatIds) {
       const title = chatSessionTitles.get(id)! || '';
       const item = document.createElement('div');
-      item.className = 'session-item session-item-chat' + (id === activeChatId ? ' active' : '');
+      item.className = 'nav-session' + (id === activeChatId ? ' active' : '');
       item.dataset.sessionId = id;
       item.dataset.sessionType = 'chat';
-      item.style.setProperty('--group-color', '#a78bfa12');
+
+      const dot = document.createElement('span');
+      dot.className = 'nav-session-dot';
+      dot.style.backgroundColor = '#a78bfa';
+
       const titleSpan = document.createElement('span');
-      titleSpan.className = 'session-title chat-session-title';
+      titleSpan.className = 'nav-session-title';
       titleSpan.textContent = title || 'New Chat';
-      titleSpan.style.opacity = title ? '1' : '0.5';
+      titleSpan.style.opacity = title ? '1' : '0.6';
+
+      const timeSpan = document.createElement('span');
+      timeSpan.className = 'nav-session-time';
+      timeSpan.textContent = relativeTimeShort(chatSessionCreateTimes.get(id) || Date.now());
 
       const delBtn = document.createElement('button');
-      delBtn.className = 'session-close-btn';
-      delBtn.textContent = '✕';
+      delBtn.className = 'nav-session-action';
+      delBtn.textContent = '×';
       delBtn.title = 'Delete chat';
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        void handleChatCloseClick(id);
-      });
+      delBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleChatCloseClick(id); });
 
-      const topRow = document.createElement('div');
-      topRow.className = 'session-top-row';
-      topRow.appendChild(titleSpan);
-      topRow.appendChild(delBtn);
-
-      const metaRow = document.createElement('div');
-      metaRow.className = 'session-meta-row';
-      const timeSpan = document.createElement('span');
-      timeSpan.className = 'session-time';
-      timeSpan.textContent = friendlyTime(chatSessionCreateTimes.get(id) || Date.now());
-      metaRow.appendChild(timeSpan);
-
-      item.addEventListener('click', () => {
-        switchToTerminal();
-        switchToChat(id);
-      });
-      item.appendChild(topRow);
-      item.appendChild(metaRow);
+      item.appendChild(dot);
+      item.appendChild(titleSpan);
+      item.appendChild(timeSpan);
+      item.appendChild(delBtn);
+      item.addEventListener('click', () => { switchToTerminal(); switchToChat(id); });
       sessionList.appendChild(item);
-    }
-  }
-
-  // ========== Closed sessions (resumable) ==========
-  if (closedSessions.length > 0) {
-    const header = document.createElement('div');
-    header.className = 'session-group-header closed-sessions-header';
-    header.style.borderLeftColor = '#888';
-
-    const name = document.createElement('span');
-    name.className = 'session-group-name';
-    name.textContent = `🔄 Closed (${closedSessions.length})`;
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'session-group-add-btn';
-    toggleBtn.textContent = closedSessionsCollapsed ? '▸' : '▾';
-    toggleBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      closedSessionsCollapsed = !closedSessionsCollapsed;
-      renderSessionList();
-    });
-
-    const clearBtn = document.createElement('button');
-    clearBtn.className = 'session-group-add-btn';
-    clearBtn.textContent = '✕';
-    clearBtn.title = 'Clear all';
-    clearBtn.style.color = '#f87171';
-    clearBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      closedSessions = await window.posse.closedSessionsClear();
-      renderSessionList();
-    });
-
-    header.appendChild(name);
-    header.appendChild(toggleBtn);
-    header.appendChild(clearBtn);
-    sessionList.appendChild(header);
-
-    if (!closedSessionsCollapsed) {
-      // Sort by closed time descending (most recently closed first)
-      const sorted = [...closedSessions].sort((a, b) => b.closedAt - a.closedAt);
-      for (const cs of sorted) {
-        const item = document.createElement('div');
-        item.className = 'session-item session-item-closed';
-        item.style.setProperty('--group-color', '#88888812');
-
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'session-title';
-        titleSpan.textContent = cs.title || 'New Chat';
-        titleSpan.style.opacity = cs.title ? '1' : '0.5';
-
-        const metaRow = document.createElement('div');
-        metaRow.className = 'session-meta-row';
-        const timeSpan = document.createElement('span');
-        timeSpan.className = 'session-time';
-        timeSpan.textContent = friendlyTime(cs.closedAt);
-        metaRow.appendChild(timeSpan);
-        if (cs.displayName) {
-          const nameSpan = document.createElement('span');
-          nameSpan.className = 'session-display-name';
-          nameSpan.textContent = cs.displayName;
-          const [tagColor, tagBg] = getCliTagColors(cs.displayName);
-          nameSpan.style.setProperty('--cli-tag-color', tagColor);
-          nameSpan.style.setProperty('--cli-tag-bg', tagBg);
-          metaRow.appendChild(nameSpan);
-        }
-
-        const restoreBtn = document.createElement('button');
-        restoreBtn.className = 'session-edit-btn';
-        restoreBtn.textContent = '↩';
-        restoreBtn.title = 'Resume session';
-        restoreBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          restoreClosedSession(cs);
-        });
-
-        const renameBtn = document.createElement('button');
-        renameBtn.className = 'session-edit-btn';
-        renameBtn.textContent = '✏️';
-        renameBtn.title = 'Rename';
-        renameBtn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const next = window.prompt('Rename session', cs.title || '');
-          if (next === null) return;
-          closedSessions = await window.posse.closedSessionsRename(cs.id, next.trim());
-          renderSessionList();
-        });
-
-        const delBtn = document.createElement('button');
-        delBtn.className = 'session-close';
-        delBtn.textContent = '×';
-        delBtn.title = 'Delete record';
-        delBtn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          closedSessions = await window.posse.closedSessionsRemove(cs.id);
-          renderSessionList();
-        });
-
-        const titleRow = document.createElement('div');
-        titleRow.className = 'session-title-row';
-        titleRow.appendChild(titleSpan);
-        titleRow.appendChild(restoreBtn);
-        titleRow.appendChild(renameBtn);
-
-        const topRow = document.createElement('div');
-        topRow.className = 'session-item-top';
-        const dot = document.createElement('span');
-        dot.className = 'session-color-dot';
-        dot.style.backgroundColor = '#555';
-        topRow.appendChild(dot);
-        topRow.appendChild(titleRow);
-        topRow.appendChild(delBtn);
-
-        item.appendChild(topRow);
-        item.appendChild(metaRow);
-        sessionList.appendChild(item);
-      }
     }
   }
 
   // ========== Closed chat sessions (resumable) ==========
   if (closedChatSessions.length > 0) {
-    const header = document.createElement('div');
-    header.className = 'session-group-header closed-sessions-header';
-    header.style.borderLeftColor = '#a78bfa';
-
-    const name = document.createElement('span');
-    name.className = 'session-group-name';
-    name.textContent = `💬 Closed Chats (${closedChatSessions.length})`;
+    const header2 = document.createElement('div');
+    header2.className = 'nav-section-header';
+    const label2 = document.createElement('span');
+    label2.className = 'nav-section-label';
+    label2.textContent = `💬 Closed Chats (${closedChatSessions.length})`;
 
     const clearBtn = document.createElement('button');
-    clearBtn.className = 'session-group-add-btn';
+    clearBtn.className = 'nav-section-action';
     clearBtn.textContent = '✕';
     clearBtn.title = 'Clear all';
-    clearBtn.style.color = '#f87171';
     clearBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       closedChatSessions = await window.posse.closedChatClear();
       renderSessionList();
     });
-
-    header.appendChild(name);
-    header.appendChild(clearBtn);
-    sessionList.appendChild(header);
+    header2.appendChild(label2);
+    header2.appendChild(clearBtn);
+    sessionList.appendChild(header2);
 
     const sorted = [...closedChatSessions].sort((a, b) => b.closedAt - a.closedAt);
     for (const cs of sorted) {
       const item = document.createElement('div');
-      item.className = 'session-item session-item-closed session-item-chat';
-      item.style.setProperty('--group-color', '#a78bfa12');
+      item.className = 'nav-session nav-session-closed';
+
+      const dot = document.createElement('span');
+      dot.className = 'nav-session-dot';
+      dot.style.backgroundColor = '#a78bfa';
 
       const titleSpan = document.createElement('span');
-      titleSpan.className = 'session-title chat-session-title';
+      titleSpan.className = 'nav-session-title';
       titleSpan.textContent = cs.title || 'New Chat';
-      titleSpan.style.opacity = cs.title ? '1' : '0.5';
+      titleSpan.style.opacity = cs.title ? '1' : '0.6';
 
-      const metaRow = document.createElement('div');
-      metaRow.className = 'session-meta-row';
       const timeSpan = document.createElement('span');
-      timeSpan.className = 'session-time';
-      timeSpan.textContent = friendlyTime(cs.closedAt);
-      metaRow.appendChild(timeSpan);
+      timeSpan.className = 'nav-session-time';
+      timeSpan.textContent = relativeTimeShort(cs.closedAt);
 
-      const restoreBtn = document.createElement('button');
-      restoreBtn.className = 'session-edit-btn';
-      restoreBtn.textContent = '↩';
-      restoreBtn.title = 'Resume chat';
-      restoreBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        restoreClosedChatSession(cs);
-      });
+      const resumeBtn = document.createElement('button');
+      resumeBtn.className = 'nav-session-action';
+      resumeBtn.textContent = '↩';
+      resumeBtn.title = 'Resume chat';
+      resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); restoreClosedChatSession(cs); });
 
       const delBtn = document.createElement('button');
-      delBtn.className = 'session-close';
+      delBtn.className = 'nav-session-action';
       delBtn.textContent = '×';
       delBtn.title = 'Delete record';
       delBtn.addEventListener('click', async (e) => {
@@ -2120,31 +2275,157 @@ function renderSessionList(): void {
         renderSessionList();
       });
 
-      const titleRow = document.createElement('div');
-      titleRow.className = 'session-title-row';
-      titleRow.appendChild(titleSpan);
-      titleRow.appendChild(restoreBtn);
-
-      const topRow = document.createElement('div');
-      topRow.className = 'session-item-top';
-      const dot = document.createElement('span');
-      dot.className = 'session-color-dot';
-      dot.style.backgroundColor = '#a78bfa';
-      topRow.appendChild(dot);
-      topRow.appendChild(titleRow);
-      topRow.appendChild(delBtn);
-
-      // Clicking the whole item also resumes
-      item.addEventListener('click', () => {
-        restoreClosedChatSession(cs);
-      });
-
-      item.appendChild(topRow);
-      item.appendChild(metaRow);
+      item.appendChild(dot);
+      item.appendChild(titleSpan);
+      item.appendChild(timeSpan);
+      item.appendChild(resumeBtn);
+      item.appendChild(delBtn);
+      item.addEventListener('click', () => { restoreClosedChatSession(cs); });
       sessionList.appendChild(item);
     }
   }
 }
+
+// ========== Project / agent-picker menus ==========
+
+function dismissNavMenus(): void {
+  document.querySelectorAll('.nav-popup-menu').forEach(m => m.remove());
+}
+
+function showProjectMenu(e: MouseEvent, p: ProjectEntry): void {
+  dismissNavMenus();
+  const menu = document.createElement('div');
+  menu.className = 'term-context-menu nav-popup-menu';
+  const items: Array<{ label: string; action: () => void }> = [
+    { label: 'New conversation', action: () => showAgentPicker(e, p.path) },
+    { label: p.pinned ? 'Unpin' : 'Pin', action: () => togglePinProject(p.path) },
+    { label: 'Rename', action: () => renameProject(p.path) },
+    { label: 'Reveal in Finder', action: () => window.posse.openFolder(p.path) },
+    { label: 'Remove project', action: () => removeProject(p.path) },
+  ];
+  for (const it of items) {
+    const el = document.createElement('div');
+    el.className = 'term-context-item';
+    el.textContent = it.label;
+    el.addEventListener('click', () => { menu.remove(); it.action(); });
+    menu.appendChild(el);
+  }
+  positionNavMenu(menu, e);
+}
+
+// "+" on the Projects header → dropdown to add a project. Both options open the native folder
+// picker; "Start from scratch" is intended for a fresh empty folder, "Use an existing folder"
+// for one with existing work. Both add the picked folder to the persisted project list.
+function showAddProjectMenu(e: MouseEvent): void {
+  dismissNavMenus();
+  const menu = document.createElement('div');
+  menu.className = 'term-context-menu nav-popup-menu';
+  const items: Array<{ label: string; action: () => Promise<void> }> = [
+    {
+      label: 'Start from scratch',
+      action: async () => {
+        const folder = await window.posse.selectFolder(currentCwd || undefined);
+        if (folder) { addProject(folder); selectProject(folder); void refreshProjectsData(); }
+      },
+    },
+    {
+      label: 'Use an existing folder',
+      action: async () => {
+        const folder = await window.posse.selectFolder(currentCwd || undefined);
+        if (folder) { addProject(folder); selectProject(folder); void refreshProjectsData(); }
+      },
+    },
+  ];
+  for (const it of items) {
+    const el = document.createElement('div');
+    el.className = 'term-context-item';
+    el.textContent = it.label;
+    el.addEventListener('click', () => { menu.remove(); void it.action(); });
+    menu.appendChild(el);
+  }
+  positionNavMenu(menu, e);
+}
+
+// Build the agent option list (built-ins + custom presets) for the new-conversation picker
+function getAgentPickerOptions(): Array<{ label: string; command: string }> {
+  const opts: Array<{ label: string; command: string }> = [
+    { label: 'Claude Code', command: 'claude --dangerously-skip-permissions' },
+    { label: 'Codex', command: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"' },
+    { label: 'Copilot', command: 'copilot --allow-all --autopilot' },
+    { label: 'Kiro', command: 'kiro-cli chat --trust-all-tools' },
+  ];
+  for (const cp of getCustomPresets()) {
+    const command = cp.autoFlag ? `${cp.command} ${cp.autoFlag}` : cp.command;
+    const label = cp.autoFlag ? `${cp.name} (auto)` : cp.name;
+    opts.push({ label, command });
+  }
+  opts.push({ label: 'Empty Terminal', command: '' });
+  return opts;
+}
+
+function showAgentPicker(e: MouseEvent, projPath: string): void {
+  dismissNavMenus();
+  const menu = document.createElement('div');
+  menu.className = 'term-context-menu nav-popup-menu';
+  for (const opt of getAgentPickerOptions()) {
+    const el = document.createElement('div');
+    el.className = 'term-context-item';
+    el.textContent = opt.label;
+    el.addEventListener('click', () => {
+      menu.remove();
+      void createSessionInProject(projPath, opt.command);
+    });
+    menu.appendChild(el);
+  }
+  positionNavMenu(menu, e);
+}
+
+function positionNavMenu(menu: HTMLElement, e: MouseEvent): void {
+  menu.style.left = `${e.clientX}px`;
+  menu.style.top = `${e.clientY}px`;
+  document.body.appendChild(menu);
+  const dismiss = (ev: Event) => {
+    if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener('mousedown', dismiss); }
+  };
+  setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
+}
+
+// Create a new terminal in a project's cwd with the given preset command (mirrors createSession bookkeeping)
+async function createSessionInProject(cwd: string, presetCommand: string): Promise<void> {
+  if (!cwd) return;
+  addRecentCwd(cwd);
+  const themeId = resolveThemeId(currentThemeId, cwd);
+  const result = await window.posse.createPty(cwd, presetCommand, themeId);
+  const now = Date.now();
+  attachPtySession(result, now);
+
+  // Custom preset: override the backend fallback with the user-defined name
+  const customPreset = getCustomPresets().find(p =>
+    presetCommand === p.command || (p.autoFlag && presetCommand === p.command + ' ' + p.autoFlag)
+  );
+  if (customPreset) {
+    const isAuto = customPreset.autoFlag && presetCommand === customPreset.command + ' ' + customPreset.autoFlag;
+    sessionDisplayNames.set(result.id, isAuto ? customPreset.name + ' auto' : customPreset.name);
+  }
+
+  // Ensure the project is registered, selected & expanded so the new session is visible
+  if (!findProject(cwd)) {
+    projects.push({ path: cwd, pinned: false, addedAt: now });
+    saveProjects();
+  }
+  expandedProjects.add(normalizeCwd(cwd));
+  selectedProjectPath = cwd;
+
+  updateEmptyState();
+  renderSessionList();
+  updateSessionTitleBar();
+  void renderFileTree();
+  setTimeout(() => {
+    const dims = termManager.getActiveDimensions();
+    if (dims) window.posse.resizePty(result.id, dims.cols, dims.rows);
+  }, 100);
+}
+
 
 // ========== Core operations ==========
 
@@ -2175,6 +2456,7 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   const result = await window.posse.createPty(cwd, resumeCmd, themeId);
   const now = Date.now();
   attachPtySession({ ...result, title: cs.title, displayName: cs.displayName || result.displayName }, now);
+  if (cwd) { selectedProjectPath = cwd; expandedProjects.add(normalizeCwd(cwd)); }
 
   // Remove from the closed list
   closedSessions = await window.posse.closedSessionsRemove(cs.id);
@@ -2214,6 +2496,7 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId);
   const now = Date.now();
   attachPtySession({ ...result, title: s.title || result.title }, now);
+  if (s.cwd) { selectedProjectPath = s.cwd; expandedProjects.add(normalizeCwd(s.cwd)); }
 
   updateEmptyState();
   renderSessionList();
@@ -2287,6 +2570,11 @@ function switchSession(id: string): void {
 
   const prev = termManager.getActiveId();
   termManager.switchTo(id);
+
+  // Follow the session's project: align the selected project so the RIGHT file panel + highlight
+  // track the terminal the user just switched to.
+  const sessCwd = sessionCwds.get(id);
+  if (sessCwd) selectedProjectPath = sessCwd;
 
   // User switched to this session → clear all status indicators (yellow/green → gray)
   const hadUnread = sessionUnread.delete(id);
@@ -2621,12 +2909,13 @@ fileTreeToggle.addEventListener('click', () => {
     fileTreeLastWidth = fileTreePanel.offsetWidth;
     fileTreePanel.classList.add('collapsed');
     fileTreeToggle.classList.add('collapsed');
-    fileTreeToggle.textContent = '\u25B6';
+    // File tree is on the right: collapsed \u2192 point left (expand), expanded \u2192 point right (collapse)
+    fileTreeToggle.textContent = '\u25C0';
   } else {
     fileTreePanel.style.width = fileTreeLastWidth + 'px';
     fileTreePanel.classList.remove('collapsed');
     fileTreeToggle.classList.remove('collapsed');
-    fileTreeToggle.textContent = '\u25C4';
+    fileTreeToggle.textContent = '\u25B6';
   }
   localStorage.setItem('posse_filetree_collapsed', String(fileTreeCollapsed));
 });
@@ -2641,12 +2930,13 @@ sidebarToggle.addEventListener('click', () => {
     sidebarLastWidth = sidebar.offsetWidth;
     sidebar.classList.add('collapsed');
     sidebarToggle.classList.add('collapsed');
-    sidebarToggle.textContent = '\u25C0';
+    // Sessions sidebar is on the left: collapsed \u2192 point right (expand), expanded \u2192 point left (collapse)
+    sidebarToggle.textContent = '\u25B6';
   } else {
     sidebar.style.width = sidebarLastWidth + 'px';
     sidebar.classList.remove('collapsed');
     sidebarToggle.classList.remove('collapsed');
-    sidebarToggle.textContent = '\u25B6';
+    sidebarToggle.textContent = '\u25C0';
   }
   localStorage.setItem('posse_sidebar_collapsed', String(sidebarCollapsed));
 });
@@ -2701,9 +2991,11 @@ document.addEventListener('mousemove', (e) => {
   const deltaX = e.clientX - dragState.startX;
   let newWidth;
   if (dragState.panel === fileTreePanel) {
-    newWidth = dragState.startWidth + deltaX;
-  } else {
+    // File tree is on the RIGHT, its resizer is on its left edge → drag right shrinks it
     newWidth = dragState.startWidth - deltaX;
+  } else {
+    // Sessions sidebar is on the LEFT, its resizer is on its right edge → drag right grows it
+    newWidth = dragState.startWidth + deltaX;
   }
   newWidth = Math.max(dragState.minWidth, Math.min(dragState.maxWidth, newWidth));
   dragState.panel.style.width = newWidth + 'px';
@@ -2740,14 +3032,14 @@ document.addEventListener('mouseup', () => {
     fileTreeCollapsed = true;
     fileTreePanel.classList.add('collapsed');
     fileTreeToggle.classList.add('collapsed');
-    fileTreeToggle.textContent = '\u25B6';
+    fileTreeToggle.textContent = '\u25C0';
   }
   const savedSidebarCollapsed = localStorage.getItem('posse_sidebar_collapsed');
   if (savedSidebarCollapsed === 'true') {
     sidebarCollapsed = true;
     sidebar.classList.add('collapsed');
     sidebarToggle.classList.add('collapsed');
-    sidebarToggle.textContent = '\u25C0';
+    sidebarToggle.textContent = '\u25B6';
   }
 })();
 
@@ -3054,6 +3346,10 @@ async function restoreDaemonSessions(): Promise<void> {
 
 void restoreDaemonSessions();
 
+// Load the multi-agent project list (Claude/Codex/Kiro/Copilot history + user-added folders) so the
+// Projects navigator is populated on launch even before any session is opened.
+void refreshProjectsData();
+
 // Remote server info handling: merge pushed/pulled presets
 async function handleRemoteServerInfo(info: typeof remoteServerInfo) {
   if (!info) return;
@@ -3232,10 +3528,10 @@ setInterval(() => {
 
 // Switch to the previous/next session relative to the active one (skipping non-navigable items like closed ones)
 function navigateSession(direction: 'up' | 'down'): void {
-  const items = sessionList.querySelectorAll<HTMLElement>('.session-item');
+  const items = sessionList.querySelectorAll<HTMLElement>('.nav-session');
   if (items.length === 0) return;
 
-  // Collect only navigable items (those with data-session-id)
+  // Collect only navigable items (those with data-session-id; closed/history rows are skipped)
   const navigable = Array.from(items).filter(el => el.dataset.sessionId);
   if (navigable.length === 0) return;
 

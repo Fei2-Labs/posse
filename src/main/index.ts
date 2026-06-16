@@ -774,6 +774,413 @@ function listCodexSessions(targetCwd: string): AgentHistorySession[] {
   return results;
 }
 
+// ============================================================
+// Projects-first discovery (Stage 1 backend for projects:list)
+// Scan every AI-CLI session store, bucket by absolute project cwd.
+// Every scanner is wrapped so one bad agent never breaks the list.
+// ============================================================
+
+type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
+
+type ProjectSession = {
+  id: string;
+  title: string;
+  mtimeMs: number;
+  resumeCommand: string;
+};
+
+// Internal flat record before bucketing
+type DiscoveredSession = ProjectSession & {
+  agent: ProjectsAgentId;
+  cwd: string; // absolute project folder (may be '' / '/' when unknown)
+};
+
+type ProjectEntry = {
+  path: string;
+  name: string;
+  agents: Array<{ agent: ProjectsAgentId; sessions: ProjectSession[] }>;
+  lastActiveMs: number;
+};
+
+const PROJECTS_MAX_SESSIONS_PER_AGENT = 50;
+const PROJECTS_HEAD_BYTES = 64 * 1024;
+
+// Strip command/xml tags + collapse whitespace; truncate for a session title.
+function cleanSessionTitle(raw: string): string {
+  return raw
+    .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
+    .replace(/<command-message>[\s\S]*?<\/command-message>/g, '')
+    .replace(/<command-args>[\s\S]*?<\/command-args>/g, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
+}
+
+// Read up to maxBytes from the head of a file (cheap parse for large jsonl).
+function readHead(filePath: string, maxBytes = PROJECTS_HEAD_BYTES): string {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    const bytes = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.subarray(0, bytes).toString('utf-8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// --- Claude: ~/.claude/projects/<enc>/<uuid>.jsonl ; real cwd from in-file `cwd` ---
+function discoverClaudeSessions(): DiscoveredSession[] {
+  const MAX_FILES = 300;
+  const out: DiscoveredSession[] = [];
+  try {
+    const root = path.join(os.homedir(), '.claude', 'projects');
+    if (!fs.existsSync(root)) return [];
+
+    // Gather all jsonl files across all project dirs, newest first.
+    const files: Array<{ full: string; uuid: string; mtimeMs: number; size: number }> = [];
+    let projectDirs: string[];
+    try { projectDirs = fs.readdirSync(root); } catch { return []; }
+    for (const sub of projectDirs) {
+      const dir = path.join(root, sub);
+      let names: string[];
+      try {
+        if (!fs.statSync(dir).isDirectory()) continue;
+        names = fs.readdirSync(dir);
+      } catch { continue; }
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue;
+        const full = path.join(dir, name);
+        try {
+          const st = fs.statSync(full);
+          if (!st.isFile()) continue;
+          files.push({ full, uuid: name.replace(/\.jsonl$/, ''), mtimeMs: st.mtimeMs, size: st.size });
+        } catch { /* skip */ }
+      }
+    }
+
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    for (const f of files.slice(0, MAX_FILES)) {
+      try {
+        // Read head only; recover real cwd + a title from the first ai-title / user msg.
+        const head = readHead(f.full);
+        const lines = head.split('\n');
+        let cwd = '';
+        let aiTitle = '';
+        let firstUserText = '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let obj: { type?: string; cwd?: string; aiTitle?: string; message?: { content?: unknown } };
+          try { obj = JSON.parse(trimmed); } catch { continue; }
+          if (!cwd && typeof obj.cwd === 'string' && obj.cwd) cwd = obj.cwd;
+          if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string') aiTitle = obj.aiTitle;
+          if (!firstUserText && obj.type === 'user' && typeof obj.message?.content === 'string') {
+            firstUserText = obj.message.content;
+          }
+        }
+        const title = aiTitle.trim()
+          ? aiTitle.trim().slice(0, 60)
+          : (cleanSessionTitle(firstUserText) || f.uuid);
+        out.push({
+          agent: 'claude',
+          cwd: cwd ? path.resolve(cwd) : '',
+          id: f.uuid,
+          title,
+          mtimeMs: f.mtimeMs,
+          resumeCommand: `claude --resume ${f.uuid}`,
+        });
+      } catch { /* skip unreadable file */ }
+    }
+  } catch { /* never throw */ }
+  return out;
+}
+
+// --- Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl ; cwd from line 1 ---
+function discoverCodexSessions(): DiscoveredSession[] {
+  const MAX_FILES = 300;
+  const out: DiscoveredSession[] = [];
+  try {
+    const sessionsRoot = path.join(os.homedir(), '.codex', 'sessions');
+    if (!fs.existsSync(sessionsRoot)) return [];
+
+    // Title index: id -> thread_name (last line wins)
+    const titleMap = new Map<string, string>();
+    try {
+      const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
+      if (fs.existsSync(indexPath)) {
+        const content = fs.readFileSync(indexPath, 'utf-8');
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const obj = JSON.parse(trimmed) as { id?: string; thread_name?: string };
+            if (obj.id && typeof obj.thread_name === 'string') titleMap.set(obj.id, obj.thread_name);
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* ignore */ }
+
+    const listDirDesc = (dir: string): string[] => {
+      try {
+        return fs.readdirSync(dir)
+          .filter((n) => /^\d+$/.test(n))
+          .sort((a, b) => Number(b) - Number(a));
+      } catch { return []; }
+    };
+
+    // Collect newest files first by walking date dirs descending. Only scan the
+    // active sessions tree (NOT the ~76k archived_sessions tree).
+    const files: Array<{ full: string; mtimeMs: number }> = [];
+    let walked = 0;
+    const WALK_CAP = 1500; // bound the readdir/stat work
+    outer:
+    for (const year of listDirDesc(sessionsRoot)) {
+      const yearDir = path.join(sessionsRoot, year);
+      for (const month of listDirDesc(yearDir)) {
+        const monthDir = path.join(yearDir, month);
+        for (const day of listDirDesc(monthDir)) {
+          const dayDir = path.join(monthDir, day);
+          let names: string[];
+          try { names = fs.readdirSync(dayDir); } catch { continue; }
+          for (const name of names) {
+            if (!name.startsWith('rollout-') || !name.endsWith('.jsonl')) continue;
+            if (walked >= WALK_CAP) break outer;
+            walked++;
+            const full = path.join(dayDir, name);
+            try {
+              const st = fs.statSync(full);
+              if (st.isFile()) files.push({ full, mtimeMs: st.mtimeMs });
+            } catch { /* skip */ }
+          }
+          if (files.length >= MAX_FILES) break outer; // dirs are date-descending, enough collected
+        }
+      }
+    }
+
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    for (const f of files.slice(0, MAX_FILES)) {
+      try {
+        const firstLine = readFirstLine(f.full).trim();
+        if (!firstLine) continue;
+        const obj = JSON.parse(firstLine) as {
+          type?: string;
+          payload?: { id?: string; cwd?: string };
+        };
+        if (obj.type !== 'session_meta' || !obj.payload) continue;
+        const id = String(obj.payload.id || '');
+        if (!id) continue;
+        const cwdRaw = String(obj.payload.cwd || '');
+        out.push({
+          agent: 'codex',
+          cwd: cwdRaw ? path.resolve(cwdRaw) : '',
+          id,
+          title: titleMap.get(id) || id,
+          mtimeMs: f.mtimeMs,
+          resumeCommand: `codex resume ${id}`,
+        });
+      } catch { /* skip */ }
+    }
+  } catch { /* never throw */ }
+  return out;
+}
+
+// --- Kiro: ~/.kiro/sessions/cli/<uuid>.json sidecar (cwd/title/timestamps) ---
+function discoverKiroSessions(): DiscoveredSession[] {
+  const MAX_FILES = 300;
+  const out: DiscoveredSession[] = [];
+  try {
+    const dir = path.join(os.homedir(), '.kiro', 'sessions', 'cli');
+    if (!fs.existsSync(dir)) return [];
+
+    const files: Array<{ full: string; uuid: string; mtimeMs: number }> = [];
+    let names: string[];
+    try { names = fs.readdirSync(dir); } catch { return []; }
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const full = path.join(dir, name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile()) files.push({ full, uuid: name.replace(/\.json$/, ''), mtimeMs: st.mtimeMs });
+      } catch { /* skip */ }
+    }
+
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    for (const f of files.slice(0, MAX_FILES)) {
+      try {
+        const content = fs.readFileSync(f.full, 'utf-8');
+        const obj = JSON.parse(content) as {
+          session_id?: string;
+          cwd?: string;
+          title?: string;
+          updated_at?: string;
+        };
+        const id = String(obj.session_id || f.uuid);
+        const cwdRaw = String(obj.cwd || '');
+        const title = (typeof obj.title === 'string' && obj.title.trim())
+          ? obj.title.trim().slice(0, 60)
+          : id;
+        out.push({
+          agent: 'kiro',
+          cwd: cwdRaw ? path.resolve(cwdRaw) : '',
+          id,
+          title,
+          mtimeMs: f.mtimeMs,
+          resumeCommand: `kiro-cli chat --resume-id ${id}`,
+        });
+      } catch { /* skip */ }
+    }
+  } catch { /* never throw */ }
+  return out;
+}
+
+// --- Copilot: ~/.copilot/session-store.db (sqlite). Best-effort, cwd unreliable. ---
+function discoverCopilotSessions(): DiscoveredSession[] {
+  const out: DiscoveredSession[] = [];
+  try {
+    const dbPath = path.join(os.homedir(), '.copilot', 'session-store.db');
+    if (!fs.existsSync(dbPath)) return [];
+
+    // Try node's built-in sqlite first (Node >= 22.5 with --experimental-sqlite),
+    // fall back to shelling out to the `sqlite3` binary if present.
+    type Row = { id?: string; cwd?: string; summary?: string; updated_at?: string };
+    let rows: Row[] = [];
+
+    let usedNode = false;
+    try {
+      // node:sqlite is experimental and may be absent; guard the require.
+      const sqlite = require('node:sqlite') as {
+        DatabaseSync?: new (p: string, opts?: { readOnly?: boolean }) => {
+          prepare: (sql: string) => { all: () => unknown[] };
+          close: () => void;
+        };
+      };
+      if (sqlite?.DatabaseSync) {
+        const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+        try {
+          rows = db.prepare(
+            'SELECT id, cwd, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100'
+          ).all() as Row[];
+          usedNode = true;
+        } finally {
+          db.close();
+        }
+      }
+    } catch { /* node:sqlite unavailable -> fall through */ }
+
+    if (!usedNode) {
+      try {
+        const { execFileSync } = require('child_process') as typeof import('child_process');
+        const raw = execFileSync(
+          'sqlite3',
+          ['-json', dbPath, 'SELECT id, cwd, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100;'],
+          { encoding: 'utf-8', timeout: 5000 }
+        );
+        const parsed = JSON.parse(raw || '[]') as Row[];
+        if (Array.isArray(parsed)) rows = parsed;
+      } catch { /* sqlite3 binary missing / query failed -> degrade to empty */ }
+    }
+
+    for (const r of rows) {
+      const id = String(r.id || '');
+      if (!id) continue;
+      const cwdRaw = String(r.cwd || '');
+      // cwd often '/' or a synthetic ~/.copilot/chats path -> treat as unknown.
+      const isRealFolder = cwdRaw && cwdRaw !== '/' && !cwdRaw.startsWith(path.join(os.homedir(), '.copilot'));
+      const mtimeMs = r.updated_at ? Date.parse(r.updated_at) || 0 : 0;
+      const title = (typeof r.summary === 'string' && r.summary.trim())
+        ? r.summary.trim().slice(0, 60)
+        : id;
+      out.push({
+        agent: 'copilot',
+        cwd: isRealFolder ? path.resolve(cwdRaw) : '',
+        id,
+        title,
+        mtimeMs,
+        resumeCommand: `copilot --resume ${id}`,
+      });
+    }
+  } catch { /* never throw - Copilot is best-effort */ }
+  return out;
+}
+
+// Bucket all discovered sessions by project cwd. Sessions with no usable folder
+// are grouped under a synthetic project (e.g. Copilot without a real cwd).
+function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
+  const discovered: DiscoveredSession[] = [
+    ...discoverClaudeSessions(),
+    ...discoverCodexSessions(),
+    ...discoverKiroSessions(),
+    ...discoverCopilotSessions(),
+  ];
+
+  const COPILOT_NO_FOLDER = '__copilot_no_folder__';
+  // bucketKey -> { path, name, agentMap }
+  const buckets = new Map<string, {
+    path: string;
+    name: string;
+    agentMap: Map<ProjectsAgentId, ProjectSession[]>;
+  }>();
+
+  const getBucket = (key: string, displayPath: string, name: string) => {
+    let b = buckets.get(key);
+    if (!b) {
+      b = { path: displayPath, name, agentMap: new Map() };
+      buckets.set(key, b);
+    }
+    return b;
+  };
+
+  for (const s of discovered) {
+    let key: string;
+    let displayPath: string;
+    let name: string;
+    if (s.cwd) {
+      key = s.cwd;
+      displayPath = s.cwd;
+      name = path.basename(s.cwd) || s.cwd;
+    } else if (s.agent === 'copilot') {
+      key = COPILOT_NO_FOLDER;
+      displayPath = '';
+      name = 'Copilot (no folder)';
+    } else {
+      continue; // unknown-folder non-copilot sessions are skipped
+    }
+    const bucket = getBucket(key, displayPath, name);
+    let arr = bucket.agentMap.get(s.agent);
+    if (!arr) { arr = []; bucket.agentMap.set(s.agent, arr); }
+    arr.push({ id: s.id, title: s.title, mtimeMs: s.mtimeMs, resumeCommand: s.resumeCommand });
+  }
+
+  // Ensure explicitly-added folders appear even with no sessions.
+  for (const folder of extraFolders) {
+    try {
+      const abs = path.resolve(String(folder || ''));
+      if (!abs) continue;
+      getBucket(abs, abs, path.basename(abs) || abs);
+    } catch { /* ignore bad folder */ }
+  }
+
+  const projects: ProjectEntry[] = [];
+  for (const b of buckets.values()) {
+    const agents: ProjectEntry['agents'] = [];
+    let lastActiveMs = 0;
+    for (const [agent, sessions] of b.agentMap) {
+      sessions.sort((a, b2) => b2.mtimeMs - a.mtimeMs);
+      const capped = sessions.slice(0, PROJECTS_MAX_SESSIONS_PER_AGENT);
+      if (capped.length > 0) lastActiveMs = Math.max(lastActiveMs, capped[0].mtimeMs);
+      agents.push({ agent, sessions: capped });
+    }
+    projects.push({ path: b.path, name: b.name, agents, lastActiveMs });
+  }
+
+  projects.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+  return projects;
+}
+
 function registerIPC(): void {
   // Set window title
   ipcMain.on('window:set-title', (_e, title: string) => {
@@ -1085,6 +1492,15 @@ function registerIPC(): void {
       return [...claudeList, ...codexList]
         .sort((a, b) => b.mtimeMs - a.mtimeMs)
         .slice(0, MAX_SESSIONS);
+    } catch {
+      return [];
+    }
+  });
+
+  // Projects-first discovery: bucket every AI-CLI session by project folder
+  ipcMain.handle('projects:list', (_e, opts?: { extraFolders?: string[] }) => {
+    try {
+      return buildProjectsList(opts?.extraFolders ?? []);
     } catch {
       return [];
     }

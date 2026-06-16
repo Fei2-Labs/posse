@@ -11,7 +11,8 @@ Desktop and mobile-synced terminal for AI coding CLIs, including Claude Code, Co
 - 🔍 **Built-in AI CLI presets** – Start Claude Code, Codex, GitHub Copilot CLI, Devin, OpenCode, Kiro, or custom commands
 - 🧵 **Background PTY daemon** – Terminal processes keep running when the Electron window closes or restarts for an update
 - 🖥️ **Independent terminal client** – Open the daemon-served terminal UI at `http://127.0.0.1:9811/terminal/` while the Electron shell restarts
-- 🗂️ **Multi-session workspace** – Group the session rail by **agent** or by **folder** (toggle at the top of the Sessions tab); live and closed sessions both show under each agent, with one-click resume / rename / delete
+- 🗂️ **Project navigator** – A Codex-style sidebar on the **left** with **Pinned** and **Projects** sections. Add a folder as a project, expand it to see its conversations grouped by agent (Claude / Codex / Copilot / …), and click any session to open it in the center terminal. Each project has a **new-conversation** button (agent picker), plus pin / rename / remove. Live, closed, and native on-disk history sessions (Claude / Codex / Kiro / Copilot) all surface per project with one-click resume.
+- 🖥️ **Layout** – Sessions on the left, terminal in the center, file tree on the right. Both side panels are collapsible and resizable.
 - 📄 **File preview** – Click any file in the directory tree to preview its contents read-only in-app (syntax-highlighted via CodeMirror); binary or large files fall back to the external editor
 - ⚙️ **Persistent config** – `duo config` to set defaults
 
