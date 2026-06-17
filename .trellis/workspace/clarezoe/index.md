@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 0
-- **Last Active**: -
+- **Total Sessions**: 1
+- **Last Active**: 2026-06-17
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~0 | Active |
+| `journal-1.md` | ~81 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 1 | 2026-06-17 | Posse: Projects-first multi-agent navigator + rebrand + session-safety fixes | `d1f65a9`, `9d0e692`, `ea73feb`, `d65bc52`, `f5a1446`, `97990ac`, `deebb80`, `4e31eec` | `feat/copilot-cli-support` |
 <!-- @@@/auto:session-history -->
 
 ---

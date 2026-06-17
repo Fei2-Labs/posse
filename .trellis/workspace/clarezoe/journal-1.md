@@ -39,3 +39,43 @@ Open / next:
 - GitHub URL `saddism/DuoCLI` left in code until repo is renamed on GitHub.
 - Branch ahead 2, not pushed. Task still in_progress (not archived).
 
+
+
+## Session 1: Posse: Projects-first multi-agent navigator + rebrand + session-safety fixes
+
+**Date**: 2026-06-17
+**Task**: Posse: Projects-first multi-agent navigator + rebrand + session-safety fixes
+**Branch**: `feat/copilot-cli-support`
+
+### Summary
+
+Rebrand DuoCLI->Posse + English-only. Built Conductor/Codex-style Projects navigator: left projects list, per-agent collapsed history (Claude/Codex/Kiro/Copilot) with real titles (customTitle/agentName/aiTitle, mtime-cached), one-click resume in center, right file tree+preview. Session-safety fixes: daemon restart never silently drops sessions, resume validates cwd + focuses existing PTY (no duplicates), titles dedup by uuid across live/closed/history. v1.0.0->1.1.4.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d1f65a9` | (see git log) |
+| `9d0e692` | (see git log) |
+| `ea73feb` | (see git log) |
+| `d65bc52` | (see git log) |
+| `f5a1446` | (see git log) |
+| `97990ac` | (see git log) |
+| `deebb80` | (see git log) |
+| `4e31eec` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
