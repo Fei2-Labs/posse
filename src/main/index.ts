@@ -520,12 +520,12 @@ function createWindow(appIcon?: Electron.NativeImage): void {
       event.preventDefault();
       mainWindow?.webContents.send('app:close-current-session');
     }
-  });
-
-  // Intercept Command+R (macOS) and Ctrl+R (Windows/Linux) to prevent refreshing the window
-  const refreshKey = process.platform === 'darwin' ? 'Command+R' : 'Ctrl+R';
-  globalShortcut.register(refreshKey, () => {
-    // Do nothing, blocking the default refresh behavior
+    // Block Cmd+R / Ctrl+R refresh ONLY inside Posse's own window. Using a
+    // window-scoped before-input-event (not globalShortcut.register, which would
+    // register an OS-level hotkey and swallow Cmd+R for every other app too).
+    if ((input.meta || input.control) && input.key.toLowerCase() === 'r') {
+      event.preventDefault();
+    }
   });
 
   mainWindow.on('closed', () => {
