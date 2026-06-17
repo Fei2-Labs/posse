@@ -1,23 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1a1a2e"/>
-      <stop offset="100%" style="stop-color:#0f0f23"/>
+      <stop offset="0%" stop-color="#11171a"/>
+      <stop offset="100%" stop-color="#0a0e12"/>
     </linearGradient>
-    <linearGradient id="text-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" style="stop-color:#0078d4"/>
-      <stop offset="50%" style="stop-color:#00b4d8"/>
-      <stop offset="100%" style="stop-color:#0078d4"/>
+    <linearGradient id="grn" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#56d364"/>
+      <stop offset="100%" stop-color="#2ea043"/>
     </linearGradient>
   </defs>
-  <!-- 圆角背景 -->
-  <rect x="32" y="32" width="960" height="960" rx="220" ry="220" fill="url(#bg)"/>
-  <!-- 细微边框 -->
-  <rect x="32" y="32" width="960" height="960" rx="220" ry="220" fill="none" stroke="#0078d4" stroke-width="3" opacity="0.3"/>
-  <!-- DUO 主文字 -->
-  <text x="512" y="545" font-family="-apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="320" font-weight="800" fill="url(#text-grad)" text-anchor="middle" letter-spacing="-10">DUO</text>
-  <!-- 底部光标线 -->
-  <rect x="280" y="600" width="464" height="6" rx="3" fill="#0078d4" opacity="0.5"/>
-  <!-- 底部小字 CLI -->
-  <text x="512" y="700" font-family="Menlo, Monaco, 'Courier New', monospace" font-size="72" font-weight="600" fill="#7d8590" text-anchor="middle" letter-spacing="20">CLI</text>
+
+  <!-- app squircle background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="226" ry="226" fill="none" stroke="#1f2a24" stroke-width="4"/>
+
+  <!-- terminal prompt chevron ">" -->
+  <path d="M300 332 L520 512 L300 692"
+        fill="none" stroke="url(#grn)" stroke-width="78"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- the posse: three agents gathered to the right of the prompt -->
+  <circle cx="616" cy="512" r="46" fill="#3fb950"/>
+  <circle cx="742" cy="512" r="46" fill="#56d364"/>
+  <circle cx="660" cy="640" r="38" fill="#2ea043" opacity="0.9"/>
+
+  <!-- cursor baseline underscore -->
+  <rect x="300" y="744" width="300" height="40" rx="20" fill="#3fb950" opacity="0.55"/>
 </svg>
