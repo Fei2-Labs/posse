@@ -834,16 +834,53 @@ html, body {
   color: var(--text-primary);
 }
 
+.remote-info-qr {
+  margin: 6px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.remote-info-qr-img {
+  width: 160px;
+  height: 160px;
+  padding: 8px;
+  background: #fff;
+  border-radius: 6px;
+  display: block;
+}
+
+.remote-info-scan-hint {
+  text-align: center;
+  margin-bottom: 6px;
+  opacity: 0.7;
+}
+
 .remote-info-url {
   font-family: monospace;
   color: var(--accent-color);
   word-break: break-all;
+  cursor: pointer;
+  user-select: all;
+}
+
+.remote-info-lan {
+  margin-top: 2px;
+  font-family: monospace;
+  word-break: break-all;
+  opacity: 0.7;
 }
 
 .remote-info-token {
   margin-top: 2px;
   font-family: monospace;
   opacity: 0.8;
+  word-break: break-all;
+}
+
+.remote-info-setup-hint {
+  margin-top: 6px;
+  opacity: 0.75;
+  line-height: 1.4;
 }
 
 /* Sidebar tab switching */

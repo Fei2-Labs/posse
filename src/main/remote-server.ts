@@ -179,7 +179,7 @@ function resolveTailscaleCli(): string | null {
 }
 
 // 读取本机 Tailscale 节点信息（MagicDNS 名 + 100.x IPv4），失败返回 null
-function getTailscaleInfo(): { dnsName: string; ip: string } | null {
+export function getTailscaleInfo(): { dnsName: string; ip: string } | null {
   const cli = resolveTailscaleCli();
   if (!cli) return null;
   try {

@@ -7,7 +7,7 @@ import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
 import { AIConfigManager } from './ai-config';
-import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, type RemoteConnectionStatus } from './remote-server';
+import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, getTailscaleInfo, type RemoteConnectionStatus } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
 import { ChatSessionManager } from './chat-session-manager';
 import { WindsurfProxyManager } from './windsurf-proxy-manager';
@@ -389,6 +389,7 @@ let currentAppIcon: Electron.NativeImage | undefined;
 type RemoteServerInfoWithTunnel = RemoteConnectionStatus & {
   publicUrl?: string;
   tunnel?: unknown;
+  tailscaleUrl?: string | null;
 };
 
 type TrayState = {
@@ -2345,12 +2346,15 @@ app.whenReady().then(async () => {
   }, (info) => {
     // After the server starts, send the connection info to the renderer for display
     const tunnel = cloudflaredManager?.start();
+    const ts = getTailscaleInfo();
+    const tailscaleUrl = ts && ts.dnsName ? `https://${ts.dnsName}` : null;
     const serverInfo: RemoteServerInfoWithTunnel = {
       ...info,
       connectedClients: trayState.connectedClients,
       subscribedSessions: trayState.subscribedSessions,
       publicUrl: tunnel?.url || undefined,
       tunnel,
+      tailscaleUrl,
     };
     cachedRemoteServerInfo = serverInfo;
     trayState.isOnline = true;

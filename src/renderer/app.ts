@@ -1,8 +1,9 @@
 import { TerminalManager } from './terminal-manager';
 import { ChatView } from './chat-view';
 import { createFilePreview, type FilePreview } from './file-preview';
+import QRCode from 'qrcode';
 
-let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null = null;
+let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null } | null = null;
 
 // Inline Lucide-style monochrome icons (16px, stroke=currentColor). Set via innerHTML on buttons.
 const ICON: Record<string, string> = {
@@ -64,8 +65,8 @@ declare global {
       onPtyExit: (cb: (id: string) => void) => void;
       onDaemonRestarted: (cb: () => void) => void;
       onRemoteCreated: (cb: (sessionInfo: PtySessionInfo) => void) => void;
-      onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } }) => void) => void;
-      getRemoteServerInfo: () => Promise<{ lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null>;
+      onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null }) => void) => void;
+      getRemoteServerInfo: () => Promise<{ lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null } | null>;
       clipboardSaveImage: () => Promise<string | null>;
       clipboardGetFilePath: () => Promise<string | null>;
       // File watcher API
@@ -959,21 +960,91 @@ const BUILTIN_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'kiro-cli chat --trust-all-tools', label: 'Kiro (auto)' },
 ];
 
-// Render remote server connection info
+// Append the auth token as a ?token= query so scanning the QR auto-authenticates
+function withToken(base: string, token: string): string {
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}token=${encodeURIComponent(token)}`;
+}
+
+// Track the last URL we rendered a QR for, to avoid redundant async regeneration
+let lastQrUrl = '';
+
+// Render remote server connection info: QR (priority Tailscale > LAN) + connect URL + token
 function renderRemoteServerInfo(): void {
   if (!remoteServerInfo) {
     remoteServerInfoEl.style.display = 'none';
     return;
   }
   remoteServerInfoEl.style.display = 'block';
+
+  const qrWrapEl = remoteServerInfoEl.querySelector('.remote-info-qr') as HTMLElement;
+  const qrImgEl = remoteServerInfoEl.querySelector('.remote-info-qr-img') as HTMLImageElement;
+  const scanHintEl = remoteServerInfoEl.querySelector('.remote-info-scan-hint') as HTMLElement;
   const urlEl = remoteServerInfoEl.querySelector('.remote-info-url') as HTMLElement;
-  const tokenEl = remoteServerInfoEl.querySelector('.remote-info-token')!;
-  const tunnelReady = Boolean(remoteServerInfo.tunnel?.running && remoteServerInfo.publicUrl);
-  urlEl.textContent = tunnelReady
-    ? remoteServerInfo.publicUrl!
-    : `${remoteServerInfo.lanUrl}${remoteServerInfo.tunnel?.message ? ` | ${remoteServerInfo.tunnel.message}` : ''}`;
-  urlEl.title = tunnelReady ? remoteServerInfo.lanUrl : '';
-  tokenEl.textContent = `Token: ${remoteServerInfo.token}`;
+  const lanEl = remoteServerInfoEl.querySelector('.remote-info-lan') as HTMLElement;
+  const tokenEl = remoteServerInfoEl.querySelector('.remote-info-token') as HTMLElement;
+  const setupHintEl = remoteServerInfoEl.querySelector('.remote-info-setup-hint') as HTMLElement;
+
+  const token = remoteServerInfo.token;
+  const tailscaleUrl = remoteServerInfo.tailscaleUrl || null;
+  const lanUrl = remoteServerInfo.lanUrl || null;
+
+  // URL priority: Tailscale (reachable on AND off LAN) > LAN. Both carry the embedded token.
+  const bestBase = tailscaleUrl || lanUrl;
+  const bestConnectUrl = bestBase ? withToken(`${bestBase}/`, token) : null;
+
+  // Primary connect URL (selectable, tap-to-copy). Show base without token for readability.
+  if (bestBase) {
+    urlEl.textContent = bestBase;
+    urlEl.dataset.copy = bestConnectUrl || '';
+    urlEl.style.display = 'block';
+  } else {
+    urlEl.textContent = '';
+    urlEl.style.display = 'none';
+  }
+
+  // If Tailscale is the QR target, still surface the LAN URL as a secondary text line.
+  if (tailscaleUrl && lanUrl) {
+    lanEl.textContent = `LAN: ${lanUrl}`;
+    lanEl.style.display = 'block';
+  } else {
+    lanEl.textContent = '';
+    lanEl.style.display = 'none';
+  }
+
+  // Token as fallback for manual entry
+  tokenEl.textContent = `Token: ${token}`;
+
+  // Setup hint only when NO reachable URL exists at all — and make it Tailscale-oriented.
+  if (!bestConnectUrl) {
+    setupHintEl.textContent = 'No reachable address. Connect this Mac to a network, or install Tailscale + enable MagicDNS/HTTPS for off-LAN access.';
+    setupHintEl.style.display = 'block';
+  } else {
+    setupHintEl.textContent = '';
+    setupHintEl.style.display = 'none';
+  }
+
+  // QR code: encode the best connect URL with embedded token. Regenerate only on change.
+  if (bestConnectUrl) {
+    qrWrapEl.style.display = 'block';
+    scanHintEl.style.display = 'block';
+    if (bestConnectUrl !== lastQrUrl) {
+      lastQrUrl = bestConnectUrl;
+      QRCode.toDataURL(bestConnectUrl, { margin: 1, width: 320 })
+        .then((dataUrl) => {
+          // Guard against a later info update having changed the target URL
+          if (lastQrUrl === bestConnectUrl) qrImgEl.src = dataUrl;
+        })
+        .catch((err) => {
+          console.warn('[Renderer] QR generation failed:', err);
+        });
+    }
+  } else {
+    qrWrapEl.style.display = 'none';
+    scanHintEl.style.display = 'none';
+    qrImgEl.removeAttribute('src');
+    lastQrUrl = '';
+  }
 }
 
 function renderPresetSelect(): void {
@@ -1218,6 +1289,17 @@ const themeDropdown = document.getElementById('theme-dropdown')!;
 const toolbarTerminalClientBtn = document.getElementById('toolbar-terminal-client-btn')!;
 const toolbarRestartDaemonBtn = document.getElementById('toolbar-restart-daemon-btn') as HTMLButtonElement | null;
 const remoteServerInfoEl = document.getElementById('remote-server-info')!;
+// Tap the connect URL to copy the full token-embedded link to the clipboard
+remoteServerInfoEl.querySelector('.remote-info-url')?.addEventListener('click', (e) => {
+  const el = e.currentTarget as HTMLElement;
+  const link = el.dataset.copy;
+  if (!link) return;
+  void navigator.clipboard.writeText(link).then(() => {
+    const prev = el.textContent;
+    el.textContent = 'Copied link!';
+    setTimeout(() => { el.textContent = prev; }, 1200);
+  }).catch(() => { /* clipboard unavailable, ignore */ });
+});
 const newSessionOverlay = document.getElementById('new-session-overlay')!;
 const newSessionCloseBtn = document.getElementById('new-session-close')!;
 const newSessionCancelBtn = document.getElementById('new-session-cancel')!;
