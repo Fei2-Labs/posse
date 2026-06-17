@@ -164,6 +164,7 @@ function findAgentSessionIdOnDisk(
   agent: 'claude' | 'codex' | 'kiro' | 'copilot',
   cwd: string,
   spawnedAt: number,
+  excludeUuids?: Set<string>,
 ): string | null {
   // Allow a small clock skew window: accept files touched a little before the recorded spawn time.
   const minMtime = spawnedAt - 5000;
@@ -174,11 +175,19 @@ function findAgentSessionIdOnDisk(
       let best: { uuid: string; mtimeMs: number } | null = null;
       for (const name of fs.readdirSync(dir)) {
         if (!name.endsWith('.jsonl')) continue;
+        const uuid = name.replace(/\.jsonl$/, '');
+        if (excludeUuids?.has(uuid)) continue;
         try {
           const st = fs.statSync(path.join(dir, name));
-          if (!st.isFile() || st.mtimeMs < minMtime) continue;
+          if (!st.isFile()) continue;
+          // Require the file to be CREATED after spawn: a fresh `claude` writes a brand-new
+          // session file born after spawn; an already-live session's file was born earlier
+          // (its mtime is fresh only because it's still being written) and must be excluded.
+          // Fall back to mtime if birthtime is unavailable.
+          const created = st.birthtimeMs && st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+          if (created < minMtime) continue;
           if (!best || st.mtimeMs > best.mtimeMs) {
-            best = { uuid: name.replace(/\.jsonl$/, ''), mtimeMs: st.mtimeMs };
+            best = { uuid, mtimeMs: st.mtimeMs };
           }
         } catch { /* skip */ }
       }
@@ -210,11 +219,12 @@ function findAgentSessionIdOnDisk(
               if (walked++ >= WALK_CAP) break outer;
               const full = path.join(dayDir, name);
               try {
+                const idMatch = name.match(uuidRe);
+                if (!idMatch) continue;
+                if (excludeUuids?.has(idMatch[1])) continue;
                 const st = fs.statSync(full);
                 if (!st.isFile() || st.mtimeMs < minMtime) continue;
                 if (best && st.mtimeMs <= best.mtimeMs) continue;
-                const idMatch = name.match(uuidRe);
-                if (!idMatch) continue;
                 // Confirm cwd from the session_meta head before accepting.
                 const fd = fs.openSync(full, 'r');
                 let head = '';
@@ -588,7 +598,15 @@ export class PtyManager {
           setTimeout(() => {
             const live = this.sessions.get(id);
             if (!live || live.agentSessionId) return;
-            const found = findAgentSessionIdOnDisk(agent, cwd, spawnedAt);
+            // Build the exclusion set fresh so it reflects the uuids bound to OTHER live
+            // sessions right now — a discovered uuid must never collide with another live PTY.
+            const exclude = new Set<string>();
+            for (const [otherId, other] of this.sessions) {
+              if (otherId === id) continue;
+              if (other.agentSessionId) exclude.add(other.agentSessionId);
+              if (other.resumeId) exclude.add(other.resumeId);
+            }
+            const found = findAgentSessionIdOnDisk(agent, cwd, spawnedAt, exclude);
             if (found) live.agentSessionId = found;
           }, delay);
         }

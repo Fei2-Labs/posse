@@ -2065,11 +2065,16 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
   // 1. Live PTY sessions in this cwd (highest priority)
   for (const id of sessionTitles.keys()) {
     if (normalizeCwd(sessionCwds.get(id) || '') !== key) continue;
+    const uuid = sessionResumeId.get(id) || sessionAgentId.get(id);
+    // Live↔live dedup: two live PTYs can share one uuid if discovery mis-bound a fresh
+    // run to an already-active session's file. Skip the duplicate so the sidebar never
+    // shows two rows for the same conversation. The first live PTY for a uuid wins.
+    // A session with no resolvable uuid is always shown.
+    if (uuid && shownUuids.has(uuid)) continue;
     const family = agentFamilyFromDisplayName(sessionDisplayNames.get(id) || '');
     const g = ensure(family);
     g.lives.push(id);
     g.latest = Math.max(g.latest, sessionUpdateTimes.get(id) || 0);
-    const uuid = sessionResumeId.get(id) || sessionAgentId.get(id);
     if (uuid) shownUuids.add(uuid);
   }
 
