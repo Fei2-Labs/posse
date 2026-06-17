@@ -141,6 +141,10 @@ const sessionProviders: Map<string, string> = new Map();
 // Live PTY -> the agent's on-disk session id (uuid). Used to dedup a live session against its
 // on-disk history row, and to focus (not duplicate) an already-open session on resume.
 const sessionAgentId: Map<string, string> = new Map();
+// Live PTY -> the agent session uuid used as the canonical dedup key across the three session
+// sources (live / closed / on-disk history). Mirrors sessionAgentId but kept separately so the
+// dedup survives an app reload even if sessionAgentId is repopulated lazily.
+const sessionResumeId: Map<string, string> = new Map();
 // Custom provider ID used by each session (to restore selection when switching terminals)
 const sessionClaudeProviderIds: Map<string, string> = new Map();
 
@@ -270,7 +274,10 @@ async function syncSessionAgentIds(): Promise<void> {
   try {
     const sessions = await window.posse.getSessions();
     for (const s of sessions) {
-      if (s.agentSessionId) sessionAgentId.set(s.id, s.agentSessionId);
+      if (s.agentSessionId) {
+        sessionAgentId.set(s.id, s.agentSessionId);
+        sessionResumeId.set(s.id, s.agentSessionId);
+      }
     }
   } catch {
     /* ignore — best effort */
@@ -2039,29 +2046,38 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
     return g;
   };
 
-  // Agent on-disk session ids that are already OPEN as live PTY sessions (any cwd). On-disk history
-  // rows matching one of these are skipped below so an open session shows exactly once.
-  const openAgentIds = new Set<string>();
-  for (const agentId of sessionAgentId.values()) {
-    if (agentId) openAgentIds.add(agentId);
-  }
+  // Canonical dedup: each conversation is identified by its agent session uuid. The same uuid can
+  // appear as a LIVE PTY (resumeId), a CLOSED DuoCLI record (cs.resumeId), and an on-disk HISTORY
+  // row (s.id). Preference order is live > closed > history: once a uuid is shown by a
+  // higher-priority source, lower-priority duplicates are skipped.
+  const shownUuids = new Set<string>();
 
-  // 1. Live PTY sessions in this cwd
+  // Belt-and-suspenders: agent uuids already OPEN as a live PTY (any cwd), via either tracking map.
+  // The resumeId-based shownUuids set below is the primary mechanism.
+  const openAgentIds = new Set<string>();
+  for (const uuid of sessionResumeId.values()) if (uuid) openAgentIds.add(uuid);
+  for (const uuid of sessionAgentId.values()) if (uuid) openAgentIds.add(uuid);
+
+  // 1. Live PTY sessions in this cwd (highest priority)
   for (const id of sessionTitles.keys()) {
     if (normalizeCwd(sessionCwds.get(id) || '') !== key) continue;
     const family = agentFamilyFromDisplayName(sessionDisplayNames.get(id) || '');
     const g = ensure(family);
     g.lives.push(id);
     g.latest = Math.max(g.latest, sessionUpdateTimes.get(id) || 0);
+    const uuid = sessionResumeId.get(id) || sessionAgentId.get(id);
+    if (uuid) shownUuids.add(uuid);
   }
 
-  // 2. Closed DuoCLI sessions in this cwd
+  // 2. Closed DuoCLI sessions in this cwd — skip any already shown as a live PTY.
   for (const cs of closedSessions) {
     if (normalizeCwd(cs.cwd || '') !== key) continue;
+    if (cs.resumeId && shownUuids.has(cs.resumeId)) continue;
     const family = agentFamilyFromDisplayName(cs.displayName || '');
     const g = ensure(family);
     g.closed.push(cs);
     g.latest = Math.max(g.latest, cs.closedAt || 0);
+    if (cs.resumeId) shownUuids.add(cs.resumeId);
   }
 
   // 3. Native multi-agent history from the backend projects:list (Claude/Codex/Kiro/Copilot)
@@ -2071,8 +2087,9 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
       const family = AGENT_ID_LABEL[agentGroup.agent] || agentFamilyFromDisplayName(agentGroup.agent);
       const g = ensure(family);
       for (const s of agentGroup.sessions) {
-        // Dedup: if this on-disk session is already open as a live PTY, skip the history row.
-        if (openAgentIds.has(s.id)) continue;
+        // Dedup: skip if this on-disk session is already shown as a live PTY or a closed record.
+        if (shownUuids.has(s.id) || openAgentIds.has(s.id)) continue;
+        shownUuids.add(s.id);
         g.history.push({
           id: s.id,
           title: s.title,
@@ -2595,7 +2612,10 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   sessionCwds.set(info.id, info.cwd);
   sessionDisplayNames.set(info.id, info.displayName);
   if (info.provider) sessionProviders.set(info.id, info.provider);
-  if (info.agentSessionId) sessionAgentId.set(info.id, info.agentSessionId);
+  if (info.agentSessionId) {
+    sessionAgentId.set(info.id, info.agentSessionId);
+    sessionResumeId.set(info.id, info.agentSessionId);
+  }
   termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithAutoReset(info.id, data); });
   if (replayRawBuffer && info.rawBuffer) {
     termManager.write(info.id, info.rawBuffer);
@@ -2684,7 +2704,7 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
     cs.displayName || result.displayName || command || cs.resumeCommand || cs.presetCommand || '';
   attachPtySession({ ...result, title: cs.title, displayName: restoredDisplayName }, now);
   // Record the correlation so a future click on this same conversation dedups to this live PTY.
-  if (cs.resumeId) sessionAgentId.set(result.id, cs.resumeId);
+  if (cs.resumeId) { sessionAgentId.set(result.id, cs.resumeId); sessionResumeId.set(result.id, cs.resumeId); }
   // For a true resume, lock the known-good title on the daemon so its title-ai cannot
   // overwrite it from the replayed buffer (which starts with Claude's "Caveat:" preamble).
   if (cs.resumeId && isMeaningfulTitle(cs.title)) {
@@ -2751,6 +2771,7 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   // Record the correlation immediately (we launched via a resume command for s.id) so a second
   // click focuses this session and the history row dedups right away.
   sessionAgentId.set(result.id, s.id);
+  sessionResumeId.set(result.id, s.id);
   // Lock the known-good history title on the daemon so its title-ai cannot overwrite it from
   // the replayed buffer (which starts with Claude's "Caveat:" preamble).
   if (isMeaningfulTitle(s.title)) {
@@ -2892,6 +2913,7 @@ function clearSessionState(id: string): void {
   sessionDisplayNames.delete(id);
   sessionProviders.delete(id);
   sessionAgentId.delete(id);
+  sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
   sessionAutoContinue.delete(id);
   sessionAutoSwitchStatus.delete(id);
