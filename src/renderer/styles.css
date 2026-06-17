@@ -2109,6 +2109,15 @@ select.ai-form-input {
 
 /* ========== Chat View ========== */
 
+/* Chat stage: fills the center column between the side panels, same as the
+   terminal stage. min-width:0 lets the inner scroll container reach the true
+   edges so its scrollbar hugs the panel edge instead of floating in a gutter. */
+#chat-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .chat-view-container {
   display: flex;
   flex-direction: column;
