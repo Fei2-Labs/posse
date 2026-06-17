@@ -130,6 +130,34 @@ function encodeClaudeProjectDir(cwd: string): string {
   return path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
+// Best-effort: propagate a user rename into Claude's own session file so Claude's
+// session list/resume shows the same title. Claude stores a rename as two appended
+// JSONL lines: a `custom-title` line and an `agent-name` line.
+export function writeClaudeSessionTitle(uuid: string, title: string): void {
+  const trimmed = (title || '').trim();
+  if (!trimmed || !uuid) return;
+  try {
+    const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+    if (!fs.existsSync(projectsDir)) return;
+    const fileName = `${uuid}.jsonl`;
+    let target: string | null = null;
+    for (const dir of fs.readdirSync(projectsDir)) {
+      const candidate = path.join(projectsDir, dir, fileName);
+      if (fs.existsSync(candidate)) {
+        target = candidate;
+        break;
+      }
+    }
+    if (!target) return;
+    const lines =
+      JSON.stringify({ type: 'custom-title', customTitle: trimmed, sessionId: uuid }) + '\n' +
+      JSON.stringify({ type: 'agent-name', agentName: trimmed, sessionId: uuid }) + '\n';
+    fs.appendFileSync(target, lines, 'utf-8');
+  } catch {
+    // Best-effort; never throw or block the rename.
+  }
+}
+
 // Best-effort: find the on-disk agent session id for a session whose PTY was spawned at `spawnedAt`.
 // Returns the newest matching session file's uuid for that agent in that cwd, created/updated after spawn.
 function findAgentSessionIdOnDisk(
@@ -650,6 +678,9 @@ export class PtyManager {
     session.title = title;
     session.titleLocked = true;
     this.events.onTitleUpdate(id, title);
+    if (agentKindFromCommand(session.presetCommand) === 'claude' && session.agentSessionId) {
+      writeClaudeSessionTitle(session.agentSessionId, title);
+    }
   }
 
   setProvider(id: string, provider: string | null): void {

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, glo
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getDisplayName, rotateDevinInstallationId } from './pty-manager';
+import { getDisplayName, rotateDevinInstallationId, writeClaudeSessionTitle } from './pty-manager';
 import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
@@ -1488,10 +1488,16 @@ function registerIPC(): void {
     return [];
   });
   ipcMain.handle('closed-sessions:rename', (_e, id: string, title: string) => {
+    const newTitle = String(title || '').slice(0, 200);
     const sessions = loadClosedSessions().map(s =>
-      s.id === id ? { ...s, title: String(title || '').slice(0, 200) } : s
+      s.id === id ? { ...s, title: newTitle } : s
     );
     saveClosedSessions(sessions);
+    // Propagate into Claude's own session file for closed Claude sessions.
+    const target = sessions.find(s => s.id === id);
+    if (target && /^claude\b/i.test((target.presetCommand || '').trim()) && target.resumeId) {
+      writeClaudeSessionTitle(target.resumeId, newTitle);
+    }
     return sessions;
   });
 
