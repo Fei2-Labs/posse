@@ -817,6 +817,18 @@ function cleanSessionTitle(raw: string): string {
     .slice(0, 60);
 }
 
+// When a user RENAMES a Claude Code session, Claude records it as a user message like:
+//   The user named this session "New UI". This may indicate the ...
+// Extract the quoted name (tolerate "named"/"renamed", straight or curly quotes). Match against
+// the RAW message text (quotes matter, so do not run on the tag-stripped/cleaned form).
+const RENAME_TITLE_RE = /the user (?:re)?named this session\s*["“”'']([^"“”'']+)["“”'']/i;
+function extractRenameTitle(userText: string): string | null {
+  const m = RENAME_TITLE_RE.exec(userText);
+  if (!m) return null;
+  const name = m[1].trim();
+  return name ? name.slice(0, 60) : null;
+}
+
 // Decide whether a cleaned user-message string is a real prompt usable as a session title.
 // Skips Claude Code's injected system preambles (the "Caveat:" local-command notice), empty
 // strings, leftover XML/tag wrappers, and session-continuation meta lines.
@@ -911,6 +923,7 @@ function discoverClaudeSessions(): DiscoveredSession[] {
         let cwd = '';
         let aiTitle = '';
         let firstUserTitle = '';
+        let renameTitle = '';
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
@@ -918,6 +931,11 @@ function discoverClaudeSessions(): DiscoveredSession[] {
           try { obj = JSON.parse(trimmed); } catch { continue; }
           if (!cwd && typeof obj.cwd === 'string' && obj.cwd) cwd = obj.cwd;
           if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string') aiTitle = obj.aiTitle;
+          // Explicit rename marker (highest priority). Match the RAW text; last rename wins.
+          if (obj.type === 'user' && typeof obj.message?.content === 'string') {
+            const r = extractRenameTitle(obj.message.content);
+            if (r) renameTitle = r;
+          }
           // First REAL user prompt: skip the injected "Caveat:" system preamble, empty/tag-only
           // messages, and continuation meta. Take the first one that survives the filter.
           if (!firstUserTitle && obj.type === 'user' && typeof obj.message?.content === 'string') {
@@ -931,9 +949,12 @@ function discoverClaudeSessions(): DiscoveredSession[] {
           const tailTitle = findAiTitleInChunk(readTail(f.full, f.size));
           if (tailTitle.trim()) aiTitle = tailTitle;
         }
-        const title = aiTitle.trim()
-          ? aiTitle.trim().slice(0, 60)
-          : (firstUserTitle || f.uuid);
+        // Priority: explicit rename > ai-title > first real user prompt > uuid.
+        const title = renameTitle
+          ? renameTitle
+          : aiTitle.trim()
+            ? aiTitle.trim().slice(0, 60)
+            : (firstUserTitle || f.uuid);
         out.push({
           agent: 'claude',
           cwd: cwd ? path.resolve(cwd) : '',
@@ -1521,6 +1542,8 @@ function registerIPC(): void {
         // First REAL user prompt: skip the injected "Caveat:" system preamble, empty/tag-only
         // messages, and continuation meta. Take the first one that survives the filter.
         let firstUserTitle = '';
+        // Explicit rename marker (highest priority). Match RAW text; last rename wins.
+        let renameTitle = '';
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
@@ -1528,6 +1551,10 @@ function registerIPC(): void {
           try { obj = JSON.parse(trimmed); } catch { continue; }
           if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string') {
             aiTitle = obj.aiTitle; // Do not break; take the last one
+          }
+          if (obj.type === 'user' && typeof obj.message?.content === 'string') {
+            const r = extractRenameTitle(obj.message.content);
+            if (r) renameTitle = r;
           }
           if (!firstUserTitle && obj.type === 'user') {
             const c = obj.message?.content;
@@ -1538,12 +1565,29 @@ function registerIPC(): void {
           }
         }
 
-        // For large files we only read the head; the ai-title is appended late and may be
-        // past that window. Scan the tail to recover it before falling back to the user text.
-        if (!aiTitle.trim() && isLarge) {
-          const tailTitle = findAiTitleInChunk(readTail(filePath, size));
-          if (tailTitle.trim()) aiTitle = tailTitle;
+        // For large files we only read the head; both the ai-title and a late rename marker may
+        // be past that window. Scan the tail to recover them before falling back to user text.
+        if (isLarge) {
+          const tail = readTail(filePath, size);
+          if (!aiTitle.trim()) {
+            const tailTitle = findAiTitleInChunk(tail);
+            if (tailTitle.trim()) aiTitle = tailTitle;
+          }
+          for (const line of tail.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || !/named this session/i.test(trimmed)) continue;
+            try {
+              const obj = JSON.parse(trimmed) as { type?: string; message?: { content?: unknown } };
+              if (obj.type === 'user' && typeof obj.message?.content === 'string') {
+                const r = extractRenameTitle(obj.message.content);
+                if (r) renameTitle = r; // tail is most recent; last wins
+              }
+            } catch { /* skip partial line (tail may start mid-line) */ }
+          }
         }
+
+        // Priority: explicit rename > ai-title > first real user prompt > uuid.
+        if (renameTitle) return renameTitle;
 
         if (aiTitle.trim()) return aiTitle.trim().slice(0, 60);
 
