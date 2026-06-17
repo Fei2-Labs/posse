@@ -1,5 +1,6 @@
 import { Terminal, IBufferLine, ILinkProvider, ILink } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 
 // Terminal color schemes
 const THEMES: Record<string, any> = {
@@ -424,6 +425,10 @@ export class TerminalManager {
 
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+
+    const unicode11Addon = new Unicode11Addon();
+    terminal.loadAddon(unicode11Addon);
+    terminal.unicode.activeVersion = '11';
 
     const container = document.createElement('div');
     container.className = 'terminal-container';

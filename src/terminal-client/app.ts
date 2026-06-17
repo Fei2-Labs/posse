@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 
 type DaemonConfig = {
   token: string;
@@ -205,10 +206,15 @@ function createTerminal(session: PtySession): TerminalInstance {
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 14,
     scrollback: 10000,
+    allowProposedApi: true,
     theme: { ...activeTheme.term },
   });
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
+
+  const unicode11Addon = new Unicode11Addon();
+  terminal.loadAddon(unicode11Addon);
+  terminal.unicode.activeVersion = '11';
 
   const container = document.createElement('div');
   container.className = 'terminal-container';
@@ -309,6 +315,7 @@ function renderSessionList(): void {
     button.appendChild(dot);
 
     const body = document.createElement('span');
+    body.className = 'session-body';
     const title = document.createElement('span');
     title.className = 'session-title';
     title.textContent = instance.session.title || 'Terminal';
