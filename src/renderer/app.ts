@@ -4,6 +4,20 @@ import { createFilePreview, type FilePreview } from './file-preview';
 
 let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string } } | null = null;
 
+// Inline Lucide-style monochrome icons (16px, stroke=currentColor). Set via innerHTML on buttons.
+const ICON: Record<string, string> = {
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>',
+  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z"/></svg>',
+  more: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  collapse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+};
+
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
 
 type PtySessionInfo = {
@@ -1200,7 +1214,6 @@ const presetManageBtn = document.getElementById('preset-manage-btn')!;
 const themeSelect = document.getElementById('theme-select')!;
 const themeDisplay = document.getElementById('theme-display')!;
 const themeDropdown = document.getElementById('theme-dropdown')!;
-const toolbarNewBtn = document.getElementById('toolbar-new-btn')!;
 const toolbarTerminalClientBtn = document.getElementById('toolbar-terminal-client-btn')!;
 const toolbarRestartDaemonBtn = document.getElementById('toolbar-restart-daemon-btn') as HTMLButtonElement | null;
 const remoteServerInfoEl = document.getElementById('remote-server-info')!;
@@ -1256,8 +1269,6 @@ filePreviewExternalBtn.addEventListener('click', () => {
   if (filePreviewPath) window.posse.openFile(filePreviewPath);
 });
 
-const fileTreeOpenBtn = document.getElementById('file-tree-open-btn')!;
-const fileTreePickBtn = document.getElementById('file-tree-pick-btn')!;
 const fileTreePath = document.getElementById('file-tree-path')!;
 const fileTreePanel = document.getElementById('file-tree-panel')!;
 const fileTreeToggle = document.getElementById('file-tree-toggle')!;
@@ -1666,7 +1677,7 @@ async function renderFileTree(): Promise<void> {
 
   const rootArrow = document.createElement('span');
   rootArrow.className = 'file-tree-arrow';
-  rootArrow.textContent = '▼';
+  rootArrow.innerHTML = ICON.chevron; rootArrow.classList.add('expanded');
   rootRow.appendChild(rootArrow);
 
   const rootName = document.createElement('span');
@@ -1677,7 +1688,7 @@ async function renderFileTree(): Promise<void> {
 
   const rootOpenBtn = document.createElement('span');
   rootOpenBtn.className = 'file-tree-open-folder';
-  rootOpenBtn.textContent = '\u{1F4C2}';
+  rootOpenBtn.innerHTML = ICON.folder;
   rootOpenBtn.title = 'Reveal in Finder';
   rootOpenBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1704,7 +1715,10 @@ async function renderFileTree(): Promise<void> {
 
       const arrow = document.createElement('span');
       arrow.className = 'file-tree-arrow';
-      if (item.isDir) arrow.textContent = fileTreeExpandedDirs.has(item.path) ? '▼' : '▶';
+      if (item.isDir) {
+        arrow.innerHTML = ICON.chevron;
+        if (fileTreeExpandedDirs.has(item.path)) arrow.classList.add('expanded');
+      }
       row.appendChild(arrow);
 
       const name = document.createElement('span');
@@ -1717,7 +1731,7 @@ async function renderFileTree(): Promise<void> {
       if (item.isDir) {
         const openFolderBtn = document.createElement('span');
         openFolderBtn.className = 'file-tree-open-folder';
-        openFolderBtn.textContent = '\u{1F4C2}';
+        openFolderBtn.innerHTML = ICON.folder;
         openFolderBtn.title = 'Reveal in Finder';
         openFolderBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -1927,7 +1941,7 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
 
   const editBtn = document.createElement('button');
   editBtn.className = 'nav-session-action';
-  editBtn.textContent = '✏️';
+  editBtn.innerHTML = ICON.pencil;
   editBtn.title = 'Rename';
   editBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -2153,7 +2167,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
 
   const icon = document.createElement('span');
   icon.className = 'nav-project-icon';
-  icon.textContent = '\u{1F4C1}';
+  icon.innerHTML = ICON.folder;
 
   const nameSpan = document.createElement('span');
   nameSpan.className = 'nav-project-name';
@@ -2165,25 +2179,25 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
 
   const pinBtn = document.createElement('button');
   pinBtn.className = 'nav-project-action' + (p.pinned ? ' active' : '');
-  pinBtn.textContent = '\u{1F4CC}';
+  pinBtn.innerHTML = ICON.pin;
   pinBtn.title = p.pinned ? 'Unpin' : 'Pin';
   pinBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePinProject(p.path); });
 
   const moreBtn = document.createElement('button');
   moreBtn.className = 'nav-project-action';
-  moreBtn.textContent = '⋯'; // ...
+  moreBtn.innerHTML = ICON.more;
   moreBtn.title = 'More';
   moreBtn.addEventListener('click', (e) => { e.stopPropagation(); showProjectMenu(e, p); });
 
   const editBtn = document.createElement('button');
   editBtn.className = 'nav-project-action';
-  editBtn.textContent = '✏️';
+  editBtn.innerHTML = ICON.pencil;
   editBtn.title = 'Rename project';
   editBtn.addEventListener('click', (e) => { e.stopPropagation(); renameProject(p.path); });
 
   const newBtn = document.createElement('button');
   newBtn.className = 'nav-project-action';
-  newBtn.textContent = '+';
+  newBtn.innerHTML = ICON.plus;
   newBtn.title = 'New conversation';
   newBtn.addEventListener('click', (e) => { e.stopPropagation(); showAgentPicker(e, p.path); });
 
@@ -2320,7 +2334,7 @@ function renderSessionList(): void {
 
   const collapseAllBtn = document.createElement('button');
   collapseAllBtn.className = 'nav-section-action';
-  collapseAllBtn.textContent = '≡'; // collapse-all glyph
+  collapseAllBtn.innerHTML = ICON.collapse;
   collapseAllBtn.title = 'Collapse all';
   collapseAllBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -2332,7 +2346,7 @@ function renderSessionList(): void {
 
   const refreshBtn = document.createElement('button');
   refreshBtn.className = 'nav-section-action';
-  refreshBtn.textContent = '↻';
+  refreshBtn.innerHTML = ICON.refresh;
   refreshBtn.title = 'Refresh projects';
   refreshBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -2341,7 +2355,7 @@ function renderSessionList(): void {
 
   const addBtn = document.createElement('button');
   addBtn.className = 'nav-section-action';
-  addBtn.textContent = '+';
+  addBtn.innerHTML = ICON.plus;
   addBtn.title = 'Add project';
   addBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -3283,30 +3297,6 @@ document.addEventListener('mouseup', () => {
 
 fileTreeRefreshBtn.addEventListener('click', () => { void refreshFileTree(true); });
 
-// Switch-directory button: view any directory's history without first creating a session
-fileTreePickBtn.addEventListener('click', () => {
-  void (async () => {
-    const dir = await window.posse.selectFolder(currentCwd);
-    if (dir) {
-      currentCwd = dir;
-      addRecentCwd(dir);
-      fileTreeChildrenCache.clear();
-      await renderFileTree();
-    }
-  })();
-});
-
-// Open-directory button
-fileTreeOpenBtn.addEventListener('click', () => {
-  const activeId = termManager.getActiveId();
-  if (activeId) {
-    const cwd = sessionCwds.get(activeId);
-    if (cwd) {
-      window.posse.openFolder(cwd);
-    }
-  }
-});
-
 // Directory auto-refresh - refresh every 30 seconds
 let fileTreeAutoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 function startFileTreeAutoRefresh(): void {
@@ -3384,7 +3374,6 @@ function closeNewSessionDialog(): void {
   themeSelect.classList.remove('open');
 }
 
-toolbarNewBtn.addEventListener('click', () => { openNewSessionDialog(); });
 toolbarTerminalClientBtn.addEventListener('click', async () => {
   const url = await window.posse.getTerminalClientUrl();
   await window.posse.openUrl(url);

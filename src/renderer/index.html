@@ -22,11 +22,11 @@
         <div class="new-session-row">
           <div id="cwd-wrapper">
             <input id="cwd-input" type="text" placeholder="Enter a path or click Browse..." />
-            <button id="cwd-recent-btn" class="cwd-recent-toggle" title="Recent directories">&#9660;</button>
+            <button id="cwd-recent-btn" class="cwd-recent-toggle" title="Recent directories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button>
             <div id="cwd-recent-dropdown" class="cwd-recent-dropdown"></div>
           </div>
           <button id="cwd-browse-btn" class="toolbar-btn">Browse</button>
-          <button id="cwd-open-btn" class="toolbar-icon-btn" title="Reveal in Finder">&#128193;</button>
+          <button id="cwd-open-btn" class="toolbar-icon-btn" title="Reveal in Finder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg></button>
         </div>
 
         <label>CLI</label>
@@ -38,7 +38,7 @@
             <option value="copilot --allow-all --autopilot">Copilot (auto)</option>
           </select>
           <button id="preset-add-btn" class="toolbar-icon-btn" title="New custom CLI preset">+</button>
-          <button id="preset-manage-btn" class="toolbar-icon-btn" title="Manage custom presets">&#9881;</button>
+          <button id="preset-manage-btn" class="toolbar-icon-btn" title="Manage custom presets"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
         </div>
 
         <label>Color Scheme</label>
@@ -115,9 +115,12 @@
 
     <div id="sidebar">
       <div id="sidebar-topbar">
-        <button id="toolbar-new-btn" class="toolbar-btn">+ New Terminal</button>
-        <button id="toolbar-terminal-client-btn" class="toolbar-btn secondary">Standalone Terminal</button>
-        <button id="toolbar-restart-daemon-btn" class="toolbar-btn secondary" title="Gracefully restart the background terminal daemon (live sessions are saved as resumable)">Restart daemon</button>
+        <button id="toolbar-terminal-client-btn" class="topbar-icon-btn" title="Open standalone terminal window">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></svg>
+        </button>
+        <button id="toolbar-restart-daemon-btn" class="topbar-icon-btn" title="Restart the background terminal daemon (live sessions are saved as resumable)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
       </div>
       <!-- Remote server connection info -->
       <div id="remote-server-info" class="remote-server-info" style="display: none;">
@@ -155,8 +158,8 @@
         <div id="file-preview-header">
           <span id="file-preview-name" class="file-preview-name">File Preview</span>
           <span id="file-preview-meta" class="file-preview-meta"></span>
-          <button id="file-preview-external" class="toolbar-icon-btn" title="Open in external editor">&#8599;</button>
-          <button id="file-preview-close" class="toolbar-icon-btn" title="Close preview">&times;</button>
+          <button id="file-preview-external" class="toolbar-icon-btn" title="Open in external editor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></button>
+          <button id="file-preview-close" class="toolbar-icon-btn" title="Close preview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
         </div>
         <div id="file-preview-body"></div>
       </div>
@@ -166,7 +169,7 @@
         </div>
       </div>
       <div id="file-statusbar">
-        <span id="file-statusbar-icon">&#9998;</span>
+        <span id="file-statusbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>
         <div id="file-statusbar-files">
           <span class="file-statusbar-placeholder">Waiting for file changes...</span>
         </div>
@@ -178,10 +181,8 @@
 
     <div id="file-tree-panel">
       <div id="file-tree-header">
-        <button id="file-tree-open-btn" class="toolbar-icon-btn" title="Reveal in Finder">&#128193;</button>
-        <button id="file-tree-pick-btn" class="toolbar-icon-btn" title="Switch directory">&#128194;</button>
         <span id="file-tree-path">Directory</span>
-        <button id="file-tree-refresh-btn" class="toolbar-icon-btn" title="Refresh directory">&#8635;</button>
+        <button id="file-tree-refresh-btn" class="toolbar-icon-btn" title="Refresh directory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
       </div>
       <div id="file-tree-list">
         <div class="file-tree-empty">Select a session to show the current directory</div>

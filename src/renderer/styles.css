@@ -328,19 +328,9 @@ html, body {
 }
 
 #sidebar-topbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-#toolbar-new-btn,
-#toolbar-terminal-client-btn {
-  text-align: center;
-  flex-shrink: 0;
-}
-
-#toolbar-terminal-client-btn {
-  padding: 0 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 /* New terminal dialog */
@@ -452,6 +442,46 @@ html, body {
   color: var(--text-primary);
 }
 
+/* Compact square icon button for the sidebar topbar */
+.topbar-icon-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.topbar-icon-btn:hover {
+  background: var(--hover-bg);
+  border-color: var(--accent, var(--accent-green));
+  color: var(--text-primary);
+}
+
+/* Inline SVG icon sizing — all icon buttons inherit text color */
+.toolbar-icon-btn svg,
+.topbar-icon-btn svg,
+.nav-section-action svg,
+.nav-project-action svg,
+.file-tree-arrow svg,
+.file-tree-open-folder svg,
+.nav-project-icon svg,
+#file-statusbar-icon svg { width: 16px; height: 16px; display: block; }
+.nav-section-action svg,
+.nav-project-action svg { width: 15px; height: 15px; }
+.file-tree-arrow svg { width: 14px; height: 14px; }
+.nav-project-icon svg { width: 15px; height: 15px; }
+#file-statusbar-icon svg { width: 13px; height: 13px; }
+
+/* Chevron rotation: collapsed points right, expanded points down */
+.file-tree-arrow svg { transition: transform 0.12s ease; }
+.file-tree-arrow.expanded svg { transform: rotate(90deg); }
+
 /* Main layout */
 #main {
   display: flex;
@@ -542,6 +572,9 @@ html, body {
   text-align: center;
   font-size: 11px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .file-tree-name {
@@ -664,7 +697,7 @@ html, body {
 .terminal-container {
   position: absolute;
   inset: 0;
-  padding: 4px;
+  padding: 8px 4px 8px 12px;
   display: none;
 }
 
@@ -678,6 +711,25 @@ html, body {
 
 .terminal-container .xterm-viewport {
   overflow-y: auto !important;
+}
+
+/* Thin, translucent terminal scrollbar so it doesn't cover the text column */
+.terminal-container .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+.terminal-container .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.6);
+  background-clip: padding-box;
+  border: 2px solid transparent;
 }
 
 .terminal-container .xterm-screen {
