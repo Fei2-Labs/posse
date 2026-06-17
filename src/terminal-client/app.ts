@@ -568,6 +568,16 @@ window.addEventListener('resize', () => {
   if (instance) void resizeSession(activeSessionId, instance);
 });
 
+// Keep the active terminal fitted whenever the stage box changes size
+if (typeof ResizeObserver !== 'undefined') {
+  const stageObserver = new ResizeObserver(() => {
+    if (!activeSessionId) return;
+    const instance = terminals.get(activeSessionId);
+    if (instance) void resizeSession(activeSessionId, instance);
+  });
+  stageObserver.observe(terminalStageEl);
+}
+
 async function main(): Promise<void> {
   try {
     initThemePicker();
