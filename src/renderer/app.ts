@@ -15,6 +15,7 @@ type PtySessionInfo = {
   provider?: string | null;
   rawBuffer?: string;
   agentSessionId?: string | null;
+  resumeId?: string | null;
 };
 
 declare global {
@@ -274,9 +275,12 @@ async function syncSessionAgentIds(): Promise<void> {
   try {
     const sessions = await window.posse.getSessions();
     for (const s of sessions) {
-      if (s.agentSessionId) {
-        sessionAgentId.set(s.id, s.agentSessionId);
-        sessionResumeId.set(s.id, s.agentSessionId);
+      // Resumed sessions keep agentSessionId empty (the post-spawn scan finds no NEW
+      // file) but DO carry resumeId — fall back to it so dedup still matches.
+      const uuid = s.agentSessionId || s.resumeId;
+      if (uuid) {
+        sessionAgentId.set(s.id, uuid);
+        sessionResumeId.set(s.id, uuid);
       }
     }
   } catch {
@@ -2612,9 +2616,10 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   sessionCwds.set(info.id, info.cwd);
   sessionDisplayNames.set(info.id, info.displayName);
   if (info.provider) sessionProviders.set(info.id, info.provider);
-  if (info.agentSessionId) {
-    sessionAgentId.set(info.id, info.agentSessionId);
-    sessionResumeId.set(info.id, info.agentSessionId);
+  const attachUuid = info.agentSessionId || info.resumeId;
+  if (attachUuid) {
+    sessionAgentId.set(info.id, attachUuid);
+    sessionResumeId.set(info.id, attachUuid);
   }
   termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithAutoReset(info.id, data); });
   if (replayRawBuffer && info.rawBuffer) {
@@ -2658,15 +2663,24 @@ function isMeaningfulTitle(t: string | undefined | null): boolean {
   return !placeholders.has(trimmed);
 }
 
+// Find a live PTY already bound to this agent-session uuid (checks both maps;
+// resumed sessions land in sessionResumeId via resumeId fallback). Returns ptyId or null.
+function findLivePtyForUuid(uuid: string): string | null {
+  if (!uuid) return null;
+  for (const [ptyId, agentId] of sessionAgentId) {
+    if (agentId === uuid && sessionTitles.has(ptyId)) return ptyId;
+  }
+  for (const [ptyId, rid] of sessionResumeId) {
+    if (rid === uuid && sessionTitles.has(ptyId)) return ptyId;
+  }
+  return null;
+}
+
 async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   // If this agent conversation is already open as a live PTY, just focus it — never spawn a duplicate.
   if (cs.resumeId) {
-    for (const [ptyId, agentId] of sessionAgentId) {
-      if (agentId === cs.resumeId && sessionTitles.has(ptyId)) {
-        switchSession(ptyId);
-        return;
-      }
-    }
+    const existing = findLivePtyForUuid(cs.resumeId);
+    if (existing) { switchSession(existing); return; }
   }
 
   const cwd = cs.cwd || sessionCwds.get(termManager.getActiveId() || '') || '';
@@ -2747,12 +2761,8 @@ async function loadClaudeHistory(cwd: string): Promise<void> {
 // One-click resume of a native agent history session (Claude / Codex)
 async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   // If this on-disk session is already open as a live PTY, just focus it — never spawn a duplicate.
-  for (const [ptyId, agentId] of sessionAgentId) {
-    if (agentId === s.id && sessionTitles.has(ptyId)) {
-      switchSession(ptyId);
-      return;
-    }
-  }
+  const existing = findLivePtyForUuid(s.id);
+  if (existing) { switchSession(existing); return; }
 
   // Validate the on-disk session exists in this cwd before resuming, else warn
   // instead of silently launching a fresh empty session.
