@@ -130,6 +130,21 @@ function encodeClaudeProjectDir(cwd: string): string {
   return path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
+// Snapshot every claude session uuid that ALREADY exists on disk for this cwd. Called
+// synchronously at spawn time for fresh runs; the deferred rescan then skips these so a
+// fresh `claude` can only ever bind to a file it created itself. Best-effort, never throws.
+function snapshotExistingClaudeSessionUuids(cwd: string): Set<string> {
+  const set = new Set<string>();
+  try {
+    const dir = path.join(os.homedir(), '.claude', 'projects', encodeClaudeProjectDir(cwd));
+    if (!fs.existsSync(dir)) return set;
+    for (const name of fs.readdirSync(dir)) {
+      if (name.endsWith('.jsonl')) set.add(name.replace(/\.jsonl$/, ''));
+    }
+  } catch { /* best-effort */ }
+  return set;
+}
+
 // Best-effort: propagate a user rename into Claude's own session file so Claude's
 // session list/resume shows the same title. Claude stores a rename as two appended
 // JSONL lines: a `custom-title` line and an `agent-name` line.
@@ -201,6 +216,10 @@ function findAgentSessionIdOnDisk(
   cwd: string,
   spawnedAt: number,
   excludeUuids?: Set<string>,
+  // Uuids of session files that ALREADY existed at spawn time. A fresh run can only ever
+  // own a file IT created, so any pre-existing uuid is skipped — this is a deterministic
+  // guard independent of birthtime/mtime reliability.
+  preexistingUuids?: Set<string>,
 ): string | null {
   // Allow a small clock skew window: accept files touched a little before the recorded spawn time.
   const minMtime = spawnedAt - 5000;
@@ -213,6 +232,10 @@ function findAgentSessionIdOnDisk(
         if (!name.endsWith('.jsonl')) continue;
         const uuid = name.replace(/\.jsonl$/, '');
         if (excludeUuids?.has(uuid)) continue;
+        // A fresh run must never bind to a file that already existed at spawn (i.e. another
+        // session's file). This snapshot-based skip is the primary guard; the created/mtime
+        // checks below are kept as defense in depth.
+        if (preexistingUuids?.has(uuid)) continue;
         try {
           const st = fs.statSync(path.join(dir, name));
           if (!st.isFile()) continue;
@@ -629,6 +652,14 @@ export class PtyManager {
       const agent = agentKindFromCommand(presetCommand);
       if (agent === 'claude' || agent === 'codex') {
         const spawnedAt = Date.now();
+        // Synchronously snapshot the session files that already exist for this agent+cwd,
+        // BEFORE the fresh run has a chance to write its own. The deferred rescan skips
+        // these so a fresh `claude` can only bind to a file born after spawn — deterministic,
+        // independent of birthtime/mtime reliability. (Claude is the hardened path; codex
+        // still relies on the existing exclude/mtime logic via an empty snapshot.)
+        const preexisting = agent === 'claude'
+          ? snapshotExistingClaudeSessionUuids(cwd)
+          : new Set<string>();
         const attempts = [2500, 6000, 12000];
         for (const delay of attempts) {
           setTimeout(() => {
@@ -642,7 +673,7 @@ export class PtyManager {
               if (other.agentSessionId) exclude.add(other.agentSessionId);
               if (other.resumeId) exclude.add(other.resumeId);
             }
-            const found = findAgentSessionIdOnDisk(agent, cwd, spawnedAt, exclude);
+            const found = findAgentSessionIdOnDisk(agent, cwd, spawnedAt, exclude, preexisting);
             if (found) live.agentSessionId = found;
           }, delay);
         }
