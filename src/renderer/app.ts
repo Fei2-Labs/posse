@@ -2626,6 +2626,18 @@ async function verifyResumableSession(agent: string, cwd: string, sessionId: str
 }
 
 // Resume a closed session
+// A title is "meaningful" (worth locking on the daemon) when it is a real, user-recognizable
+// label — not empty, not a generic placeholder, and not Claude's replayed "Caveat:" preamble
+// (which the daemon's title-ai would otherwise pick up from the resumed buffer).
+function isMeaningfulTitle(t: string | undefined | null): boolean {
+  if (!t) return false;
+  const trimmed = t.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('Caveat:')) return false;
+  const placeholders = new Set(['New session', 'New conversation', 'Terminal']);
+  return !placeholders.has(trimmed);
+}
+
 async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   // If this agent conversation is already open as a live PTY, just focus it — never spawn a duplicate.
   if (cs.resumeId) {
@@ -2673,6 +2685,11 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   attachPtySession({ ...result, title: cs.title, displayName: restoredDisplayName }, now);
   // Record the correlation so a future click on this same conversation dedups to this live PTY.
   if (cs.resumeId) sessionAgentId.set(result.id, cs.resumeId);
+  // For a true resume, lock the known-good title on the daemon so its title-ai cannot
+  // overwrite it from the replayed buffer (which starts with Claude's "Caveat:" preamble).
+  if (cs.resumeId && isMeaningfulTitle(cs.title)) {
+    window.posse.renamePty(result.id, cs.title);
+  }
   if (cwd) { selectedProjectPath = cwd; setProjectExpanded(normalizeCwd(cwd), true); }
 
   // Remove from the closed list
@@ -2734,6 +2751,11 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   // Record the correlation immediately (we launched via a resume command for s.id) so a second
   // click focuses this session and the history row dedups right away.
   sessionAgentId.set(result.id, s.id);
+  // Lock the known-good history title on the daemon so its title-ai cannot overwrite it from
+  // the replayed buffer (which starts with Claude's "Caveat:" preamble).
+  if (isMeaningfulTitle(s.title)) {
+    window.posse.renamePty(result.id, s.title);
+  }
   if (s.cwd) { selectedProjectPath = s.cwd; setProjectExpanded(normalizeCwd(s.cwd), true); }
 
   updateEmptyState();
