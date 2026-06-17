@@ -1906,6 +1906,18 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   dot.className = 'nav-session-dot';
   dot.style.backgroundColor = sessionStatusColor(id);
 
+  // Agent label is derivable up-front from the best-available signal: runtime provider (if the
+  // session has already run + been detected) else the displayName (which for a restored session is
+  // the raw "claude --resume <uuid>" command — agentFamilyFromDisplayName detects 'claude' in it).
+  // This makes a just-restored session show its agent BEFORE the user clicks it.
+  const liveSignal = sessionProviders.get(id) || sessionDisplayNames.get(id) || '';
+  const agentLabel = agentFamilyFromDisplayName(liveSignal);
+  const agentBadge = document.createElement('span');
+  agentBadge.className = 'nav-session-agent';
+  agentBadge.textContent = agentLabel;
+  const [agentBg] = getCliTagColors(agentLabel);
+  agentBadge.style.color = agentBg;
+
   const titleSpan = document.createElement('span');
   titleSpan.className = 'nav-session-title';
   titleSpan.textContent = title || 'Terminal';
@@ -1932,6 +1944,7 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   if (isPinned) item.classList.add('pinned');
 
   item.appendChild(dot);
+  item.appendChild(agentBadge);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
   item.appendChild(editBtn);
@@ -1954,6 +1967,13 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   const dot = document.createElement('span');
   dot.className = 'nav-session-dot';
   dot.style.backgroundColor = '#555';
+
+  const csAgentLabel = agentFamilyFromDisplayName(cs.displayName || cs.presetCommand || cs.resumeCommand || '');
+  const agentBadge = document.createElement('span');
+  agentBadge.className = 'nav-session-agent';
+  agentBadge.textContent = csAgentLabel;
+  const [csAgentBg] = getCliTagColors(csAgentLabel);
+  agentBadge.style.color = csAgentBg;
 
   const titleSpan = document.createElement('span');
   titleSpan.className = 'nav-session-title';
@@ -1981,6 +2001,7 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   });
 
   item.appendChild(dot);
+  item.appendChild(agentBadge);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
   item.appendChild(resumeBtn);
@@ -1998,6 +2019,13 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   dot.className = 'nav-session-dot';
   dot.style.backgroundColor = '#d9775788';
 
+  const histAgentLabel = agentFamilyFromDisplayName(s.agent || s.resumeCommand || '');
+  const agentBadge = document.createElement('span');
+  agentBadge.className = 'nav-session-agent';
+  agentBadge.textContent = histAgentLabel;
+  const [histAgentBg] = getCliTagColors(histAgentLabel);
+  agentBadge.style.color = histAgentBg;
+
   const titleSpan = document.createElement('span');
   titleSpan.className = 'nav-session-title';
   titleSpan.textContent = s.title || s.id;
@@ -2014,6 +2042,7 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void resumeAgentSession(s); });
 
   item.appendChild(dot);
+  item.appendChild(agentBadge);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
   item.appendChild(resumeBtn);
@@ -2665,7 +2694,12 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
 
   const result = await window.posse.createPty(cwd, command, themeId);
   const now = Date.now();
-  attachPtySession({ ...result, title: cs.title, displayName: cs.displayName || result.displayName }, now);
+  // Pick a displayName that always carries the agent name so the rail shows the agent immediately,
+  // before runtime provider detection: prefer the captured displayName, else the spawned command's
+  // displayName, else the resume/preset command (which contains 'claude'/'codex'/...).
+  const restoredDisplayName =
+    cs.displayName || result.displayName || command || cs.resumeCommand || cs.presetCommand || '';
+  attachPtySession({ ...result, title: cs.title, displayName: restoredDisplayName }, now);
   // Record the correlation so a future click on this same conversation dedups to this live PTY.
   if (cs.resumeId) sessionAgentId.set(result.id, cs.resumeId);
   if (cwd) { selectedProjectPath = cwd; setProjectExpanded(normalizeCwd(cwd), true); }
@@ -2722,7 +2756,10 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   const themeId = resolveThemeId(currentThemeId, s.cwd);
   const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId);
   const now = Date.now();
-  attachPtySession({ ...result, title: s.title || result.title }, now);
+  // Ensure the rail shows the agent immediately: fall back to the resume command (contains the agent
+  // name) / s.agent if the spawned displayName is missing, before runtime provider detection.
+  const resumedDisplayName = result.displayName || s.resumeCommand || s.agent || '';
+  attachPtySession({ ...result, title: s.title || result.title, displayName: resumedDisplayName }, now);
   // Record the correlation immediately (we launched via a resume command for s.id) so a second
   // click focuses this session and the history row dedups right away.
   sessionAgentId.set(result.id, s.id);

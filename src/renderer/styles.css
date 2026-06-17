@@ -1037,6 +1037,15 @@ html, body {
   flex-shrink: 0;
 }
 
+.nav-session-agent {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.9;
+}
+
 .nav-session-title {
   flex: 1;
   min-width: 0;
