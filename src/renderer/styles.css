@@ -725,7 +725,9 @@ html, body {
 .terminal-container {
   position: absolute;
   inset: 0;
-  padding: 12px 16px 12px 18px;
+  /* No right padding: the scrollbar sits flush at the right edge. The text gutter
+     is provided by .xterm's padding-right below, so text still clears the scrollbar. */
+  padding: 12px 0 12px 18px;
   display: none;
 }
 
