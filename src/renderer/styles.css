@@ -739,7 +739,6 @@ html, body {
 
 .terminal-container .xterm-viewport {
   overflow-y: scroll !important;
-  scrollbar-gutter: stable;
 }
 
 /* Thin, translucent terminal scrollbar so it doesn't cover the text column */
