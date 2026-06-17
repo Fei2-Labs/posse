@@ -3946,7 +3946,14 @@ window.posse.getBuildInfo().then((info) => {
     const theme = THEMES.find((t) => t.id === id) || THEMES[0];
     const root = document.documentElement.style;
     for (const [k, v] of Object.entries(theme.vars)) root.setProperty(k, v);
-    try { termManager.setBackgroundColor(theme.vars['--bg-primary']); } catch { /* terminals may not exist yet */ }
+    try {
+      termManager.setTerminalColors({
+        background: theme.vars['--bg-primary'],
+        foreground: theme.vars['--text-primary'],
+        cursor: theme.vars['--accent'],
+        selectionBackground: theme.vars['--row-selected'],
+      });
+    } catch { /* terminals may not exist yet */ }
     try { localStorage.setItem(KEY, theme.id); } catch { /* ignore */ }
     if (select && select.value !== theme.id) select.value = theme.id;
   };

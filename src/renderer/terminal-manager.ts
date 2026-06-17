@@ -413,9 +413,16 @@ export class TerminalManager {
   }
 
   create(id: string, themeId: string, cwd: string, onData: (data: string) => void): void {
-    const moodBg = getComputedStyle(document.documentElement).getPropertyValue('--bg-primary').trim();
+    const cs = getComputedStyle(document.documentElement);
+    const moodBg = cs.getPropertyValue('--bg-primary').trim();
+    const moodFg = cs.getPropertyValue('--text-primary').trim();
+    const moodCursor = cs.getPropertyValue('--accent').trim();
+    const moodSel = cs.getPropertyValue('--row-selected').trim();
     const theme = { ...(THEMES[themeId] || THEMES['vscode-dark']) };
     if (moodBg) theme.background = moodBg;
+    if (moodFg) theme.foreground = moodFg;
+    if (moodCursor) theme.cursor = moodCursor;
+    if (moodSel) theme.selectionBackground = moodSel;
     const terminal = new Terminal({
       theme,
       fontSize: 14,
@@ -644,10 +651,14 @@ export class TerminalManager {
     return this.activeId;
   }
 
-  setBackgroundColor(bg: string): void {
-    if (!bg) return;
+  setTerminalColors(colors: { background?: string; foreground?: string; cursor?: string; selectionBackground?: string }): void {
     for (const inst of this.instances.values()) {
-      inst.terminal.options.theme = { ...inst.terminal.options.theme, background: bg };
+      const next = { ...inst.terminal.options.theme };
+      if (colors.background) next.background = colors.background;
+      if (colors.foreground) next.foreground = colors.foreground;
+      if (colors.cursor) next.cursor = colors.cursor;
+      if (colors.selectionBackground) next.selectionBackground = colors.selectionBackground;
+      inst.terminal.options.theme = next;
     }
   }
 
