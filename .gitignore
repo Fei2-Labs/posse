@@ -5,6 +5,7 @@ node_modules
 # Build output
 dist/
 release/
+src/main/build-stamp.json
 
 # OS files
 .DS_Store

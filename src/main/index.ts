@@ -11,6 +11,7 @@ import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecent
 import { CloudflaredManager } from './cloudflared-manager';
 import { ChatSessionManager } from './chat-session-manager';
 import { WindsurfProxyManager } from './windsurf-proxy-manager';
+import buildStamp from './build-stamp.json';
 
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
 
@@ -1922,6 +1923,14 @@ function registerIPC(): void {
   });
 
   ipcMain.handle('app:get-version', () => app.getVersion());
+  ipcMain.handle('app:get-build-info', () => ({
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    sha: buildStamp.sha,
+    branch: buildStamp.branch,
+    dirty: buildStamp.dirty,
+    builtAt: buildStamp.builtAt,
+  }));
   ipcMain.handle('terminal-client:get-url', () => getTerminalClientUrl());
 
   // ========== AI config IPC ==========

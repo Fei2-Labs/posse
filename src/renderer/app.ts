@@ -77,6 +77,7 @@ declare global {
       openFolder: (folderPath: string) => Promise<void>;
       openUrl: (url: string) => Promise<void>;
       getAppVersion: () => Promise<string>;
+      getBuildInfo: () => Promise<{ version: string; packaged: boolean; sha: string; branch: string; dirty: boolean; builtAt: string }>;
       getTerminalClientUrl: () => Promise<string>;
       onFileChange: (cb: (filename: string, eventType: string) => void) => void;
       // AI config API
@@ -3881,8 +3882,18 @@ document.getElementById('footer-github')!.addEventListener('click', (e) => {
   window.posse.openUrl('https://github.com/saddism/DuoCLI');
 });
 
-window.posse.getAppVersion().then((version) => {
-  appVersionEl.textContent = `v${version}`;
+const appBuildEl = document.getElementById('app-build');
+window.posse.getBuildInfo().then((info) => {
+  appVersionEl.textContent = `v${info.version} ${info.packaged ? '(release)' : '(dev)'}`;
+  if (appBuildEl) {
+    let when = info.builtAt;
+    try {
+      const d = new Date(info.builtAt);
+      const p = (n: number) => String(n).padStart(2, '0');
+      when = `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    } catch { /* keep ISO */ }
+    appBuildEl.textContent = `${info.sha}${info.dirty ? '*' : ''} · ${when}`;
+  }
 }).catch(() => {
   appVersionEl.textContent = 'v?';
 });
