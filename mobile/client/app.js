@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v16';
+const CLIENT_BUILD = 'posse-v19';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -42,7 +42,9 @@ const chatHelpers = globalThis.DuoChatHelpers || {
       const message = payload && typeof payload.error === 'string' && payload.error.trim()
         ? payload.error.trim()
         : `请求失败 (${status})`;
-      throw new Error(message);
+      const err = new Error(message);
+      err.status = status;
+      throw err;
     }
     return payload;
   },
@@ -935,7 +937,12 @@ async function refreshRecentCwdOptions() {
   }
 }
 
+// Cache of the most recent live-session array so handlers (e.g. dropping a dead
+// card on a not-found open) can re-render without an extra fetch.
+let lastSessions = [];
+
 function renderSessionList(sessions) {
+  lastSessions = Array.isArray(sessions) ? sessions : [];
   const list = $('session-list');
   const empty = $('empty-state');
 
@@ -1133,35 +1140,43 @@ function createTerminal() {
         markUserScrolling();
       });
 
+      // 测量实际行高（像素 → 行数换算用），取不到时退回到经验值 17px
+      const getCellHeight = () => {
+        const rows = container.querySelector('.xterm-rows');
+        const h = rows && rows.children[0] ? rows.children[0].getBoundingClientRect().height : 0;
+        return h > 0 ? h : 17;
+      };
+
       let touchLastY = 0;
       let touchActive = false;
+      let touchAccum = 0;
       const onTouchStart = (e) => {
         if (e.touches.length !== 1) { touchActive = false; return; }
         touchLastY = e.touches[0].clientY;
+        touchAccum = 0;
         touchActive = true;
       };
       const onTouchMove = (e) => {
-        if (!touchActive || !viewport || e.touches.length !== 1) return;
+        if (!touchActive || e.touches.length !== 1) return;
         const currentY = e.touches[0].clientY;
         const deltaY = touchLastY - currentY;
+        touchLastY = currentY;
         if (deltaY === 0) return;
-        const before = viewport.scrollTop;
-        const max = viewport.scrollHeight - viewport.clientHeight;
-        const next = Math.max(0, Math.min(max, before + deltaY));
-        if (next !== before) {
-          viewport.scrollTop = next;
-          touchLastY = currentY;
+        // 直接操作 xterm 视口（scrollLines），避免 viewport.scrollTop 被 xterm 渲染时回弹
+        // 手指下滑 currentY>touchLastY → deltaY<0 → lines<0 → 向上看更早的内容
+        const cellH = getCellHeight();
+        touchAccum += deltaY;
+        const lines = Math.trunc(touchAccum / cellH);
+        if (lines !== 0) {
+          touchAccum -= lines * cellH;
+          term.scrollLines(lines);
           markUserScrolling();
-          // 仅在确实滚动时阻止页面滚动，到顶/到底时让浏览器接管（避免卡死）
           if (e.cancelable) e.preventDefault();
-        } else {
-          // 到达边界，更新基准点避免反向滑动需要先抵消累计量
-          touchLastY = currentY;
         }
       };
       const onTouchEnd = () => {
         touchActive = false;
-        if (term && isAtBottom()) isUserScrolling = false;
+        if (term && viewport && viewport.scrollTop >= (viewport.scrollHeight - viewport.clientHeight - 2)) isUserScrolling = false;
       };
 
       // screen 必须监听（用户手指实际接触的层），viewport 也监听以兜底滚动条区域
@@ -1180,6 +1195,7 @@ function createTerminal() {
         container.dataset.scrollFallbackBound = '1';
         let fbLastY = 0;
         let fbActive = false;
+        let fbAccum = 0;
         const isHandledByInner = (e) => {
           const t = e.target;
           if (!t || !t.closest) return false;
@@ -1189,30 +1205,30 @@ function createTerminal() {
           if (isHandledByInner(e)) { fbActive = false; return; }
           if (e.touches.length !== 1) { fbActive = false; return; }
           fbLastY = e.touches[0].clientY;
+          fbAccum = 0;
           fbActive = true;
         }, { passive: true });
         container.addEventListener('touchmove', (e) => {
           if (!fbActive || !term || e.touches.length !== 1) return;
           if (isHandledByInner(e)) return;
-          if (!viewport) return;
           const currentY = e.touches[0].clientY;
           const deltaY = fbLastY - currentY;
+          fbLastY = currentY;
           if (deltaY === 0) return;
-          const before = viewport.scrollTop;
-          const max = viewport.scrollHeight - viewport.clientHeight;
-          const next = Math.max(0, Math.min(max, before + deltaY));
-          if (next !== before) {
-            viewport.scrollTop = next;
-            fbLastY = currentY;
+          // 同上：用 scrollLines 滚动 xterm 视口，避免 scrollTop 回弹
+          const cellH = getCellHeight();
+          fbAccum += deltaY;
+          const lines = Math.trunc(fbAccum / cellH);
+          if (lines !== 0) {
+            fbAccum -= lines * cellH;
+            term.scrollLines(lines);
             markUserScrolling();
             if (e.cancelable) e.preventDefault();
-          } else {
-            fbLastY = currentY;
           }
         }, { passive: false });
         const fbEnd = () => {
           fbActive = false;
-          if (term && isAtBottom()) isUserScrolling = false;
+          if (term && viewport && viewport.scrollTop >= (viewport.scrollHeight - viewport.clientHeight - 2)) isUserScrolling = false;
         };
         container.addEventListener('touchend', fbEnd, { passive: true });
         container.addEventListener('touchcancel', fbEnd, { passive: true });
@@ -1645,6 +1661,25 @@ function wsSend(data) {
 
 async function openSession(id) {
   console.log('[openSession] start, id=', id);
+
+  // 定向校验：打开前确认该 live 会话仍存在。若服务端已无此会话（且不可恢复），
+  // 说明这是一张失效的死卡片——移除它并提示，避免进入一个永远连不上的终端。
+  // 失败安全：只有在服务端明确返回会话列表且其中没有该 id 时才移除；
+  // 网络/超时等不确定情况一律放行（不删卡）。
+  try {
+    const sessions = await api('/api/sessions');
+    if (Array.isArray(sessions) && !sessions.find(x => x.id === id)) {
+      console.warn('[openSession] session no longer exists, removing dead card:', id);
+      lastSessions = sessions.filter(x => x.id !== id);
+      renderSessionList(lastSessions);
+      showCopyToast('会话已不存在，已从列表移除');
+      return;
+    }
+  } catch (e) {
+    // 不确定会话是否存在（网络/超时）→ 不删卡，继续按原流程打开
+    console.warn('[openSession] existence check failed, opening anyway', e);
+  }
+
   currentSessionId = id;
   showPage('detail-page');
 

@@ -190,6 +190,10 @@ type ClaudeHistorySession = { id: string; title: string; cwd: string; mtimeMs: n
 let claudeHistorySessions: ClaudeHistorySession[] = [];
 let claudeHistoryCollapsed = false;
 let claudeHistoryCwd = '';
+// Canonical keys of history sessions confirmed gone (resume → not-found). The backend
+// projects:list still lists them until the agent prunes its on-disk index, so suppress
+// them in collectProjectSessions so the dead row does not reappear on the next render.
+const removedHistoryKeys = new Set<string>();
 
 // ========== Project navigator (Codex-style) ==========
 interface ProjectEntry {
@@ -2238,6 +2242,8 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
       for (const s of agentGroup.sessions) {
         // Dedup: skip if this on-disk session is already shown as a live PTY or a closed record.
         if (shownUuids.has(conversationKey(s.id)) || openAgentIds.has(conversationKey(s.id))) continue;
+        // Skip rows confirmed gone by a failed resume (not-found), so the dead row does not reappear.
+        if (removedHistoryKeys.has(conversationKey(s.id))) continue;
         shownUuids.add(conversationKey(s.id));
         g.history.push({
           id: s.id,
@@ -2784,6 +2790,29 @@ function parseResumeCommand(cmd: string): { agent: string; id: string } | null {
   return null;
 }
 
+// Brief, non-blocking inline notice (bottom-center). Auto-dismisses; used for
+// fail-safe events like "this session no longer exists, removed from the list".
+let staleToastEl: HTMLDivElement | null = null;
+let staleToastTimer: number | null = null;
+function showBriefNotice(message: string): void {
+  if (!staleToastEl) {
+    staleToastEl = document.createElement('div');
+    staleToastEl.style.cssText =
+      'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);' +
+      'max-width:80vw;padding:8px 14px;border-radius:8px;z-index:99999;' +
+      'background:rgba(30,30,30,0.92);color:#eee;font-size:13px;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,0.4);pointer-events:none;' +
+      'transition:opacity 0.2s;opacity:0;';
+    document.body.appendChild(staleToastEl);
+  }
+  staleToastEl.textContent = message;
+  staleToastEl.style.opacity = '1';
+  if (staleToastTimer !== null) clearTimeout(staleToastTimer);
+  staleToastTimer = window.setTimeout(() => {
+    if (staleToastEl) staleToastEl.style.opacity = '0';
+  }, 3200);
+}
+
 // Returns true if the session is resumable in cwd, OR if it can't be verified
 // (fail-open). Only returns false when the agent confirms the session is absent.
 async function verifyResumableSession(agent: string, cwd: string, sessionId: string): Promise<boolean> {
@@ -2848,7 +2877,12 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
     // instead of silently spawning a fresh empty session.
     const parsed = parseResumeCommand(command);
     if (parsed && !(await verifyResumableSession(parsed.agent, cwd, parsed.id))) {
-      window.alert(`Cannot resume: session ${parsed.id} not found in ${cwd}. It may have been created in a different folder.`);
+      // Definitive not-found: the backing conversation no longer exists. Drop the
+      // dead row from the closed list + store instead of leaving it around.
+      console.warn(`[posse] Closed session ${cs.id} (resume ${parsed.id}) no longer exists in ${cwd}; removing row.`);
+      try { closedSessions = await window.posse.closedSessionsRemove(cs.id); } catch { /* ignore */ }
+      renderSessionList();
+      showBriefNotice('Session no longer exists — removed from the list.');
       return;
     }
   } else {
@@ -2915,7 +2949,13 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   // Validate the on-disk session exists in this cwd before resuming, else warn
   // instead of silently launching a fresh empty session.
   if (!(await verifyResumableSession(s.agent, s.cwd, s.id))) {
-    window.alert(`Cannot resume: session ${s.id} not found in ${s.cwd}. It may have been created in a different folder.`);
+    // Definitive not-found: drop this id from the history cache so the dead row
+    // disappears instead of being clickable into a failing resume.
+    console.warn(`[posse] History session ${s.id} no longer exists in ${s.cwd}; removing row.`);
+    claudeHistorySessions = claudeHistorySessions.filter(h => h.id !== s.id);
+    removedHistoryKeys.add(conversationKey(s.id));
+    renderSessionList();
+    showBriefNotice('Session no longer exists — removed from the list.');
     return;
   }
 
