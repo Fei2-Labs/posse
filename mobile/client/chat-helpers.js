@@ -14,7 +14,9 @@
 
   function ensureApiSuccess(ok, status, payload) {
     if (!ok) {
-      throw new Error(getApiErrorMessage(status, payload));
+      const err = new Error(getApiErrorMessage(status, payload));
+      err.status = status;
+      throw err;
     }
     return payload;
   }
