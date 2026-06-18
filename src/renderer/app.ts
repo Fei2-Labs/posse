@@ -2804,6 +2804,9 @@ function isMeaningfulTitle(t: string | undefined | null): boolean {
   const trimmed = t.trim();
   if (!trimmed) return false;
   if (trimmed.startsWith('Caveat:')) return false;
+  // A bare session UUID is a fallback id (history/closed rows use the uuid as title when no real
+  // label exists), not a real, user-recognizable label — never lock it on the daemon.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) return false;
   const placeholders = new Set(['New session', 'New conversation', 'Terminal']);
   return !placeholders.has(trimmed);
 }
@@ -2861,7 +2864,7 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   // displayName, else the resume/preset command (which contains 'claude'/'codex'/...).
   const restoredDisplayName =
     cs.displayName || result.displayName || command || cs.resumeCommand || cs.presetCommand || '';
-  attachPtySession({ ...result, title: cs.title, displayName: restoredDisplayName }, now);
+  attachPtySession({ ...result, title: isMeaningfulTitle(cs.title) ? cs.title : result.title, displayName: restoredDisplayName }, now);
   // Record the correlation so a future click on this same conversation dedups to this live PTY.
   if (cs.resumeId) { sessionAgentId.set(result.id, cs.resumeId); sessionResumeId.set(result.id, cs.resumeId); }
   // For a true resume, lock the known-good title on the daemon so its title-ai cannot
@@ -2922,7 +2925,7 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   // Ensure the rail shows the agent immediately: fall back to the resume command (contains the agent
   // name) / s.agent if the spawned displayName is missing, before runtime provider detection.
   const resumedDisplayName = result.displayName || s.resumeCommand || s.agent || '';
-  attachPtySession({ ...result, title: s.title || result.title, displayName: resumedDisplayName }, now);
+  attachPtySession({ ...result, title: isMeaningfulTitle(s.title) ? s.title : result.title, displayName: resumedDisplayName }, now);
   // Record the correlation immediately (we launched via a resume command for s.id) so a second
   // click focuses this session and the history row dedups right away.
   sessionAgentId.set(result.id, s.id);
