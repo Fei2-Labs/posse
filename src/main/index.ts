@@ -515,6 +515,8 @@ function createWindow(appIcon?: Electron.NativeImage): void {
     },
   });
 
+  mainWindow.maximize();
+
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
