@@ -691,6 +691,41 @@ function readFirstLine(filePath: string, maxBytes = 16 * 1024): string {
 // List a directory's session history in Codex
 // Codex stores by date: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // cwd is in session_meta.payload.cwd on each file's first line; the title is in ~/.codex/session_index.jsonl
+// A Codex thread_name is "default" (unnamed) when it's empty, equals the session id,
+// or is just a UUID — in those cases we derive a title from the first real user prompt.
+function codexTitleIsDefault(title: string, id: string): boolean {
+  if (!title || title === id) return true;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(title.trim());
+}
+
+// Scan a Codex rollout file's head for the first real user message and use it as a title.
+// The real prompt is an `event_msg` with payload.type === 'user_message' (this skips the
+// auto-injected developer/AGENTS.md/permissions context, which are plain response_items).
+function codexFirstUserPrompt(filePath: string): string {
+  try {
+    const head = readHead(filePath, 256 * 1024);
+    for (const line of head.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let obj: { type?: string; payload?: { type?: string; message?: unknown } };
+      try { obj = JSON.parse(trimmed); } catch { continue; }
+      if (obj.type === 'event_msg' && obj.payload && obj.payload.type === 'user_message' && typeof obj.payload.message === 'string') {
+        const cleaned = cleanSessionTitle(obj.payload.message);
+        if (isRealUserPrompt(cleaned)) {
+          return cleaned.length > 40 ? cleaned.slice(0, 40) + '…' : cleaned;
+        }
+      }
+    }
+  } catch { /* unreadable — fall through */ }
+  return '';
+}
+
+function resolveCodexTitle(id: string, rawTitle: string | undefined, filePath: string): string {
+  const title = rawTitle || '';
+  if (!codexTitleIsDefault(title, id)) return title;
+  return codexFirstUserPrompt(filePath) || id;
+}
+
 function listCodexSessions(targetCwd: string): AgentHistorySession[] {
   const MAX_MATCHES = 40;
   const MAX_FILES = 800;
@@ -762,7 +797,7 @@ function listCodexSessions(targetCwd: string): AgentHistorySession[] {
               if (!id) continue;
               results.push({
                 id,
-                title: titleMap.get(id) || id,
+                title: resolveCodexTitle(id, titleMap.get(id), full),
                 cwd: normTarget,
                 mtimeMs: st.mtimeMs,
                 agent: 'codex',
@@ -1132,7 +1167,7 @@ function discoverCodexSessions(): DiscoveredSession[] {
           agent: 'codex',
           cwd: cwdRaw ? path.resolve(cwdRaw) : '',
           id,
-          title: titleMap.get(id) || id,
+          title: resolveCodexTitle(id, titleMap.get(id), f.full),
           mtimeMs: f.mtimeMs,
           resumeCommand: `codex resume ${id}`,
         });
