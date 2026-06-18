@@ -943,6 +943,10 @@ html, body {
   display: none;
   flex-direction: column;
   flex: 1;
+  /* min-width:0 keeps this flex child clamped to the sidebar's content width
+     so its descendants (the project nav + session rows) can never size to
+     their content and bleed past the visible panel. */
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -953,7 +957,15 @@ html, body {
 /* ========== Codex-style project navigator ========== */
 #project-nav {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
+  /* Without an explicit overflow-x, `overflow-y:auto` makes the browser
+     compute overflow-x to `auto` too. That gives the scroll container a
+     horizontal scroll range, so a long CJK title's box extends PAST the
+     visible panel and the `…` is painted off-screen to the right — we only
+     see the last glyph sliced at the panel edge. Clipping X removes that
+     scroll range, clamping rows to the sidebar width so ellipsis engages. */
+  overflow-x: hidden;
   padding: 4px 0 8px;
   font-family: var(--font-mono);
 }
@@ -1160,6 +1172,10 @@ html, body {
   gap: 6px;
   height: 28px;
   padding: 0 8px 0 30px;
+  /* The row is clamped to #project-nav's content width; min-width:0 lets the
+     flex title shrink (it has min-width:0 + ellipsis) instead of forcing the
+     row to its intrinsic content width. */
+  min-width: 0;
   cursor: pointer;
   user-select: none;
 }
