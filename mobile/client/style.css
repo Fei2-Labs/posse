@@ -429,7 +429,7 @@ header h2 {
 
 #terminal-container .xterm {
   height: 100%;
-  padding: 4px;
+  padding: 4px 12px 4px 8px;
   /* 防止内容变化导致布局重排 */
   transform: translateZ(0);
 }

@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v15';
+const CLIENT_BUILD = 'posse-v16';
 let lastServerInfo = null;
 
 // xterm.js 相关
