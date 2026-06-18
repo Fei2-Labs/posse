@@ -52,6 +52,15 @@ contextBridge.exposeInMainWorld('posse', {
   // Sync recent directories to the mobile remote service
   remoteAddRecentCwd: (cwd: string) => ipcRenderer.invoke('remote:add-recent-cwd', cwd),
 
+  // ========== Session archive / delete (sidebar management) ==========
+  // Archive: Posse-internal soft-hide, reversible, does NOT touch agent data.
+  sessionSetArchived: (id: string, archived: boolean) =>
+    ipcRenderer.invoke('session:set-archived', id, archived),
+  sessionListArchived: () => ipcRenderer.invoke('session:list-archived') as Promise<string[]>,
+  // Delete: PERMANENT, removes the session from the agent's own backing store.
+  sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) =>
+    ipcRenderer.invoke('session:delete', meta) as Promise<{ ok: boolean; error?: string }>,
+
   // Event listeners
   onPtyData: (cb: (id: string, data: string) => void) =>
     ipcRenderer.on('pty:data', (_e, id, data) => cb(id, data)),

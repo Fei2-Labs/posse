@@ -54,10 +54,13 @@ declare global {
         name: string;
         agents: Array<{
           agent: 'claude' | 'codex' | 'kiro' | 'copilot';
-          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string }>;
+          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot'; sourcePath: string; archived?: boolean }>;
         }>;
         lastActiveMs: number;
       }>>;
+      sessionSetArchived: (id: string, archived: boolean) => Promise<{ ok: boolean; error?: string }>;
+      sessionListArchived: () => Promise<string[]>;
+      sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) => Promise<{ ok: boolean; error?: string }>;
       remoteAddRecentCwd: (cwd: string) => Promise<boolean>;
       verifyResumable: (agent: string, cwd: string, sessionId: string) => Promise<{ exists: boolean }>;
       onPtyData: (cb: (id: string, data: string) => void) => void;
@@ -186,7 +189,11 @@ let closedSessions: ClosedSessionInfo[] = [];
 let closedSessionsCollapsed = false;
 
 // Native agent session history (Claude / Codex) for the currently opened directory
-type ClaudeHistorySession = { id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string };
+type ClaudeHistorySession = { id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string;
+  // Routing for sidebar archive/delete. `storeAgent` is the true backend agent (kiro/copilot too,
+  // which `agent` above cannot represent); `sourcePath` locates the backing file; `archived` is
+  // the Posse-internal soft-hide flag from the backend.
+  storeAgent?: ProjectsAgentId; sourcePath?: string; archived?: boolean };
 let claudeHistorySessions: ClaudeHistorySession[] = [];
 let claudeHistoryCollapsed = false;
 let claudeHistoryCwd = '';
@@ -194,6 +201,69 @@ let claudeHistoryCwd = '';
 // projects:list still lists them until the agent prunes its on-disk index, so suppress
 // them in collectProjectSessions so the dead row does not reappear on the next render.
 const removedHistoryKeys = new Set<string>();
+
+// ========== Show Archived (per-project toggle, persisted in localStorage) ==========
+// Off by default: archived sessions are hidden from a project's list. Keyed by normalized cwd.
+const SHOW_ARCHIVED_KEY = 'posse_show_archived_projects';
+let showArchivedProjects: Set<string> = (() => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SHOW_ARCHIVED_KEY) || '[]');
+    return new Set(Array.isArray(raw) ? raw.map((x: unknown) => String(x)) : []);
+  } catch { return new Set(); }
+})();
+function isShowArchived(normalizedKey: string): boolean {
+  return showArchivedProjects.has(normalizedKey);
+}
+function setShowArchived(projPath: string, on: boolean): void {
+  const key = normalizeCwd(projPath);
+  if (on) showArchivedProjects.add(key); else showArchivedProjects.delete(key);
+  try { localStorage.setItem(SHOW_ARCHIVED_KEY, JSON.stringify([...showArchivedProjects])); } catch { /* ignore */ }
+  renderSessionList();
+}
+
+// Archive / un-archive a session (Posse-internal soft-hide, no confirm, no agent-data change).
+async function toggleArchiveSession(s: ClaudeHistorySession): Promise<void> {
+  const next = !s.archived;
+  try {
+    const res = await window.posse.sessionSetArchived(s.id, next);
+    if (!res || !res.ok) { console.error('archive toggle failed', res?.error); return; }
+  } catch (err) {
+    console.error('archive toggle failed', err);
+    return;
+  }
+  // Reflect immediately, then re-pull backend so the archived flag is authoritative.
+  s.archived = next;
+  await refreshProjectsData();
+}
+
+// PERMANENT delete: confirm dialog gate (mandatory) → route to the agent's own store.
+async function deleteHistorySession(s: ClaudeHistorySession): Promise<void> {
+  const ok = await confirmDangerDialog(
+    'Delete session permanently?',
+    `This permanently deletes "${s.title || s.id}" from ${AGENT_ID_LABEL[s.storeAgent || 'claude'] || 'the agent'}'s own session store. This cannot be undone.`,
+    'Delete'
+  );
+  if (!ok) return;
+  try {
+    const res = await window.posse.sessionDelete({
+      id: s.id,
+      agent: s.storeAgent || s.agent,
+      sourcePath: s.sourcePath,
+    });
+    if (!res || !res.ok) {
+      console.error('session delete failed', res?.error);
+      window.alert(`Delete failed: ${res?.error || 'unknown error'}`);
+      return;
+    }
+  } catch (err) {
+    console.error('session delete failed', err);
+    window.alert('Delete failed.');
+    return;
+  }
+  // Drop the dead row locally, then re-pull backend.
+  removedHistoryKeys.add(conversationKey(s.id));
+  await refreshProjectsData();
+}
 
 // ========== Project navigator (Codex-style) ==========
 interface ProjectEntry {
@@ -268,7 +338,7 @@ let selectedProjectPath: string | null = null;
 // Backend-discovered, multi-agent (Claude/Codex/Kiro/Copilot) session history keyed by normalized
 // project path. Loaded via window.posse.projectsList({ extraFolders }) — see refreshProjectsData().
 type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
-interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string }
+interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId; sourcePath?: string; archived?: boolean }
 interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
 interface BackendProject { path: string; name: string; agents: BackendProjectAgent[]; lastActiveMs: number }
 
@@ -1924,6 +1994,45 @@ function showConfirmDialog(title: string, kind = 'Terminal'): Promise<'close' | 
   });
 }
 
+// Generic danger-confirm dialog (used for PERMANENT, unrecoverable actions like delete).
+// Resolves true only when the user explicitly confirms.
+function confirmDangerDialog(title: string, message: string, confirmLabel = 'Delete'): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    const h = document.createElement('h3');
+    h.textContent = title;
+    const p = document.createElement('p');
+    p.textContent = message;
+    const btns = document.createElement('div');
+    btns.className = 'confirm-buttons';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.textContent = 'Cancel';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'btn-close-confirm btn-danger-confirm';
+    confirmBtn.textContent = confirmLabel;
+    btns.appendChild(cancelBtn);
+    btns.appendChild(confirmBtn);
+    dialog.appendChild(h);
+    dialog.appendChild(p);
+    dialog.appendChild(btns);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    const cleanup = (r: boolean) => { overlay.remove(); resolve(r); };
+    cancelBtn.addEventListener('click', () => cleanup(false));
+    confirmBtn.addEventListener('click', () => cleanup(true));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+    });
+    confirmBtn.focus();
+  });
+}
+
 // ========== Rendering ==========
 
 function startTitleEdit(id: string, titleSpan: HTMLElement): void {
@@ -2134,7 +2243,7 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
 // Build a session row for a native Claude/Codex history session
 function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   const item = document.createElement('div');
-  item.className = 'nav-session nav-session-closed';
+  item.className = 'nav-session nav-session-closed' + (s.archived ? ' nav-session-archived' : '');
 
   const dot = document.createElement('span');
   dot.className = 'nav-session-dot';
@@ -2155,10 +2264,26 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   resumeBtn.title = 'Resume history session';
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void resumeAgentSession(s); });
 
+  // Archive toggle (Posse-internal soft-hide, reversible, no confirm).
+  const archiveBtn = document.createElement('button');
+  archiveBtn.className = 'nav-session-action';
+  archiveBtn.textContent = s.archived ? '⊕' : '⊟';
+  archiveBtn.title = s.archived ? 'Unarchive session' : 'Archive session (hide from list)';
+  archiveBtn.addEventListener('click', (e) => { e.stopPropagation(); void toggleArchiveSession(s); });
+
+  // Permanent delete (confirm-gated, removes from the agent's own store).
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'nav-session-action nav-session-action-danger';
+  deleteBtn.textContent = '🗑';
+  deleteBtn.title = 'Delete permanently (cannot be undone)';
+  deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); void deleteHistorySession(s); });
+
   item.appendChild(dot);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
   item.appendChild(resumeBtn);
+  item.appendChild(archiveBtn);
+  item.appendChild(deleteBtn);
   item.addEventListener('click', () => { void resumeAgentSession(s); });
   return item;
 }
@@ -2244,6 +2369,8 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
         if (shownUuids.has(conversationKey(s.id)) || openAgentIds.has(conversationKey(s.id))) continue;
         // Skip rows confirmed gone by a failed resume (not-found), so the dead row does not reappear.
         if (removedHistoryKeys.has(conversationKey(s.id))) continue;
+        // Archived soft-hide: unless Show Archived is on for this project, drop archived rows.
+        if (s.archived && !isShowArchived(key)) continue;
         shownUuids.add(conversationKey(s.id));
         g.history.push({
           id: s.id,
@@ -2253,6 +2380,9 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
           // ClaudeHistorySession.agent is a narrow union; only claude/codex are typed there.
           agent: agentGroup.agent === 'codex' ? 'codex' : 'claude',
           resumeCommand: s.resumeCommand,
+          storeAgent: agentGroup.agent,
+          sourcePath: s.sourcePath,
+          archived: s.archived,
         });
         g.latest = Math.max(g.latest, s.mtimeMs || 0);
       }
@@ -2622,10 +2752,12 @@ function showProjectMenu(e: MouseEvent, p: ProjectEntry): void {
   dismissNavMenus();
   const menu = document.createElement('div');
   menu.className = 'term-context-menu nav-popup-menu';
+  const archivedOn = isShowArchived(normalizeCwd(p.path));
   const items: Array<{ label: string; action: () => void }> = [
     { label: 'New conversation', action: () => showAgentPicker(e, p.path) },
     { label: p.pinned ? 'Unpin' : 'Pin', action: () => togglePinProject(p.path) },
     { label: 'Rename', action: () => renameProject(p.path) },
+    { label: archivedOn ? '✓ Show Archived' : 'Show Archived', action: () => setShowArchived(p.path, !archivedOn) },
     { label: 'Reveal in Finder', action: () => window.posse.openFolder(p.path) },
     { label: 'Remove project', action: () => removeProject(p.path) },
   ];

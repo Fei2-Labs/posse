@@ -145,6 +145,116 @@ function addClosedChatSession(session: { title: string; model: string; workspace
   safeSend('closed-chat-sessions:update', saved);
 }
 
+// ========== Archived session persistence (Posse-internal soft-hide) ==========
+// Archive is independent of agent data: it only records session ids we hide from the
+// default project list. Reversible, never touches the agent's backing store.
+const ARCHIVED_SESSIONS_FILE = path.join(app.getPath('userData'), 'archived-sessions.json');
+
+function loadArchivedSessionIds(): Set<string> {
+  try {
+    const raw = fs.readFileSync(ARCHIVED_SESSIONS_FILE, 'utf-8');
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) return new Set(arr.map((x) => String(x)));
+  } catch { /* missing / corrupt -> empty */ }
+  return new Set();
+}
+
+function saveArchivedSessionIds(ids: Set<string>): void {
+  try {
+    fs.writeFileSync(ARCHIVED_SESSIONS_FILE, JSON.stringify([...ids], null, 2));
+  } catch { /* ignore */ }
+}
+
+function setSessionArchived(id: string, archived: boolean): void {
+  const sid = String(id || '').trim();
+  if (!sid) return;
+  const ids = loadArchivedSessionIds();
+  if (archived) ids.add(sid); else ids.delete(sid);
+  saveArchivedSessionIds(ids);
+}
+
+// ========== Permanent session deletion (targets the agent's OWN store) ==========
+// Routes by agent type to the correct backing store. NEVER throws across IPC.
+function deleteSessionFromStore(
+  agent: string,
+  id: string,
+  sourcePath: string
+): { ok: boolean; error?: string } {
+  try {
+    const a = String(agent || '').trim().toLowerCase();
+    const sid = String(id || '').trim();
+    if (!sid) return { ok: false, error: 'missing session id' };
+
+    if (a === 'claude' || a === 'kiro') {
+      // Single backing file (Claude: <uuid>.jsonl ; Kiro: <uuid>.json).
+      if (sourcePath && fs.existsSync(sourcePath)) {
+        fs.rmSync(sourcePath, { force: true });
+      }
+      return { ok: true };
+    }
+
+    if (a === 'codex') {
+      // Remove the rollout file AND its line in ~/.codex/session_index.jsonl.
+      if (sourcePath && fs.existsSync(sourcePath)) {
+        fs.rmSync(sourcePath, { force: true });
+      }
+      try {
+        const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
+        if (fs.existsSync(indexPath)) {
+          const content = fs.readFileSync(indexPath, 'utf-8');
+          const kept = content.split('\n').filter((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return false;
+            try {
+              const obj = JSON.parse(trimmed) as { id?: string };
+              return obj.id !== sid;
+            } catch { return true; } // keep unparseable lines untouched
+          });
+          fs.writeFileSync(indexPath, kept.length ? kept.join('\n') + '\n' : '');
+        }
+      } catch { /* index cleanup best-effort */ }
+      return { ok: true };
+    }
+
+    if (a === 'copilot') {
+      // sqlite-backed: DELETE the row by id, mirroring discoverCopilotSessions access.
+      const dbPath = path.join(os.homedir(), '.copilot', 'session-store.db');
+      if (!fs.existsSync(dbPath)) return { ok: true };
+      let done = false;
+      try {
+        const sqlite = require('node:sqlite') as {
+          DatabaseSync?: new (p: string) => {
+            prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+            close: () => void;
+          };
+        };
+        if (sqlite?.DatabaseSync) {
+          const db = new sqlite.DatabaseSync(dbPath);
+          try {
+            db.prepare('DELETE FROM sessions WHERE id = ?').run(sid);
+            done = true;
+          } finally {
+            db.close();
+          }
+        }
+      } catch { /* node:sqlite unavailable -> fall through to binary */ }
+      if (!done) {
+        const { execFileSync } = require('child_process') as typeof import('child_process');
+        const escaped = sid.replace(/'/g, "''");
+        execFileSync('sqlite3', [dbPath, `DELETE FROM sessions WHERE id = '${escaped}';`], {
+          encoding: 'utf-8',
+          timeout: 5000,
+        });
+      }
+      return { ok: true };
+    }
+
+    return { ok: false, error: `unknown agent: ${a}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 function getPreferencePath(): string {
   return path.join(app.getPath('userData'), 'ai-preference.json');
 }
@@ -833,11 +943,16 @@ type ProjectSession = {
   title: string;
   mtimeMs: number;
   resumeCommand: string;
+  // Routing info for archive/delete actions (added so the renderer + delete IPC can
+  // locate each session's backing store). `sourcePath` is the agent's own session file
+  // (Claude/Codex/Kiro jsonl/json) or '' for sqlite-backed agents (Copilot).
+  agent: ProjectsAgentId;
+  sourcePath: string;
+  archived?: boolean;
 };
 
 // Internal flat record before bucketing
 type DiscoveredSession = ProjectSession & {
-  agent: ProjectsAgentId;
   cwd: string; // absolute project folder (may be '' / '/' when unknown)
 };
 
@@ -1085,6 +1200,7 @@ function discoverClaudeSessions(): DiscoveredSession[] {
           title,
           mtimeMs: f.mtimeMs,
           resumeCommand: `claude --resume ${f.uuid}`,
+          sourcePath: f.full,
         });
       } catch { /* skip unreadable file */ }
     }
@@ -1185,6 +1301,7 @@ function discoverCodexSessions(): DiscoveredSession[] {
           title: codexTitle,
           mtimeMs: f.mtimeMs,
           resumeCommand: `codex resume ${id}`,
+          sourcePath: f.full,
         });
       } catch { /* skip */ }
     }
@@ -1235,6 +1352,7 @@ function discoverKiroSessions(): DiscoveredSession[] {
           title,
           mtimeMs: f.mtimeMs,
           resumeCommand: `kiro-cli chat --resume-id ${id}`,
+          sourcePath: f.full,
         });
       } catch { /* skip */ }
     }
@@ -1306,6 +1424,7 @@ function discoverCopilotSessions(): DiscoveredSession[] {
         title,
         mtimeMs,
         resumeCommand: `copilot --resume ${id}`,
+        sourcePath: '', // sqlite-backed: delete routes by id, not a file path
       });
     }
   } catch { /* never throw - Copilot is best-effort */ }
@@ -1321,6 +1440,8 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     ...discoverKiroSessions(),
     ...discoverCopilotSessions(),
   ];
+
+  const archivedIds = loadArchivedSessionIds();
 
   const COPILOT_NO_FOLDER = '__copilot_no_folder__';
   // bucketKey -> { path, name, agentMap }
@@ -1357,7 +1478,15 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     const bucket = getBucket(key, displayPath, name);
     let arr = bucket.agentMap.get(s.agent);
     if (!arr) { arr = []; bucket.agentMap.set(s.agent, arr); }
-    arr.push({ id: s.id, title: s.title, mtimeMs: s.mtimeMs, resumeCommand: s.resumeCommand });
+    arr.push({
+      id: s.id,
+      title: s.title,
+      mtimeMs: s.mtimeMs,
+      resumeCommand: s.resumeCommand,
+      agent: s.agent,
+      sourcePath: s.sourcePath,
+      archived: archivedIds.has(s.id),
+    });
   }
 
   // Ensure explicitly-added folders appear even with no sessions.
@@ -1798,6 +1927,36 @@ function registerIPC(): void {
       return buildProjectsList(opts?.extraFolders ?? []);
     } catch {
       return [];
+    }
+  });
+
+  // Archive (soft-hide, reversible, does NOT touch agent data).
+  ipcMain.handle('session:set-archived', (_e, id: string, archived: boolean) => {
+    try {
+      setSessionArchived(id, !!archived);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // List currently-archived session ids (for renderer filtering on demand).
+  ipcMain.handle('session:list-archived', () => {
+    try { return [...loadArchivedSessionIds()]; } catch { return []; }
+  });
+
+  // PERMANENT delete: routes to the agent's own backing store. Never throws.
+  ipcMain.handle('session:delete', (_e, meta: { id: string; agent: string; sourcePath?: string }) => {
+    try {
+      const id = String(meta?.id || '');
+      const agent = String(meta?.agent || '');
+      const sourcePath = String(meta?.sourcePath || '');
+      const result = deleteSessionFromStore(agent, id, sourcePath);
+      // Once the source is gone, drop any stale archived flag for that id.
+      if (result.ok) { try { setSessionArchived(id, false); } catch { /* ignore */ } }
+      return result;
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
 

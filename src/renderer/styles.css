@@ -1262,6 +1262,21 @@ html, body {
   color: var(--text-primary);
 }
 
+/* Permanent-delete action: red on hover to signal an irreversible action */
+.nav-session-action-danger:hover {
+  background: rgba(220, 53, 69, 0.18);
+  color: #e5484d;
+}
+
+/* Archived session row: dimmed + italic, only visible when Show Archived is on */
+.nav-session-archived {
+  opacity: 0.5;
+  font-style: italic;
+}
+.nav-session-archived:hover {
+  opacity: 0.85;
+}
+
 /* Session item: stack the title row and action row vertically */
 .session-item {
   display: flex;
