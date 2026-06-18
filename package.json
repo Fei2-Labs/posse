@@ -1,6 +1,6 @@
 {
   "name": "posse",
-  "version": "1.2.14",
+  "version": "1.2.15",
   "description": "Your AI coding posse | AI Coding Terminal with Real-time Mobile-Desktop Sync — Wireless LAN connection, code from anywhere",
   "main": "dist/main/index.js",
   "scripts": {

@@ -1,12 +1,14 @@
 // Posse Mobile - Service Worker
 
-const CACHE_NAME = 'posse-v12';
+const CACHE_NAME = 'posse-v13';
 const ASSETS = [
   '/',
   '/index.html',
   '/style.css',
   '/app.js',
   '/manifest.json',
+  '/icon-192.svg',
+  '/icon-192.png',
 ];
 
 // 安装：缓存静态资源
