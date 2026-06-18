@@ -1188,6 +1188,15 @@ html, body {
   animation: nav-dot-pulse 1.2s ease-in-out infinite;
 }
 
+.nav-session-dot-warn {
+  width: auto;
+  height: auto;
+  background: transparent !important;
+  font-size: 11px;
+  line-height: 1;
+  animation: nav-dot-pulse 1.2s ease-in-out infinite;
+}
+
 @keyframes nav-dot-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }

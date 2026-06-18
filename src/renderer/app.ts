@@ -1433,6 +1433,8 @@ const fileTreeChildrenCache: Map<string, FileTreeItem[]> = new Map();
 const sessionUnread: Set<string> = new Set();
 // Busy state (yellow dot: AI is producing output)
 const sessionBusy: Set<string> = new Set();
+// Waiting state (red warning triangle: AI paused, waiting for the user's decision)
+const sessionWaiting: Set<string> = new Set();
 // Unread delay timer (idle-timeout detection)
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
@@ -2014,9 +2016,10 @@ function showSessionContextMenu(e: MouseEvent, targetId: string): void {
 
 // Status dot color for a live session
 function sessionStatusColor(id: string): string {
-  if (sessionBusy.has(id)) return '#e5a100';
-  if (sessionUnread.has(id)) return '#73c991';
-  return '#2ea043';
+  if (sessionWaiting.has(id)) return '#ff5c4d';   // waiting for user decision
+  if (sessionBusy.has(id)) return '#e5a100';      // AI working
+  if (sessionUnread.has(id)) return '#73c991';    // new unread output
+  return '#8a93a6';                                // idle / viewed (slate, distinct from green & history grey)
 }
 
 // Build a session row for a LIVE PTY session inside a project (compact: title + relative time)
@@ -2030,8 +2033,16 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
 
   const dot = document.createElement('span');
   dot.className = 'nav-session-dot';
-  dot.style.backgroundColor = sessionStatusColor(id);
-  if (sessionBusy.has(id)) dot.classList.add('nav-session-dot-busy');
+  if (sessionWaiting.has(id)) {
+    // Waiting for user decision → render a pulsing warning triangle instead of a filled circle
+    dot.textContent = '⚠';
+    dot.classList.add('nav-session-dot-warn');
+    dot.style.color = '#ff5c4d';
+    dot.style.backgroundColor = 'transparent';
+  } else {
+    dot.style.backgroundColor = sessionStatusColor(id);
+    if (sessionBusy.has(id)) dot.classList.add('nav-session-dot-busy');
+  }
 
   const titleSpan = document.createElement('span');
   titleSpan.className = 'nav-session-title';
@@ -3004,8 +3015,9 @@ function switchSession(id: string): void {
   // User switched to this session → clear all status indicators (yellow/green → gray)
   const hadUnread = sessionUnread.delete(id);
   const hadBusy = sessionBusy.delete(id);
+  const hadWaiting = sessionWaiting.delete(id);
   // Only re-render the list when switching to a different session, to avoid rebuilding the DOM and breaking dblclick
-  if (prev !== id || hadUnread || hadBusy) renderSessionList();
+  if (prev !== id || hadUnread || hadBusy || hadWaiting) renderSessionList();
   updateSessionTitleBar();
   void renderFileTree();
   renderFileStatusbar();
@@ -3048,6 +3060,7 @@ function clearSessionState(id: string): void {
   sessionCreateTimes.delete(id);
   sessionUnread.delete(id);
   sessionBusy.delete(id);
+  sessionWaiting.delete(id);
   clearTimeout(unreadTimers.get(id));
   unreadTimers.delete(id);
   recentDataBuffer.delete(id);
@@ -3605,7 +3618,9 @@ window.posse.onPtyData((id, data) => {
     const plain = recentDataBuffer.get(id)!.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
     // When the loop is on, auto-confirm the CLI's various confirmation prompts (proceed / make this edit / etc.)
     const acConfig = sessionAutoContinue.get(id);
+    let autoAgreeFired = false;
     if (acConfig?.enabled && (acConfig.autoAgree ?? true) && /Do you want to .*\?/.test(plain)) {
+      autoAgreeFired = true;
       // Count the option lines (format: "  1. xxx", "  2. xxx"...)
       const optionCount = (plain.match(/^\s+\d+\.\s/gm) || []).length;
       // 3 options: 1=Yes, 2=Yes (always), 3=No → choose 2
@@ -3624,6 +3639,28 @@ window.posse.onPtyData((id, data) => {
     // Prompt detection: split by line and check whether the last few lines contain a prompt
     const lines = plain.split('\n').map(l => l.trimEnd()).filter(l => l.length > 0);
     const lastLines = lines.slice(-3).join('\n');
+
+    // Detect "waiting for user decision": the AI paused on an interactive choice (e.g.
+    // "Do you want to proceed? 1. Yes 2. No"). Best-effort heuristic — can have false
+    // positives/negatives across different CLIs.
+    const recentLines = lines.slice(-6).join('\n');
+    const decisionPrompt =
+      /Do you want to .*\?/.test(plain) ||
+      (/^\s*❯?\s*\d+\.\s/m.test(recentLines) && /\?/.test(recentLines));
+    if (decisionPrompt && !autoAgreeFired) {
+      // Awaiting the user's decision (and NOT being auto-handled). Waiting takes priority
+      // over busy/unread.
+      clearTimeout(unreadTimers.get(id));
+      unreadTimers.delete(id);
+      const wasWaiting = sessionWaiting.has(id);
+      sessionWaiting.add(id);
+      const wasBusy = sessionBusy.delete(id);
+      const wasUnread = sessionUnread.delete(id);
+      if (!wasWaiting || wasBusy || wasUnread) renderSessionList();
+      return;
+    }
+    // New output that is not a decision prompt → leave the waiting state before normal logic runs
+    sessionWaiting.delete(id);
     // Exclude Claude Code's busy state: spinner patterns like xxx… (xxx)
     const cliWorking = /\w+…\s*\(/.test(lastLines);
     // Shell prompt
