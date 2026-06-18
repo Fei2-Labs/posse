@@ -13,6 +13,9 @@ if (urlToken) {
 let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
+// bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
+const CLIENT_BUILD = 'posse-v12';
+let lastServerInfo = null;
 
 // xterm.js 相关
 let term = null;
@@ -869,9 +872,26 @@ async function refreshAndroidScreenshot(quality, scale) {
 
 // ========== 主页面 ==========
 
+async function renderAppVersionLine() {
+  const el = $('app-version-line');
+  if (!el) return;
+  try {
+    let info = lastServerInfo;
+    if (!info) {
+      const res = await fetch(`${API}/api/server-info`);
+      info = await res.json();
+      lastServerInfo = info;
+    }
+    el.textContent = `Posse v${info.version || '?'} · ${(info.sha || '').slice(0, 7)} · client ${CLIENT_BUILD}`;
+  } catch {
+    el.textContent = `Posse · client ${CLIENT_BUILD}`;
+  }
+}
+
 async function enterMain() {
   showPage('main-page');
   initDevicePage();
+  renderAppVersionLine();
   await refreshSessions();
   await refreshRecentCwdOptions();
   await pullCustomPresetsFromServer(); // 从服务端同步预设
@@ -2495,10 +2515,12 @@ async function loadServerInfo() {
   try {
     const res = await fetch(`${API}/api/server-info`);
     const info = await res.json();
+    lastServerInfo = info;
     const el = $('server-info');
     el.innerHTML = `
       <div><span class="label">主机: </span><span class="value">${info.hostname}</span></div>
       <div><span class="label">局域网: </span><span class="value">http://${info.ip}:${info.port}</span></div>
+      <div><span class="label">版本: </span><span class="value">v${info.version || '?'} · ${(info.sha||'').slice(0,7)} · client ${CLIENT_BUILD}</span></div>
     `;
   } catch {
     $('server-info').innerHTML = '<div style="color:var(--accent)">无法连接服务器</div>';

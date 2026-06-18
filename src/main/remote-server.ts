@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import os from 'os';
+import { app as electronApp } from 'electron';
+import buildStamp from './build-stamp.json';
 import { execFileSync, execSync } from 'child_process';
 
 function resolveAdb(): string {
@@ -519,7 +521,12 @@ export function startRemoteServer(
   // ========== API routes ==========
 
   app.get('/api/server-info', (_req, res) => {
-    res.json({ ip: LOCAL_IP, port: PORT, hostname: os.hostname() });
+    res.json({
+      ip: LOCAL_IP, port: PORT, hostname: os.hostname(),
+      version: electronApp.getVersion(),
+      sha: buildStamp.sha,
+      builtAt: buildStamp.builtAt,
+    });
   });
 
   // Return all currently available LAN IPv4 addresses (multiple NICs / subnets)
