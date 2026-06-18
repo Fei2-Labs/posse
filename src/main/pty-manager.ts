@@ -378,7 +378,23 @@ const sessionSyncPath = (() => {
 })();
 
 export function getDisplayName(presetCommand: string): string {
-  return PRESET_DISPLAY_NAMES[presetCommand] || presetCommand || 'Terminal';
+  if (PRESET_DISPLAY_NAMES[presetCommand]) return PRESET_DISPLAY_NAMES[presetCommand];
+  if (!presetCommand) return 'Terminal';
+  const cmd = presetCommand.trim().toLowerCase();
+  // Recognize the CLI by its leading token so variants like `claude --resume <uuid>`
+  // collapse to a short provider tag instead of echoing the whole command.
+  if (cmd.startsWith('claude')) return 'Claude';
+  if (cmd.startsWith('codex')) return 'Codex';
+  if (cmd.startsWith('copilot')) return 'Copilot';
+  if (cmd.startsWith('gemini')) return 'Gemini';
+  if (cmd.startsWith('opencode')) return 'OpenCode';
+  if (cmd.startsWith('devin')) return 'Devin';
+  if (cmd.startsWith('kiro')) return 'Kiro';
+  if (cmd.startsWith('kimi')) return 'Kimi';
+  if (cmd.startsWith('cursor') || cmd.startsWith('agent')) return 'Cursor';
+  // Generic fallback: capitalized first token.
+  const first = presetCommand.trim().split(/\s+/)[0];
+  return first ? first.charAt(0).toUpperCase() + first.slice(1) : 'Terminal';
 }
 
 export class PtyManager {
