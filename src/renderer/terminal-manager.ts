@@ -391,6 +391,7 @@ export class TerminalManager {
   private onResize: ((id: string, cols: number, rows: number) => void) | null = null;
   private lastFitSize: { w: number; h: number } = { w: 0, h: 0 };
   private fitCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private activeTheme: Record<string, string> | null = null;
 
   constructor(terminalArea: HTMLElement, onResize?: (id: string, cols: number, rows: number) => void) {
     this.terminalArea = terminalArea;
@@ -413,16 +414,9 @@ export class TerminalManager {
   }
 
   create(id: string, themeId: string, cwd: string, onData: (data: string) => void): void {
-    const cs = getComputedStyle(document.documentElement);
-    const moodBg = cs.getPropertyValue('--bg-primary').trim();
-    const moodFg = cs.getPropertyValue('--text-primary').trim();
-    const moodCursor = cs.getPropertyValue('--accent').trim();
-    const moodSel = cs.getPropertyValue('--row-selected').trim();
-    const theme = { ...(THEMES[themeId] || THEMES['vscode-dark']) };
-    if (moodBg) theme.background = moodBg;
-    if (moodFg) theme.foreground = moodFg;
-    if (moodCursor) theme.cursor = moodCursor;
-    if (moodSel) theme.selectionBackground = moodSel;
+    const theme = this.activeTheme
+      ? { ...this.activeTheme }
+      : (THEMES[themeId] || THEMES['vscode-dark']);
     const terminal = new Terminal({
       theme,
       fontSize: 14,
@@ -651,14 +645,11 @@ export class TerminalManager {
     return this.activeId;
   }
 
-  setTerminalColors(colors: { background?: string; foreground?: string; cursor?: string; selectionBackground?: string }): void {
+  applyTerminalTheme(theme: Record<string, string> | undefined): void {
+    if (!theme) return;
+    this.activeTheme = theme;
     for (const inst of this.instances.values()) {
-      const next = { ...inst.terminal.options.theme };
-      if (colors.background) next.background = colors.background;
-      if (colors.foreground) next.foreground = colors.foreground;
-      if (colors.cursor) next.cursor = colors.cursor;
-      if (colors.selectionBackground) next.selectionBackground = colors.selectionBackground;
-      inst.terminal.options.theme = next;
+      inst.terminal.options.theme = { ...theme };
     }
   }
 

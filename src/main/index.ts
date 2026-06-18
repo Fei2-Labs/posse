@@ -691,6 +691,40 @@ function readFirstLine(filePath: string, maxBytes = 16 * 1024): string {
 // List a directory's session history in Codex
 // Codex stores by date: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 // cwd is in session_meta.payload.cwd on each file's first line; the title is in ~/.codex/session_index.jsonl
+// A Codex thread_name is "default" (unnamed) when it's empty, equals the session id,
+// or is just a UUID — in those cases we derive a title from the first real user prompt.
+// Codex's CLI-detection sends a "what's 2+2?" health-check probe, creating throwaway
+// sessions. Match it so we can skip it as a title source and filter probe-only sessions.
+const CODEX_PROBE_RE = /^\s*what'?s?\s+(is\s+)?2\s*\+\s*2\s*\??\s*$/i;
+
+function codexTitleIsDefault(title: string, id: string): boolean {
+  if (!title || title === id) return true;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(title.trim());
+}
+
+// Scan a Codex rollout file's head for the first real user message and use it as a title.
+// The real prompt is an `event_msg` with payload.type === 'user_message' (this skips the
+// auto-injected developer/AGENTS.md/permissions context, which are plain response_items).
+function codexFirstUserPrompt(filePath: string): string {
+  try {
+    const head = readHead(filePath, 256 * 1024);
+    for (const line of head.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let obj: { type?: string; payload?: { type?: string; message?: unknown } };
+      try { obj = JSON.parse(trimmed); } catch { continue; }
+      if (obj.type === 'event_msg' && obj.payload && obj.payload.type === 'user_message' && typeof obj.payload.message === 'string') {
+        const cleaned = cleanSessionTitle(obj.payload.message);
+        if (CODEX_PROBE_RE.test(cleaned)) continue;
+        if (isRealUserPrompt(cleaned)) {
+          return cleaned.length > 40 ? cleaned.slice(0, 40) + '…' : cleaned;
+        }
+      }
+    }
+  } catch { /* unreadable — fall through */ }
+  return '';
+}
+
 function listCodexSessions(targetCwd: string): AgentHistorySession[] {
   const MAX_MATCHES = 40;
   const MAX_FILES = 800;
@@ -760,9 +794,17 @@ function listCodexSessions(targetCwd: string): AgentHistorySession[] {
               if (fileCwd !== normTarget) continue;
               const id = String(obj.payload.id || '');
               if (!id) continue;
+              const rawTn = titleMap.get(id);
+              let codexTitle: string;
+              if (rawTn && !codexTitleIsDefault(rawTn, id)) {
+                codexTitle = rawTn;                 // real thread_name wins
+              } else {
+                codexTitle = codexFirstUserPrompt(full);   // skips probes; '' if probe-only/empty
+                if (!codexTitle) continue;          // filter out detection-probe / empty sessions
+              }
               results.push({
                 id,
-                title: titleMap.get(id) || id,
+                title: codexTitle,
                 cwd: normTarget,
                 mtimeMs: st.mtimeMs,
                 agent: 'codex',
@@ -1128,11 +1170,19 @@ function discoverCodexSessions(): DiscoveredSession[] {
         // cwd appears in payload before the giant base_instructions block.
         const cwdMatch = head.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
         const cwdRaw = cwdMatch ? cwdMatch[1].replace(/\\(.)/g, '$1') : '';
+        const rawTn = titleMap.get(id);
+        let codexTitle: string;
+        if (rawTn && !codexTitleIsDefault(rawTn, id)) {
+          codexTitle = rawTn;                 // real thread_name wins
+        } else {
+          codexTitle = codexFirstUserPrompt(f.full);   // skips probes; '' if probe-only/empty
+          if (!codexTitle) continue;          // filter out detection-probe / empty sessions
+        }
         out.push({
           agent: 'codex',
           cwd: cwdRaw ? path.resolve(cwdRaw) : '',
           id,
-          title: titleMap.get(id) || id,
+          title: codexTitle,
           mtimeMs: f.mtimeMs,
           resumeCommand: `codex resume ${id}`,
         });

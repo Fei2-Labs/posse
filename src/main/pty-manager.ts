@@ -190,6 +190,25 @@ export function writeClaudeSessionTitle(uuid: string, title: string): void {
   }
 }
 
+const CODEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Resolve a Codex session id to its latest non-default thread_name from the index ('' if none/unnamed).
+function readCodexThreadName(codexId: string): string {
+  try {
+    const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
+    if (!fs.existsSync(indexPath)) return '';
+    let name = '';
+    for (const line of fs.readFileSync(indexPath, 'utf-8').split('\n')) {
+      const t = line.trim(); if (!t) continue;
+      try { const o = JSON.parse(t) as { id?: string; thread_name?: string };
+        if (o.id === codexId && typeof o.thread_name === 'string') name = o.thread_name; // last wins
+      } catch { /* skip */ }
+    }
+    if (!name || name === codexId || CODEX_UUID_RE.test(name)) return '';
+    return name;
+  } catch { return ''; }
+}
+
 // Best-effort: propagate a user rename into Codex's own session index so Codex's
 // thread/resume picker shows the same title. Codex stores each session's editable
 // title as `thread_name` in ~/.codex/session_index.jsonl (one JSON object per line,
@@ -503,9 +522,17 @@ export class PtyManager {
           const oscTitle = oscMatch[1].trim();
           if (oscTitle && oscTitle.length >= 2 && oscTitle.length <= 80
               && !session.titleLocked) {
-            session.title = oscTitle.length > 40 ? oscTitle.slice(0, 40) + '…' : oscTitle;
-            // Do not set titleGenerated — OSC may just be shell startup info; confirm after the user provides input
-            this.events.onTitleUpdate(id, session.title);
+            let candidate = oscTitle;
+            if (CODEX_UUID_RE.test(candidate)) {
+              // Codex sets the terminal title to its session UUID; resolve the real name instead.
+              candidate = readCodexThreadName(candidate);
+            }
+            if (candidate && !CODEX_UUID_RE.test(candidate)) {
+              session.title = candidate.length > 40 ? candidate.slice(0, 40) + '…' : candidate;
+              // Do not set titleGenerated — OSC may just be shell startup info; confirm after the user provides input
+              this.events.onTitleUpdate(id, session.title);
+            }
+            // else: unnamed codex UUID title — leave the existing title untouched (don't show a raw UUID)
           }
         }
       }
