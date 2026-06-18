@@ -245,7 +245,17 @@ async function writeSession(id: string, data: string): Promise<void> {
 
 async function resizeSession(id: string, instance: TerminalInstance): Promise<void> {
   try {
-    instance.fitAddon.fit();
+    // Reserve one column: proposeDimensions() floors a fractional cell width, so the
+    // right-most (esp. double-width CJK) glyph can clip under the scrollbar.
+    const proposed = instance.fitAddon.proposeDimensions();
+    if (proposed && proposed.cols > 0 && proposed.rows > 0) {
+      const c = Math.max(2, proposed.cols - 1);
+      if (c !== instance.terminal.cols || proposed.rows !== instance.terminal.rows) {
+        instance.terminal.resize(c, proposed.rows);
+      }
+    } else {
+      instance.fitAddon.fit();
+    }
     const cols = instance.terminal.cols;
     const rows = instance.terminal.rows;
     if (cols > 0 && rows > 0) {

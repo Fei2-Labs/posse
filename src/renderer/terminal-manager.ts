@@ -585,7 +585,7 @@ export class TerminalManager {
       const stillActive = this.instances.get(id);
       if (!stillActive || stillActive !== target) return;
       try {
-        target.fitAddon.fit();
+        this.safeFit(target);
         if (this.onResize) {
           const { cols, rows } = target.terminal;
           if (cols > 0 && rows > 0) this.onResize(target.id, cols, rows);
@@ -653,6 +653,22 @@ export class TerminalManager {
     }
   }
 
+  // FitAddon.proposeDimensions() floors cols from a fractional cell width, so the
+  // last column can render a fraction of a pixel past the right edge — most visible
+  // with double-width CJK glyphs, whose right half gets clipped under the scrollbar.
+  // Reserve one column so there is always >= one full cell of slack.
+  private safeFit(inst: { terminal: import('@xterm/xterm').Terminal; fitAddon: FitAddon }): void {
+    const proposed = inst.fitAddon.proposeDimensions();
+    if (proposed && proposed.cols > 0 && proposed.rows > 0) {
+      const cols = Math.max(2, proposed.cols - 1);
+      if (cols !== inst.terminal.cols || proposed.rows !== inst.terminal.rows) {
+        inst.terminal.resize(cols, proposed.rows);
+      }
+    } else {
+      inst.fitAddon.fit();
+    }
+  }
+
   fitActive(): void {
     if (!this.activeId) return;
     const inst = this.instances.get(this.activeId);
@@ -661,7 +677,7 @@ export class TerminalManager {
       // Record whether we were at the bottom before fit, then restore after, to avoid jumping to the top of the buffer.
       const buf = inst.terminal.buffer.active;
       const wasAtBottom = buf.baseY > 0 && buf.viewportY >= buf.baseY - 2;
-      inst.fitAddon.fit();
+      this.safeFit(inst);
       if (wasAtBottom) {
         inst.terminal.scrollToBottom();
       }

@@ -14,12 +14,25 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v19';
+const CLIENT_BUILD = 'posse-v20';
 let lastServerInfo = null;
 
 // xterm.js 相关
 let term = null;
 let fitAddon = null;
+
+// proposeDimensions() floors a fractional cell width, so the right-most (esp.
+// double-width CJK) glyph can clip under the scrollbar. Reserve one column.
+function safeFit() {
+  if (!fitAddon || !term) return;
+  const p = fitAddon.proposeDimensions && fitAddon.proposeDimensions();
+  if (p && p.cols > 0 && p.rows > 0) {
+    const c = Math.max(2, p.cols - 1);
+    if (c !== term.cols || p.rows !== term.rows) term.resize(c, p.rows);
+  } else {
+    fitAddon.fit();
+  }
+}
 let ws = null;
 let wsHeartbeat = null;
 let wsReconnectTimer = null;
@@ -1124,7 +1137,7 @@ function createTerminal() {
   // 双重 rAF 确保页面切换后 DOM 布局完成，避免 fit 算出 0 列 0 行
   return new Promise((resolve) => {
     requestAnimationFrame(() => { requestAnimationFrame(() => {
-      fitAddon.fit();
+      safeFit();
       // 移动端：禁止点击终端区域弹出键盘
       const xtermTextarea = container.querySelector('.xterm-helper-textarea');
       if (xtermTextarea) {
@@ -1291,7 +1304,7 @@ function handleResize() {
   // fit() 会改变终端行列数，可能导致 viewport 意外跳到顶部。
   // 记录 fit 前是否在底部，fit 后恢复。
   const wasAtBottom = isAtBottom();
-  fitAddon.fit();
+  safeFit();
   if (wasAtBottom) {
     term.scrollToBottom();
   }
@@ -1895,7 +1908,7 @@ if (window.visualViewport) {
 
     // 重新 fit 终端
     if (fitAddon && term) {
-      requestAnimationFrame(() => fitAddon.fit());
+      requestAnimationFrame(() => safeFit());
     }
   }
 
