@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v13';
+const CLIENT_BUILD = 'posse-v14';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -1054,25 +1054,25 @@ function createTerminal() {
     fontSize: 14,
     fontFamily: "'SF Mono', 'Menlo', 'Courier New', monospace",
     theme: {
-      background: '#1a1a2e',
-      foreground: '#e0e0e0',
-      cursor: '#e94560',
-      selectionBackground: 'rgba(233, 69, 96, 0.3)',
-      black: '#1a1a2e',
-      red: '#e94560',
-      green: '#4ecca3',
-      yellow: '#f0c040',
-      blue: '#0f3460',
-      magenta: '#533483',
-      cyan: '#4ecca3',
-      white: '#e0e0e0',
-      brightBlack: '#2a2a4a',
-      brightRed: '#ff6b81',
-      brightGreen: '#7dffcc',
-      brightYellow: '#ffe066',
-      brightBlue: '#3a7bd5',
-      brightMagenta: '#8854d0',
-      brightCyan: '#7dffcc',
+      background: '#0d1117',
+      foreground: '#c9d1d1',
+      cursor: '#3fb950',
+      selectionBackground: 'rgba(63, 185, 80, 0.30)',
+      black: '#0d1117',
+      red: '#f85149',
+      green: '#3fb950',
+      yellow: '#e5c07b',
+      blue: '#58a6ff',
+      magenta: '#bc8cff',
+      cyan: '#56d4dd',
+      white: '#c9d1d1',
+      brightBlack: '#484f58',
+      brightRed: '#ff7b72',
+      brightGreen: '#56d364',
+      brightYellow: '#f0c674',
+      brightBlue: '#79c0ff',
+      brightMagenta: '#d2a8ff',
+      brightCyan: '#76e3ea',
       brightWhite: '#ffffff',
     },
     cursorBlink: true,

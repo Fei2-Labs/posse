@@ -6,16 +6,17 @@
 }
 
 :root {
-  --bg: #1a1a2e;
-  --bg2: #16213e;
-  --bg3: #0f3460;
-  --text: #e0e0e0;
-  --text2: #a0a0b0;
-  --accent: #e94560;
-  --accent2: #533483;
-  --green: #4ecca3;
-  --yellow: #f0c040;
-  --border: #2a2a4a;
+  --bg: #0d1117;
+  --bg2: #11171a;
+  --bg3: #161d20;
+  --text: #c9d1d1;
+  --text2: #6e7a73;
+  --accent: #3fb950;
+  --accent2: #2ea043;
+  --green: #3fb950;
+  --yellow: #e5c07b;
+  --border: #1f2a24;
+  --danger: #f85149;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -345,7 +346,7 @@ header h2 {
 #terminal-container {
   flex: 1;
   overflow: hidden;
-  background: #1a1a2e;
+  background: var(--bg);
   touch-action: pan-y;
   position: relative;
 }
@@ -359,7 +360,7 @@ header h2 {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: #1a1a2e;
+  background: var(--bg);
   color: var(--text2);
   font-size: 14px;
   z-index: 10;
@@ -770,7 +771,7 @@ header h2 {
 }
 
 .btn-danger {
-  background: #e94560;
+  background: var(--danger);
   color: white;
 }
 
@@ -1205,12 +1206,12 @@ header h2 {
   background: #3a3a3a;
 }
 .preset-manage-btn-del {
-  color: #e94560;
+  color: var(--danger);
 }
 
 /* Agent 可恢复会话卡片样式 */
 .cc-session {
-  border-left: 3px solid #e94560;
+  border-left: 3px solid var(--accent);
 }
 .cc-icon {
   width: 36px;
@@ -1338,10 +1339,10 @@ header h2 {
   flex: 1;
   padding: 8px 12px;
   font-size: 15px;
-  background: #1a1a2e;
-  border: 1px solid #3a3a5e;
+  background: var(--bg2);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #cfd7ff;
+  color: var(--text);
   resize: none;
   outline: none;
   font-family: inherit;
