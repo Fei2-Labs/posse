@@ -4,7 +4,6 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import os from 'os';
-import { app as electronApp } from 'electron';
 import buildStamp from './build-stamp.json';
 import { execFileSync, execSync } from 'child_process';
 
@@ -18,6 +17,25 @@ import sharp from 'sharp';
 import { getDisplayName } from './pty-manager';
 import { PtyBackend, PtySessionSnapshot } from './pty-backend';
 import { ChatSessionManager } from './chat-session-manager';
+
+// App version provider. Electron's main process sets this to `app.getVersion()`;
+// the headless backend sets it to the version read from package.json. Keeping this
+// injectable is what lets remote-server.ts import NOTHING from 'electron', so the whole
+// backend chain can run on a GUI-less server.
+let appVersionProvider: () => string = () => {
+  // Fallback: read version from the nearest package.json (resolves whether running from
+  // dist/main/ in the packaged app or from a bundled headless entry).
+  try {
+    const pkg = require(path.join(__dirname, '..', '..', 'package.json'));
+    if (pkg && typeof pkg.version === 'string') return pkg.version;
+  } catch { /* ignore */ }
+  return '0.0.0';
+};
+
+/** Override the version reported by /api/server-info. Call before startRemoteServer(). */
+export function setAppVersionProvider(provider: () => string): void {
+  appVersionProvider = provider;
+}
 
 export type RemoteServerInfo = {
   lanUrl: string;
@@ -544,7 +562,7 @@ export function startRemoteServer(
   app.get('/api/server-info', (_req, res) => {
     res.json({
       ip: LOCAL_IP, port: PORT, hostname: os.hostname(),
-      version: electronApp.getVersion(),
+      version: appVersionProvider(),
       sha: buildStamp.sha,
       builtAt: buildStamp.builtAt,
     });

@@ -7,7 +7,7 @@ import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
 import { AIConfigManager } from './ai-config';
-import { startRemoteServer, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, getTailscaleInfo, type RemoteConnectionStatus } from './remote-server';
+import { startRemoteServer, setAppVersionProvider, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, getTailscaleInfo, type RemoteConnectionStatus } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
 import { ChatSessionManager } from './chat-session-manager';
 import { WindsurfProxyManager } from './windsurf-proxy-manager';
@@ -2676,6 +2676,7 @@ app.whenReady().then(async () => {
   createWindow(appIcon);
 
   // Start the remote-access server (mobile)
+  setAppVersionProvider(() => app.getVersion());
   startRemoteServer(ptyManager, (sessionInfo) => {
     // The mobile client created a session; notify the desktop renderer to refresh
     safeSend('pty:remote-created', sessionInfo);
