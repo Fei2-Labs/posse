@@ -3956,6 +3956,23 @@ window.posse.onPtyData((id, data) => {
   // Track status for all sessions (busy/waiting), so the state survives switching away and back
   const activeId = termManager.getActiveId();
   if (sessionTitles.has(id)) {
+    // Ignore purely cosmetic output (cursor moves, OSC title sequences, spinner-stop
+    // redraws, stray control bytes). Such chunks must NOT flip a viewed, quiet session
+    // back to busy/unread (green). Strip ANSI/control sequences and check for residual
+    // visible content.
+    const stripped = data
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC
+      .replace(/\x1b[@-_]/g, '') // other escapes
+      .replace(/[\x00-\x1f\x7f]/g, ''); // remaining C0 control chars
+    const cosmeticOnly = stripped.trim().length === 0;
+    if (cosmeticOnly) {
+      // Still accumulate recent data so cross-chunk prompt detection keeps working.
+      const prev = recentDataBuffer.get(id) || '';
+      recentDataBuffer.set(id, (prev + data).slice(-500));
+      return; // no busy/unread/waiting mutation, no prompt/timeout logic, no render
+    }
+
     // On new output, prefer showing "busy" (yellow dot) and clear the old "pending" (green dot)
     const prevBusy = sessionBusy.has(id);
     const prevUnread = sessionUnread.has(id);
