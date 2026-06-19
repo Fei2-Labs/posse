@@ -752,11 +752,13 @@ html, body {
   display: none;
 }
 
-/* Source/rendered toggle bar */
+/* Source/rendered toggle bar (Edit/Save on the left, rendered toggle right) */
 .fp-toggle {
   flex: 0 0 auto;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--border, #2a2a2a);
   background: var(--bg-secondary, #161616);
@@ -764,6 +766,36 @@ html, body {
 
 .fp-toggle[hidden] {
   display: none;
+}
+
+/* Edit/Save group */
+.fp-edit-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fp-edit-group[hidden] {
+  display: none;
+}
+
+.fp-toggle-btn[hidden] {
+  display: none;
+}
+
+.fp-edit-btn.fp-edit-active {
+  color: var(--text-primary, #eee);
+  border-color: var(--accent, #3fb950);
+}
+
+.fp-save-btn {
+  color: var(--accent, #3fb950);
+  border-color: var(--accent, #3fb950);
+}
+
+.fp-save-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .fp-toggle-btn {

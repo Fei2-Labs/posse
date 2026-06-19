@@ -1947,6 +1947,23 @@ function registerIPC(): void {
     }
   });
 
+  // Write a text file (utf8) for the in-app editable preview. Never throws across IPC.
+  ipcMain.handle('fs:write-file', (_e, filePath: string, content: string) => {
+    try {
+      if (typeof filePath !== 'string' || filePath.trim() === '') {
+        return { ok: false, error: 'invalid-path' };
+      }
+      if (typeof content !== 'string') {
+        return { ok: false, error: 'invalid-content' };
+      }
+      const abs = path.resolve(filePath);
+      fs.writeFileSync(abs, content, 'utf-8');
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
   // Read a file as a base64 data URL (for image previews). Never throws.
   ipcMain.handle('fs:read-file-base64', (_e, filePath: string) => {
     const MAX_IMAGE_BYTES = 16 * 1024 * 1024; // 16MB cap

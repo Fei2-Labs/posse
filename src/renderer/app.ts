@@ -55,6 +55,7 @@ declare global {
       fileTreeListDir: (dirPath: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>;
       fileTreeTrash: (p: string) => Promise<{ ok: boolean; error?: string }>;
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
+      writeFile: (filePath: string, content: string) => Promise<{ ok: boolean; error?: string }>;
       readFileBase64: (filePath: string) => Promise<{ ok: boolean; dataUrl?: string; size?: number; ext?: string; error?: string }>;
       claudeSessionsList: (cwd: string) => Promise<Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string }>>;
       projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
@@ -1427,7 +1428,10 @@ async function openFilePreview(filePath: string, name: string): Promise<void> {
     const kb = img.size ? (img.size / 1024).toFixed(1) : '0';
     filePreviewMeta.textContent = `${img.ext || ext} · ${kb} KB`;
     filePreviewPanel.hidden = false;
-    if (!filePreview) filePreview = createFilePreview(filePreviewBody);
+    if (!filePreview) filePreview = createFilePreview(filePreviewBody, {
+    onSave: (p, content) => window.posse.writeFile(p, content),
+    onToast: (msg) => showBriefNotice(msg),
+  });
     filePreview.showImage(img.dataUrl, img.ext || ext);
     return;
   }
@@ -1452,9 +1456,13 @@ async function openFilePreview(filePath: string, name: string): Promise<void> {
   const kb = res.size ? (res.size / 1024).toFixed(1) : '0';
   filePreviewMeta.textContent = `${res.ext || 'txt'} · ${kb} KB`;
   filePreviewPanel.hidden = false;
-  if (!filePreview) filePreview = createFilePreview(filePreviewBody);
+  if (!filePreview) filePreview = createFilePreview(filePreviewBody, {
+    onSave: (p, content) => window.posse.writeFile(p, content),
+    onToast: (msg) => showBriefNotice(msg),
+  });
   // The preview picks the render mode (markdown/html/source) from the extension.
-  filePreview.show(res.content || '', res.ext || '');
+  // Pass the absolute path so in-app edits know what to save.
+  filePreview.show(res.content || '', res.ext || '', filePath);
 }
 
 filePreviewCloseBtn.addEventListener('click', closeFilePreview);

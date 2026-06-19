@@ -3,8 +3,8 @@
 //   - html      → sandboxed iframe (no scripts) (with source toggle)
 //   - image     → <img> from a data URL
 //   - source    → read-only CodeMirror 6 editor (fallback for everything else)
-import { EditorState, Compartment } from '@codemirror/state';
-import { EditorView, lineNumbers, highlightActiveLine } from '@codemirror/view';
+import { EditorState, Compartment, Prec } from '@codemirror/state';
+import { EditorView, lineNumbers, highlightActiveLine, keymap } from '@codemirror/view';
 import { syntaxHighlighting, defaultHighlightStyle, foldGutter } from '@codemirror/language';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { markdown } from '@codemirror/lang-markdown';
@@ -81,20 +81,34 @@ function languageForExt(ext: string) {
   }
 }
 
+export interface FilePreviewOptions {
+  // Persist the current editor text to disk. Resolves with { ok } so the
+  // preview can clear the dirty flag and toast. The host wires this to the
+  // file-write IPC; the preview never touches IPC directly.
+  onSave?: (path: string, content: string) => Promise<{ ok: boolean; error?: string }>;
+  // Brief, non-blocking notice (host's toast helper).
+  onToast?: (message: string) => void;
+}
+
 export interface FilePreview {
-  // Show text content (markdown/html/source picked by ext).
-  show(content: string, ext: string): void;
+  // Show text content (markdown/html/source picked by ext). `path` is the
+  // absolute file path, threaded through so in-app edits know what to save.
+  show(content: string, ext: string, path?: string): void;
   // Show an image from a base64 data URL (or any URL).
   showImage(dataUrl: string, ext: string): void;
   destroy(): void;
 }
 
 // Mount the preview inside the given container.
-export function createFilePreview(parent: HTMLElement): FilePreview {
+export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions = {}): FilePreview {
   // --- Source editor (CodeMirror) ---
   const cmHost = document.createElement('div');
   cmHost.className = 'fp-source';
   const language = new Compartment();
+  // Toggled between read-only (default) and editable when the user opts in.
+  const editable = new Compartment();
+  // Save current editor text to disk; declared after `view` exists.
+  let saveCurrent: () => void = () => {};
   const view = new EditorView({
     parent: cmHost,
     state: EditorState.create({
@@ -105,10 +119,27 @@ export function createFilePreview(parent: HTMLElement): FilePreview {
         highlightActiveLine(),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         oneDark,
-        EditorState.readOnly.of(true),
-        EditorView.editable.of(false),
+        editable.of([EditorState.readOnly.of(true), EditorView.editable.of(false)]),
         EditorView.lineWrapping,
         language.of([]),
+        // Cmd/Ctrl+S saves when editable. High precedence so it beats defaults.
+        Prec.highest(
+          keymap.of([
+            {
+              key: 'Mod-s',
+              run: () => {
+                saveCurrent();
+                return true;
+              },
+            },
+          ]),
+        ),
+        // Track dirty state: any user edit while editable marks the doc dirty.
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged && isEditing) {
+            markDirty();
+          }
+        }),
       ],
     }),
   });
@@ -132,13 +163,31 @@ export function createFilePreview(parent: HTMLElement): FilePreview {
   const imgEl = document.createElement('img');
   imgHost.appendChild(imgEl);
 
-  // --- Source/rendered toggle (md & html only) ---
+  // --- Toolbar: Edit/Save (left) + source/rendered toggle (right) ---
   const toggleBar = document.createElement('div');
   toggleBar.className = 'fp-toggle';
   toggleBar.hidden = true;
+
+  // Edit toggle + Save live on the left, pushed away from the rendered toggle.
+  const editGroup = document.createElement('div');
+  editGroup.className = 'fp-edit-group';
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'fp-toggle-btn fp-edit-btn';
+  editBtn.textContent = 'Edit';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'fp-toggle-btn fp-save-btn';
+  saveBtn.textContent = 'Save';
+  saveBtn.hidden = true;
+  editGroup.appendChild(editBtn);
+  editGroup.appendChild(saveBtn);
+
   const toggleBtn = document.createElement('button');
   toggleBtn.type = 'button';
   toggleBtn.className = 'fp-toggle-btn';
+
+  toggleBar.appendChild(editGroup);
   toggleBar.appendChild(toggleBtn);
 
   parent.appendChild(toggleBar);
@@ -150,18 +199,109 @@ export function createFilePreview(parent: HTMLElement): FilePreview {
   // Current document state for toggling between rendered and source.
   let curContent = '';
   let curExt = '';
+  let curPath = '';
   let curMode: PreviewMode = 'source';
   let showingSource = false;
+  // In-app editing state (source view only).
+  let isEditing = false;
+  let isDirty = false;
+  let isSaving = false;
+
+  // Source CodeMirror is visible when: pure source mode, OR a md/html file with
+  // the Source view selected. Editing only applies to that CodeMirror.
+  function sourceVisible(): boolean {
+    return curMode === 'source' || (showingSource && curMode !== 'image');
+  }
+
+  // Edit/Save controls are offered only where a CodeMirror is actually shown.
+  function editAvailable(): boolean {
+    return sourceVisible();
+  }
 
   function applyVisibility(): void {
     const renderedVisible = !showingSource;
-    cmHost.hidden = !(curMode === 'source' || (showingSource && curMode !== 'image'));
+    cmHost.hidden = !sourceVisible();
     mdHost.hidden = !(curMode === 'markdown' && renderedVisible);
     htmlHost.hidden = !(curMode === 'html' && renderedVisible);
     imgHost.hidden = curMode !== 'image';
-    toggleBar.hidden = !(curMode === 'markdown' || curMode === 'html');
+    // Toolbar shows for md/html (rendered toggle) and any editable source view.
+    toggleBar.hidden = !(curMode === 'markdown' || curMode === 'html' || editAvailable());
+    toggleBtn.hidden = !(curMode === 'markdown' || curMode === 'html');
     toggleBtn.textContent = showingSource ? 'Rendered' : 'Source';
+    editGroup.hidden = !editAvailable();
+    updateEditUi();
   }
+
+  function updateEditUi(): void {
+    editBtn.textContent = isEditing ? 'Editing' : 'Edit';
+    editBtn.classList.toggle('fp-edit-active', isEditing);
+    saveBtn.hidden = !(isEditing && isDirty);
+    saveBtn.disabled = isSaving;
+    saveBtn.textContent = isDirty ? 'Save *' : 'Save';
+  }
+
+  function markDirty(): void {
+    if (!isDirty) {
+      isDirty = true;
+      updateEditUi();
+    }
+  }
+
+  function setEditing(on: boolean): void {
+    isEditing = on;
+    view.dispatch({
+      effects: editable.reconfigure(
+        on
+          ? [EditorState.readOnly.of(false), EditorView.editable.of(true)]
+          : [EditorState.readOnly.of(true), EditorView.editable.of(false)],
+      ),
+    });
+    if (on) {
+      // Switching a md/html file into edit mode forces the Source view.
+      if (!showingSource && curMode !== 'source') {
+        showingSource = true;
+        renderSource();
+      }
+      view.focus();
+    }
+    updateEditUi();
+  }
+
+  async function doSave(): Promise<void> {
+    if (!isEditing || !isDirty || isSaving) return;
+    if (!curPath) {
+      opts.onToast?.('No file path to save to');
+      return;
+    }
+    if (!opts.onSave) return;
+    isSaving = true;
+    updateEditUi();
+    const text = view.state.doc.toString();
+    try {
+      const res = await opts.onSave(curPath, text);
+      if (res.ok) {
+        curContent = text;
+        isDirty = false;
+        opts.onToast?.('Saved');
+      } else {
+        opts.onToast?.(`Save failed: ${res.error || 'unknown error'}`);
+      }
+    } catch (err) {
+      opts.onToast?.(`Save failed: ${(err as Error).message}`);
+    } finally {
+      isSaving = false;
+      updateEditUi();
+    }
+  }
+  // Expose to the Cmd/Ctrl+S keybinding declared in the editor extensions.
+  saveCurrent = () => {
+    void doSave();
+  };
+
+  editBtn.addEventListener('click', () => setEditing(!isEditing));
+  saveBtn.addEventListener('click', () => {
+    void doSave();
+  });
 
   function renderRendered(): void {
     if (curMode === 'markdown') {
@@ -184,17 +324,34 @@ export function createFilePreview(parent: HTMLElement): FilePreview {
 
   toggleBtn.addEventListener('click', () => {
     showingSource = !showingSource;
-    if (showingSource) renderSource();
-    else renderRendered();
+    if (showingSource) {
+      // Re-seed from curContent (drops any unsaved edits); leaving source view
+      // also exits edit mode so rendered stays read-only.
+      renderSource();
+    } else {
+      if (isEditing) setEditing(false);
+      isDirty = false;
+      renderRendered();
+    }
     applyVisibility();
   });
 
+  // Reset editing/dirty state when a new document is loaded.
+  function resetEditState(): void {
+    if (isEditing) setEditing(false);
+    isEditing = false;
+    isDirty = false;
+    isSaving = false;
+  }
+
   return {
-    show(content: string, ext: string) {
+    show(content: string, ext: string, filePath = '') {
       curContent = content;
       curExt = ext;
+      curPath = filePath;
       curMode = modeForExt(ext);
       showingSource = false;
+      resetEditState();
       if (curMode === 'markdown' || curMode === 'html') {
         renderRendered();
       } else {
@@ -206,8 +363,10 @@ export function createFilePreview(parent: HTMLElement): FilePreview {
     showImage(dataUrl: string, ext: string) {
       curContent = '';
       curExt = ext;
+      curPath = '';
       curMode = 'image';
       showingSource = false;
+      resetEditState();
       imgEl.src = dataUrl;
       imgEl.alt = '';
       applyVisibility();

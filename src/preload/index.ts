@@ -46,6 +46,9 @@ contextBridge.exposeInMainWorld('posse', {
   fileTreeTrash: (p: string) => ipcRenderer.invoke('file-tree:trash', p),
   // Read file contents (for the right-side read-only preview panel)
   readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
+  // Write file contents (for the in-app editable preview)
+  writeFile: (filePath: string, content: string) =>
+    ipcRenderer.invoke('fs:write-file', filePath, content),
   // Read a (binary) file as a base64 data URL — used for image previews
   readFileBase64: (filePath: string) => ipcRenderer.invoke('fs:read-file-base64', filePath),
   // List a directory's native session history in Claude Code
