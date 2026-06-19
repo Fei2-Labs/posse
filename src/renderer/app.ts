@@ -51,6 +51,7 @@ declare global {
       getSessions: () => Promise<PtySessionInfo[]>;
       daemonRestart: () => Promise<{ ok: boolean; error?: string }>;
       selectFolder: (currentPath?: string) => Promise<string | null>;
+      sshListHosts: () => Promise<Array<{ host: string; hostName?: string; user?: string }>>;
       fileTreeListDir: (dirPath: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>;
       fileTreeTrash: (p: string) => Promise<{ ok: boolean; error?: string }>;
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
@@ -3876,6 +3877,66 @@ presetAddBtn.addEventListener('click', async () => {
 presetManageBtn.addEventListener('click', () => {
   showPresetManageDialog();
 });
+
+// SSH host picker: lists Host aliases from ~/.ssh/config and opens a plain SSH terminal
+// (a local pty running `ssh <host>`) on pick. Delegates auth/keys/known_hosts to system ssh.
+const sshHostBtn = document.getElementById('ssh-host-btn');
+sshHostBtn?.addEventListener('click', async (e) => {
+  dismissNavMenus();
+  let hosts: Array<{ host: string; hostName?: string; user?: string }> = [];
+  try {
+    hosts = await window.posse.sshListHosts();
+  } catch {
+    hosts = [];
+  }
+  const menu = document.createElement('div');
+  menu.className = 'term-context-menu nav-popup-menu ssh-host-menu';
+  if (hosts.length === 0) {
+    const el = document.createElement('div');
+    el.className = 'term-context-item ssh-host-empty';
+    el.textContent = 'No hosts in ~/.ssh/config';
+    menu.appendChild(el);
+  } else {
+    for (const h of hosts) {
+      const el = document.createElement('div');
+      el.className = 'term-context-item';
+      const detail = h.hostName ? `${h.user ? h.user + '@' : ''}${h.hostName}` : '';
+      el.innerHTML = `<span class="ssh-host-name"></span>${detail ? '<span class="ssh-host-detail"></span>' : ''}`;
+      (el.querySelector('.ssh-host-name') as HTMLElement).textContent = h.host;
+      if (detail) (el.querySelector('.ssh-host-detail') as HTMLElement).textContent = detail;
+      el.addEventListener('click', () => {
+        menu.remove();
+        void openSshSession(h.host);
+      });
+      menu.appendChild(el);
+    }
+  }
+  positionNavMenu(menu, e);
+});
+
+// Spawn a terminal running `ssh <host>` in a local pty. Auth/keys/known_hosts are
+// delegated to the system ssh binary (it reads ~/.ssh/config natively). The session
+// shows in the list with a distinguishable "ssh: <host>" title. Local cwd only matters
+// before the remote shell takes over; an empty cwd makes the daemon fall back to HOME.
+async function openSshSession(host: string): Promise<void> {
+  // ssh aliases are normally bare tokens; quote defensively if odd chars sneak in.
+  const safeHost = /^[A-Za-z0-9._@-]+$/.test(host) ? host : `'${host.replace(/'/g, `'\\''`)}'`;
+  const presetCommand = `ssh ${safeHost}`;
+  const cwd = currentCwd || cwdInput.value.trim() || '';
+  const themeId = resolveThemeId(currentThemeId, cwd || host);
+  const result = await window.posse.createPty(cwd, presetCommand, themeId);
+  const now = Date.now();
+  attachPtySession(result, now);
+  sessionDisplayNames.set(result.id, `ssh: ${host}`);
+  updateEmptyState();
+  renderSessionList();
+  updateSessionTitleBar();
+  void renderFileTree();
+  setTimeout(() => {
+    const dims = termManager.getActiveDimensions();
+    if (dims) window.posse.resizePty(result.id, dims.cols, dims.rows);
+  }, 100);
+}
 
 // ========== IPC listeners ==========
 

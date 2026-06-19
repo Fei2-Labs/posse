@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('posse', {
 
   // Select folder
   selectFolder: (currentPath?: string) => ipcRenderer.invoke('dialog:select-folder', currentPath),
+  // List SSH host aliases from ~/.ssh/config (Phase 1 SSH terminal picker)
+  sshListHosts: () => ipcRenderer.invoke('ssh:list-hosts'),
   // Read directory tree (for the left-side file tree)
   fileTreeListDir: (dirPath: string) => ipcRenderer.invoke('file-tree:list-dir', dirPath),
   // Move a file/folder to the OS trash (recoverable)

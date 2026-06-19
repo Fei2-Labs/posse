@@ -442,6 +442,32 @@ html, body {
   color: var(--text-primary);
 }
 
+/* SSH host picker button: text label, so auto-width with the icon-btn look */
+#ssh-host-btn {
+  width: auto;
+  padding: 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+/* SSH host menu rows: host alias on top, optional user@hostname hint dimmed */
+.ssh-host-menu .term-context-item {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+.ssh-host-menu .ssh-host-detail {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.ssh-host-menu .ssh-host-empty {
+  color: var(--text-secondary);
+  cursor: default;
+}
+.ssh-host-menu .ssh-host-empty:hover {
+  background: transparent;
+}
+
 /* Compact square icon button for the sidebar topbar */
 .topbar-icon-btn {
   width: 30px;

@@ -322,6 +322,72 @@ function expandUserPath(filePath: string): string {
   return filePath;
 }
 
+export interface SshHostEntry {
+  host: string;
+  hostName?: string;
+  user?: string;
+}
+
+// Parse an OpenSSH config file into a list of connectable Host aliases.
+// - Collects every pattern on each `Host` line; wildcard-only patterns (containing
+//   `*` or `?`) are skipped since they aren't connectable targets.
+// - HostName/User from the block are attached as display-only hints.
+// - Best-effort follows `Include` directives (one level, relative to ~/.ssh).
+// Pure parsing; the caller wraps in try/catch.
+function parseSshConfig(content: string, seen: Set<string>, out: SshHostEntry[], depth: number): void {
+  // Hosts declared in the current block, awaiting HostName/User hints.
+  let pending: SshHostEntry[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    // Tokens are separated by whitespace or `=` (e.g. `HostName=example.com`).
+    const eq = line.replace(/=/g, ' ');
+    const parts = eq.split(/\s+/);
+    const keyword = (parts.shift() || '').toLowerCase();
+    const args = parts.filter(Boolean);
+    if (keyword === 'host') {
+      pending = [];
+      for (const pattern of args) {
+        if (pattern.includes('*') || pattern.includes('?')) continue;
+        if (pattern.startsWith('!')) continue; // negated pattern, not a target
+        if (seen.has(pattern)) continue;
+        seen.add(pattern);
+        const entry: SshHostEntry = { host: pattern };
+        out.push(entry);
+        pending.push(entry);
+      }
+    } else if (keyword === 'hostname' && args[0]) {
+      for (const e of pending) if (!e.hostName) e.hostName = args[0];
+    } else if (keyword === 'user' && args[0]) {
+      for (const e of pending) if (!e.user) e.user = args[0];
+    } else if (keyword === 'include' && depth < 3) {
+      for (const inc of args) {
+        try {
+          const base = expandUserPath(inc);
+          const resolved = path.isAbsolute(base) ? base : path.join(os.homedir(), '.ssh', base);
+          if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+            parseSshConfig(fs.readFileSync(resolved, 'utf8'), seen, out, depth + 1);
+          }
+        } catch { /* ignore unreadable include */ }
+      }
+    }
+  }
+}
+
+function listSshHosts(): SshHostEntry[] {
+  try {
+    const configPath = path.join(os.homedir(), '.ssh', 'config');
+    if (!fs.existsSync(configPath)) return [];
+    const content = fs.readFileSync(configPath, 'utf8');
+    const out: SshHostEntry[] = [];
+    parseSshConfig(content, new Set<string>(), out, 0);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function spawnEditorCommand(command: string, args: string[]): Promise<OpenEditorResult> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { stdio: 'ignore', detached: true });
@@ -1803,6 +1869,13 @@ function registerIPC(): void {
       : await dialog.showOpenDialog(dialogOptions);
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
+  });
+
+  // List SSH hosts from ~/.ssh/config (Phase 1: SSH terminal host picker).
+  // Returns connectable Host aliases (wildcard-only patterns excluded). HostName/User
+  // are display-only hints. Never throws across IPC: returns [] on any failure.
+  ipcMain.handle('ssh:list-hosts', () => {
+    return listSshHosts();
   });
 
   // Read directory (left-side file tree)
