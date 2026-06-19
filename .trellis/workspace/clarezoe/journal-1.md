@@ -145,3 +145,36 @@ Pointed in-app GitHub link + docs URLs to Fei2-Labs/posse, updated user-facing D
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Fix viewed session dot staying green on cosmetic redraws (#32)
+
+**Date**: 2026-06-19
+**Task**: Fix viewed session dot staying green on cosmetic redraws (#32)
+**Branch**: `main`
+
+### Summary
+
+onPtyData marked any pty chunk (incl. cursor/OSC/spinner redraws) as busy->unread, flipping a viewed quiet session green. Added cosmeticOnly guard: skip busy/unread state + render when a chunk has no visible content after stripping ANSI/OSC/control; still accumulate recentDataBuffer. Closes #32.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ab3134e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

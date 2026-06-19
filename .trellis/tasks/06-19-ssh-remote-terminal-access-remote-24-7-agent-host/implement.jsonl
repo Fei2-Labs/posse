@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "New IPC for fs:write-file, ssh terminal spawn, host registry, session routing — follow existing IPC patterns"}
+{"file": ".trellis/spec/big-question/ipc-handler-registration.md", "reason": "Avoid IPC handler registration pitfalls when adding remote/host IPC channels"}
+{"file": ".trellis/spec/backend/environment.md", "reason": "Env injection rules — LLM env (ANTHROPIC_BASE_URL) injected for borrow-mode, SKIPPED for remote-native sessions"}
+{"file": ".trellis/spec/backend/api-patterns.md", "reason": "remote-server.ts endpoint conventions — desktop client reuses the mobile server protocol (Tier 2)"}
+{"file": ".trellis/spec/big-question/network-stack-differences.md", "reason": "Tailscale/SSH transport + tunnel/network behavior for Tier 2 connection"}
+{"file": ".trellis/spec/big-question/native-module-packaging.md", "reason": "node-pty cross-arch packaging for the headless remote backend bundle (Tier 2 bootstrap)"}
+{"file": ".trellis/spec/big-question/native-module-complex-deps.md", "reason": "Native dep packaging caveats for the single-file remote backend binary"}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "Multi-window (per-host window binding) + CSP constraints in the renderer"}
+{"file": ".trellis/spec/shared/pnpm-electron-setup.md", "reason": "Build/packaging setup when producing the headless backend artifact"}

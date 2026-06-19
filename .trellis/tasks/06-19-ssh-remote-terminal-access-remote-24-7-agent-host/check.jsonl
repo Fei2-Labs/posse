@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "General quality bar for the change"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "IPC + SSH/tunnel failures must never throw across IPC; verify graceful {ok,error} returns"}
+{"file": ".trellis/spec/backend/environment.md", "reason": "Verify LLM env is injected only for borrow-mode and never for remote-native 24/7 sessions"}
+{"file": ".trellis/spec/big-question/ipc-handler-registration.md", "reason": "Verify new IPC channels are registered correctly"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Verify types across new preload/IPC signatures and per-host connection registry"}
+{"file": ".trellis/spec/shared/git-conventions.md", "reason": "Commit/PR conventions for the phased work"}
