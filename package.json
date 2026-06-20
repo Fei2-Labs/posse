@@ -10,6 +10,7 @@
     "build:terminal-client": "esbuild src/terminal-client/app.ts --bundle --outfile=dist/terminal-client/app.js --platform=browser && node -e \"const fs=require('fs'),p=require('path');const d=p.join('dist','terminal-client');fs.mkdirSync(d,{recursive:true});for(const f of ['index.html','styles.css']) fs.copyFileSync(p.join('src','terminal-client',f),p.join(d,f));fs.copyFileSync(p.join('node_modules','@xterm','xterm','css','xterm.css'),p.join(d,'xterm.css'));\"",
     "build:stamp": "node scripts/build-stamp.js",
     "build:headless": "npm run build:stamp && npm run build:main && esbuild src/main/headless.ts --bundle --outfile=dist/main/headless.js --platform=node --target=node20 --external:electron --external:node-pty --external:sharp --external:ws",
+    "build:remote-bundle": "npm run build:headless && node scripts/build-remote-bundle.js",
     "build:ts": "npm run build:stamp && npm run build:main && npm run build:preload && npm run build:renderer && npm run build:terminal-client",
     "watch:main": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
     "watch:preload": "tsc -p tsconfig.preload.json --watch --preserveWatchOutput",
@@ -118,6 +119,10 @@
         "filter": [
           "cloudflared-config.yml"
         ]
+      },
+      {
+        "from": "scripts/posse-remote-bootstrap.sh",
+        "to": "scripts/posse-remote-bootstrap.sh"
       }
     ],
     "mac": {

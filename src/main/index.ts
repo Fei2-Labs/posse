@@ -13,6 +13,7 @@ import { startRemoteServer, setAppVersionProvider, pushRawDataToRemote, sendRemo
 import { CloudflaredManager } from './cloudflared-manager';
 import { ChatSessionManager } from './chat-session-manager';
 import { WindsurfProxyManager } from './windsurf-proxy-manager';
+import { bootstrapRemoteHost } from './remote-bootstrap';
 import buildStamp from './build-stamp.json';
 import {
   type AgentHistorySession,
@@ -1914,6 +1915,21 @@ function registerIPC(): void {
       });
       setActiveConnection(id);
       return { ok: true, id, label };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  // Bootstrap a remote SSH host: deploy + start the headless backend, then connect to it.
+  // Reuses addRemoteConnection so the resulting connection behaves identically to a manual add.
+  ipcMain.handle('connections:bootstrap-ssh-host', async (_e, host: string) => {
+    try {
+      const sshHost = String(host || '').trim();
+      if (!sshHost) return { ok: false, error: 'ssh host is required' };
+      const { baseUrl, token } = await bootstrapRemoteHost(sshHost);
+      const { id, label } = await addRemoteConnection({ label: sshHost, baseUrl, token });
+      setActiveConnection(id);
+      return { ok: true, id, label, baseUrl };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }

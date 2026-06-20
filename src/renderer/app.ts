@@ -152,6 +152,7 @@ declare global {
       // Connections (remote host add/switch)
       connectionsList: () => Promise<Array<{ id: string; label: string; kind: 'local' | 'remote'; active: boolean }>>;
       connectionsAdd: (opts: { label?: string; baseUrl: string; token: string }) => Promise<{ ok: boolean; id?: string; label?: string; error?: string }>;
+      connectionsBootstrapSshHost: (host: string) => Promise<{ ok: boolean; id?: string; label?: string; baseUrl?: string; error?: string }>;
       connectionsRemove: (id: string) => Promise<{ ok: boolean; error?: string }>;
       connectionsSetActive: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onConnectionChanged: (cb: (id: string) => void) => void;
@@ -4476,6 +4477,15 @@ async function openHostMenu(): Promise<void> {
   });
   menu.appendChild(addItem);
 
+  const bootstrapItem = document.createElement('div');
+  bootstrapItem.className = 'host-switcher-item host-switcher-add';
+  bootstrapItem.innerHTML = '<span class="host-switcher-check">+</span><span class="host-switcher-name">Bootstrap an SSH host…</span>';
+  bootstrapItem.addEventListener('click', () => {
+    closeHostMenu();
+    void openBootstrapSshDialog();
+  });
+  menu.appendChild(bootstrapItem);
+
   document.body.appendChild(menu);
   setTimeout(() => document.addEventListener('click', onHostMenuOutsideClick, true), 0);
 }
@@ -4551,6 +4561,81 @@ function openAddRemoteDialog(): Promise<void> {
     labelInput.addEventListener('keydown', onKey);
     urlInput.addEventListener('keydown', onKey);
     tokenInput.addEventListener('keydown', onKey);
+  });
+}
+
+// Pick a host from ~/.ssh/config, then deploy + start the headless backend on it and connect.
+// One-click version of "Add remote" — no manual URL/token entry; the bootstrap produces both.
+function openBootstrapSshDialog(): Promise<void> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    dialog.innerHTML = `
+      <h3>Bootstrap an SSH Host</h3>
+      <div class="preset-form">
+        <div class="preset-form-field">
+          <label>SSH Host (from ~/.ssh/config)</label>
+          <select id="bootstrap-host-select"></select>
+        </div>
+        <div class="preset-form-status" id="bootstrap-status" style="min-height:16px;font-size:12px;color:var(--text-secondary)"></div>
+        <div class="preset-form-error" id="bootstrap-error" style="color:var(--danger);min-height:16px;font-size:12px"></div>
+      </div>
+      <div class="confirm-buttons" style="margin-top:16px">
+        <button class="btn-cancel">Cancel</button>
+        <button class="btn-close-confirm" style="background:var(--accent)">Bootstrap &amp; Connect</button>
+      </div>`;
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    const select = dialog.querySelector('#bootstrap-host-select') as HTMLSelectElement;
+    const statusEl = dialog.querySelector('#bootstrap-status') as HTMLElement;
+    const errorEl = dialog.querySelector('#bootstrap-error') as HTMLElement;
+    const goBtn = dialog.querySelector('.btn-close-confirm') as HTMLButtonElement;
+
+    const cleanup = () => { overlay.remove(); resolve(); };
+
+    void (async () => {
+      try {
+        const hosts = await window.posse.sshListHosts();
+        if (!hosts.length) {
+          select.innerHTML = '<option value="">(no hosts in ~/.ssh/config)</option>';
+          goBtn.disabled = true;
+          return;
+        }
+        select.innerHTML = hosts
+          .map((h) => `<option value="${h.host}">${h.host}${h.hostName ? ` (${h.hostName})` : ''}</option>`)
+          .join('');
+      } catch {
+        errorEl.textContent = 'Failed to read ~/.ssh/config';
+        goBtn.disabled = true;
+      }
+    })();
+
+    const onGo = async () => {
+      const host = select.value.trim();
+      if (!host) return;
+      goBtn.disabled = true;
+      goBtn.textContent = 'Bootstrapping…';
+      errorEl.textContent = '';
+      statusEl.textContent = `Deploying backend to ${host} (this can take a minute)…`;
+      const res = await window.posse.connectionsBootstrapSshHost(host);
+      if (!res.ok) {
+        errorEl.textContent = res.error || 'Bootstrap failed';
+        statusEl.textContent = '';
+        goBtn.disabled = false;
+        goBtn.textContent = 'Bootstrap & Connect';
+        return;
+      }
+      await refreshHostSwitcherLabel();
+      cleanup();
+    };
+
+    dialog.querySelector('.btn-cancel')!.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+    goBtn.addEventListener('click', () => { void onGo(); });
+    dialog.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Escape') cleanup(); });
   });
 }
 

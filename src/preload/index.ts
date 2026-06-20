@@ -205,6 +205,8 @@ contextBridge.exposeInMainWorld('posse', {
   connectionsList: () => ipcRenderer.invoke('connections:list'),
   connectionsAdd: (opts: { label?: string; baseUrl: string; token: string }) =>
     ipcRenderer.invoke('connections:add', opts),
+  connectionsBootstrapSshHost: (host: string) =>
+    ipcRenderer.invoke('connections:bootstrap-ssh-host', host),
   connectionsRemove: (id: string) => ipcRenderer.invoke('connections:remove', id),
   connectionsSetActive: (id: string) => ipcRenderer.invoke('connections:set-active', id),
   onConnectionChanged: (cb: (id: string) => void) =>
