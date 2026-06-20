@@ -8,6 +8,7 @@ import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
 import { RemoteServerBackend } from './remote-server-backend';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
+import { loadSubscriptionToken, saveSubscriptionToken, clearSubscriptionToken, subscriptionTokenStatus } from './subscription-token';
 import { AIConfigManager } from './ai-config';
 import { startRemoteServer, setAppVersionProvider, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, getTailscaleInfo, type RemoteConnectionStatus } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
@@ -1480,8 +1481,19 @@ function registerIPC(): void {
   });
 
   // Create terminal
-  ipcMain.handle('pty:create', async (_e, cwd: string, presetCommand: string, themeId: string, providerEnv?: Record<string, string>) => {
-    const session = await activeBackend().create(cwd, presetCommand, themeId, providerEnv);
+  ipcMain.handle('pty:create', async (_e, cwd: string, presetCommand: string, themeId: string, providerEnv?: Record<string, string>, useSubscription?: boolean) => {
+    // "Use my Claude subscription" (chunk F): for a REMOTE connection only, inject the
+    // stored CLAUDE_CODE_OAUTH_TOKEN so the remote claude agent uses the user's Claude
+    // subscription (truly 24/7, independent of the Mac). Skipped for LOCAL (the Mac already
+    // has the login) and for remote-native sessions (the default — inject nothing LLM-related).
+    let effectiveProviderEnv = providerEnv;
+    if (useSubscription && activeRemoteBackend()) {
+      const subToken = loadSubscriptionToken();
+      if (subToken) {
+        effectiveProviderEnv = { ...(providerEnv || {}), CLAUDE_CODE_OAUTH_TOKEN: subToken };
+      }
+    }
+    const session = await activeBackend().create(cwd, presetCommand, themeId, effectiveProviderEnv);
     // If providerEnv is present, infer the provider name from baseUrl
     let provider: string | null = null;
     if (providerEnv && providerEnv.ANTHROPIC_BASE_URL) {
@@ -1950,6 +1962,32 @@ function registerIPC(): void {
       if (!connectionRegistry.get(target)) return { ok: false, error: 'no-such-connection' };
       setActiveConnection(target);
       return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  // Claude subscription OAuth token (chunk F: "use my subscription" for remote agents).
+  // status returns ONLY { set, maskedSuffix } — never the full token to the renderer.
+  ipcMain.handle('subscription-token:status', () => {
+    return subscriptionTokenStatus();
+  });
+
+  ipcMain.handle('subscription-token:set', (_e, token: string) => {
+    const trimmed = String(token || '').trim();
+    if (!trimmed) return { ok: false, error: 'empty-token' };
+    try {
+      saveSubscriptionToken(trimmed);
+      return { ok: true, status: subscriptionTokenStatus() };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  ipcMain.handle('subscription-token:clear', () => {
+    try {
+      clearSubscriptionToken();
+      return { ok: true, status: subscriptionTokenStatus() };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }

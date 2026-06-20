@@ -42,7 +42,10 @@ declare global {
   interface Window {
     posse: {
       setWindowTitle: (title: string) => void;
-      createPty: (cwd: string, presetCommand: string, themeId: string) => Promise<PtySessionInfo>;
+      createPty: (cwd: string, presetCommand: string, themeId: string, providerEnv?: Record<string, string>, useSubscription?: boolean) => Promise<PtySessionInfo>;
+      subscriptionTokenStatus: () => Promise<{ set: boolean; maskedSuffix?: string }>;
+      subscriptionTokenSet: (token: string) => Promise<{ ok: boolean; error?: string; status?: { set: boolean; maskedSuffix?: string } }>;
+      subscriptionTokenClear: () => Promise<{ ok: boolean; error?: string; status?: { set: boolean; maskedSuffix?: string } }>;
       writePty: (id: string, data: string) => void;
       resizePty: (id: string, cols: number, rows: number) => void;
       destroyPty: (id: string) => void;
@@ -2979,7 +2982,7 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
   if (!cwd) return;
   addRecentCwd(cwd);
   const themeId = resolveThemeId(currentThemeId, cwd);
-  const result = await window.posse.createPty(cwd, presetCommand, themeId);
+  const result = await window.posse.createPty(cwd, presetCommand, themeId, undefined, useSubscriptionFlag());
   const now = Date.now();
   attachPtySession(result, now);
 
@@ -3149,7 +3152,7 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
     command = cs.presetCommand || '';
   }
 
-  const result = await window.posse.createPty(cwd, command, themeId);
+  const result = await window.posse.createPty(cwd, command, themeId, undefined, useSubscriptionFlag());
   const now = Date.now();
   // Pick a displayName that always carries the agent name so the rail shows the agent immediately,
   // before runtime provider detection: prefer the captured displayName, else the spawned command's
@@ -3218,7 +3221,7 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   }
 
   const themeId = resolveThemeId(currentThemeId, s.cwd);
-  const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId);
+  const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId, undefined, useSubscriptionFlag());
   const now = Date.now();
   // Ensure the rail shows the agent immediately: fall back to the resume command (contains the agent
   // name) / s.agent if the spawned displayName is missing, before runtime provider detection.
@@ -3278,7 +3281,7 @@ async function createSession(): Promise<boolean> {
   const themeId = resolveThemeId(currentThemeId, currentCwd);
   lastPreset = preset;
   localStorage.setItem('posse_preset', preset);
-  const result = await window.posse.createPty(currentCwd, preset, themeId);
+  const result = await window.posse.createPty(currentCwd, preset, themeId, undefined, useSubscriptionFlag());
   const now = Date.now();
   attachPtySession(result, now);
   // Custom preset: override the backend fallback with the user-defined name
@@ -4398,6 +4401,41 @@ window.posse.onCloseCurrentSession(() => {
 const hostSwitcherBtn = document.getElementById('host-switcher-btn');
 const hostSwitcherLabel = document.getElementById('host-switcher-label');
 
+// "Use my Claude subscription" for new REMOTE sessions. Only meaningful when the active
+// connection is remote AND a subscription token is stored. When true, createPty is asked
+// to inject CLAUDE_CODE_OAUTH_TOKEN on the remote (main process gates this to remote-only).
+let useSubscriptionForNew = false;
+let activeConnectionIsRemote = false;
+let subscriptionTokenIsSet = false;
+
+// Whether the "Use my Claude subscription" toggle is applicable in the current state.
+function subscriptionToggleApplicable(): boolean {
+  return activeConnectionIsRemote && subscriptionTokenIsSet;
+}
+
+// The effective useSubscription flag for a NEW agent session: only when the toggle is on
+// AND it's applicable (remote + token set). Main process re-gates this to remote-only.
+function useSubscriptionFlag(): boolean {
+  return useSubscriptionForNew && subscriptionToggleApplicable();
+}
+
+async function refreshSubscriptionState(): Promise<void> {
+  try {
+    const list = await window.posse.connectionsList();
+    const active = list.find((c) => c.active) || list[0];
+    activeConnectionIsRemote = !!active && active.kind === 'remote';
+  } catch {
+    activeConnectionIsRemote = false;
+  }
+  try {
+    const status = await window.posse.subscriptionTokenStatus();
+    subscriptionTokenIsSet = !!status.set;
+  } catch {
+    subscriptionTokenIsSet = false;
+  }
+  if (!subscriptionToggleApplicable()) useSubscriptionForNew = false;
+}
+
 async function refreshHostSwitcherLabel(): Promise<void> {
   if (!hostSwitcherLabel) return;
   try {
@@ -4486,6 +4524,33 @@ async function openHostMenu(): Promise<void> {
   });
   menu.appendChild(bootstrapItem);
 
+  await refreshSubscriptionState();
+
+  // "Use my Claude subscription" toggle — only when active connection is remote AND a token
+  // is stored. Toggles whether NEW remote sessions inject CLAUDE_CODE_OAUTH_TOKEN.
+  if (subscriptionToggleApplicable()) {
+    const toggle = document.createElement('div');
+    toggle.className = 'host-switcher-item' + (useSubscriptionForNew ? ' active' : '');
+    toggle.innerHTML = `<span class="host-switcher-check">${useSubscriptionForNew ? '✓' : ''}</span><span class="host-switcher-name">Use my Claude subscription (new sessions)</span>`;
+    toggle.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      useSubscriptionForNew = !useSubscriptionForNew;
+      void openHostMenu();
+    });
+    menu.appendChild(toggle);
+  }
+
+  // Manage the stored Claude subscription token (paste from `claude setup-token`).
+  const tokenItem = document.createElement('div');
+  tokenItem.className = 'host-switcher-item host-switcher-add';
+  const tokenLabel = subscriptionTokenIsSet ? 'Claude subscription token (set ✓)…' : 'Claude subscription token…';
+  tokenItem.innerHTML = `<span class="host-switcher-check">⚿</span><span class="host-switcher-name">${tokenLabel}</span>`;
+  tokenItem.addEventListener('click', () => {
+    closeHostMenu();
+    void openSubscriptionTokenDialog();
+  });
+  menu.appendChild(tokenItem);
+
   document.body.appendChild(menu);
   setTimeout(() => document.addEventListener('click', onHostMenuOutsideClick, true), 0);
 }
@@ -4561,6 +4626,89 @@ function openAddRemoteDialog(): Promise<void> {
     labelInput.addEventListener('keydown', onKey);
     urlInput.addEventListener('keydown', onKey);
     tokenInput.addEventListener('keydown', onKey);
+  });
+}
+
+// Paste/save/clear the Claude subscription OAuth token (from `claude setup-token`).
+// The token is stored in the main process (file mode 0600); the renderer only ever sees
+// { set, maskedSuffix } — never the full token after it's saved.
+function openSubscriptionTokenDialog(): Promise<void> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    dialog.innerHTML = `
+      <h3>Claude Subscription Token</h3>
+      <div class="preset-form">
+        <div class="preset-form-field" style="font-size:12px;color:var(--text-secondary);line-height:1.5">
+          Run <code>claude setup-token</code> in a terminal, then paste the token here.
+          It lets remote agents use your Claude subscription (truly 24/7).
+        </div>
+        <div class="preset-form-field">
+          <label>Status</label>
+          <div id="sub-token-status" style="font-size:13px"></div>
+        </div>
+        <div class="preset-form-field">
+          <label>Token</label>
+          <input type="password" id="sub-token-input" placeholder="paste token from claude setup-token" autocomplete="off" />
+        </div>
+        <div class="preset-form-error" id="sub-token-error" style="color:var(--danger);min-height:16px;font-size:12px"></div>
+      </div>
+      <div class="confirm-buttons" style="margin-top:16px">
+        <button class="btn-cancel">Close</button>
+        <button class="btn-sub-clear" style="background:var(--danger)">Clear</button>
+        <button class="btn-sub-save" style="background:var(--accent)">Save</button>
+      </div>`;
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    const statusEl = dialog.querySelector('#sub-token-status') as HTMLElement;
+    const tokenInput = dialog.querySelector('#sub-token-input') as HTMLInputElement;
+    const errorEl = dialog.querySelector('#sub-token-error') as HTMLElement;
+    const saveBtn = dialog.querySelector('.btn-sub-save') as HTMLButtonElement;
+    const clearBtn = dialog.querySelector('.btn-sub-clear') as HTMLButtonElement;
+    tokenInput.focus();
+
+    const cleanup = () => { overlay.remove(); void refreshSubscriptionState(); resolve(); };
+
+    const renderStatus = (s: { set: boolean; maskedSuffix?: string }) => {
+      statusEl.textContent = s.set
+        ? `Set ✓ (…${s.maskedSuffix || ''})`
+        : 'Not set';
+      clearBtn.style.display = s.set ? '' : 'none';
+    };
+
+    void window.posse.subscriptionTokenStatus().then(renderStatus).catch(() => renderStatus({ set: false }));
+
+    const onSave = async () => {
+      const token = tokenInput.value.trim();
+      if (!token) { errorEl.textContent = 'Paste a token first.'; return; }
+      errorEl.textContent = '';
+      saveBtn.disabled = true;
+      const res = await window.posse.subscriptionTokenSet(token);
+      saveBtn.disabled = false;
+      if (!res.ok) { errorEl.textContent = res.error || 'Failed to save'; return; }
+      tokenInput.value = '';
+      if (res.status) renderStatus(res.status);
+    };
+
+    const onClear = async () => {
+      errorEl.textContent = '';
+      const res = await window.posse.subscriptionTokenClear();
+      if (!res.ok) { errorEl.textContent = res.error || 'Failed to clear'; return; }
+      tokenInput.value = '';
+      if (res.status) renderStatus(res.status);
+    };
+
+    dialog.querySelector('.btn-cancel')!.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+    saveBtn.addEventListener('click', () => { void onSave(); });
+    clearBtn.addEventListener('click', () => { void onClear(); });
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { void onSave(); }
+      if (e.key === 'Escape') cleanup();
+    });
   });
 }
 
@@ -4651,11 +4799,13 @@ if (hostSwitcherBtn) {
 // tree so the sidebar reflects the new host's sessions and the file panel reroots.
 window.posse.onConnectionChanged(() => {
   void refreshHostSwitcherLabel();
+  void refreshSubscriptionState();
   void refreshProjectsData();
   void renderFileTree();
 });
 
 void refreshHostSwitcherLabel();
+void refreshSubscriptionState();
 
 // ========== Mobile Access collapse toggle ==========
 

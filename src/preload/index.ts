@@ -7,8 +7,8 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.on('app:close-current-session', () => cb()),
 
   // Create terminal
-  createPty: (cwd: string, presetCommand: string, themeId: string, providerEnv?: Record<string, string>) =>
-    ipcRenderer.invoke('pty:create', cwd, presetCommand, themeId, providerEnv),
+  createPty: (cwd: string, presetCommand: string, themeId: string, providerEnv?: Record<string, string>, useSubscription?: boolean) =>
+    ipcRenderer.invoke('pty:create', cwd, presetCommand, themeId, providerEnv, useSubscription),
 
   // Write data (changed to invoke to await completion)
   writePty: (id: string, data: string) =>
@@ -209,6 +209,15 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('connections:bootstrap-ssh-host', host),
   connectionsRemove: (id: string) => ipcRenderer.invoke('connections:remove', id),
   connectionsSetActive: (id: string) => ipcRenderer.invoke('connections:set-active', id),
+
+  // Claude subscription token (for "use my subscription" remote agent sessions).
+  // status never returns the full token — only { set, maskedSuffix }.
+  subscriptionTokenStatus: () =>
+    ipcRenderer.invoke('subscription-token:status') as Promise<{ set: boolean; maskedSuffix?: string }>,
+  subscriptionTokenSet: (token: string) =>
+    ipcRenderer.invoke('subscription-token:set', token) as Promise<{ ok: boolean; error?: string; status?: { set: boolean; maskedSuffix?: string } }>,
+  subscriptionTokenClear: () =>
+    ipcRenderer.invoke('subscription-token:clear') as Promise<{ ok: boolean; error?: string; status?: { set: boolean; maskedSuffix?: string } }>,
   onConnectionChanged: (cb: (id: string) => void) =>
     ipcRenderer.on('connection:changed', (_e, id) => cb(id)),
 });
