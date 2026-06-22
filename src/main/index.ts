@@ -1018,12 +1018,17 @@ function buildClaudeSessionFromFile(
     let cwd = '';
     let firstUserTitle = '';
     let renameTitle = '';
+    let hasConversation = false;
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       let obj: { type?: string; cwd?: string; message?: { content?: unknown } };
       try { obj = JSON.parse(trimmed); } catch { continue; }
       if (!cwd && typeof obj.cwd === 'string' && obj.cwd) cwd = obj.cwd;
+      // A real transcript carries user/assistant messages. Files that hold only Claude Code's
+      // sidecar records (type:"bridge-session", "queue-operation", …) are not resumable
+      // sessions; without this they show as phantom "id 不存在" rows under a folder.
+      if (obj.type === 'user' || obj.type === 'assistant') hasConversation = true;
       // Legacy rename marker (low-priority fallback). Match the RAW text; last rename wins.
       if (obj.type === 'user' && typeof obj.message?.content === 'string') {
         const r = extractRenameTitle(obj.message.content);
@@ -1036,6 +1041,8 @@ function buildClaudeSessionFromFile(
         if (isRealUserPrompt(cleaned)) firstUserTitle = cleaned;
       }
     }
+    // Skip non-conversation stub files (no user/assistant message anywhere in the head).
+    if (!hasConversation) return null;
     // Title-type lines (customTitle/agentName/aiTitle) can appear far into the file, beyond
     // the head window. Scan the whole file (or tail for huge files) to recover them.
     const title = getCachedClaudeTitle(full, mtimeMs, size, () => {
