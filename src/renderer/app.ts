@@ -2817,9 +2817,12 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
     ? Array.from(groups.keys())
     : (groups.has(activeAgentTab) ? [activeAgentTab] : []);
 
-  // Flatten the selected families into one time-desc list so the most recent
-  // conversation is always at the top regardless of which agent it belongs to.
-  const rows: Array<{ time: number; el: HTMLElement }> = [];
+  // Flatten the selected families into one list. SORT STABILITY (#45): live sessions
+  // are ordered by their CREATE time (fixed), NOT their update time — otherwise every
+  // heartbeat/token re-sorted live rows and the list churned constantly. The active
+  // session is floated to the very top of its project. Closed/history use their fixed
+  // closedAt/mtime (those don't change during activity).
+  const rows: Array<{ time: number; active: boolean; el: HTMLElement }> = [];
   const tagged = activeAgentTab === 'all';
   for (const family of families) {
     const g = groups.get(family)!;
@@ -2828,19 +2831,19 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
       if (isSessionPinned(liveSessionPinKey(id))) continue;
       const el = buildLiveSessionRow(id, activeId);
       if (tagged) appendAgentTag(el, family);
-      rows.push({ time: sessionUpdateTimes.get(id) || 0, el });
+      rows.push({ time: sessionCreateTimes.get(id) || sessionUpdateTimes.get(id) || 0, active: id === activeId, el });
     }
     for (const cs of g.closed) {
       if (isSessionPinned(closedSessionPinKey(cs))) continue;
       const el = buildClosedSessionRow(cs);
       if (tagged) appendAgentTag(el, family);
-      rows.push({ time: cs.closedAt || 0, el });
+      rows.push({ time: cs.closedAt || 0, active: false, el });
     }
     for (const s of g.history) {
       if (isSessionPinned(historySessionPinKey(s))) continue;
       const el = buildHistorySessionRow(s);
       if (tagged) appendAgentTag(el, family);
-      rows.push({ time: s.mtimeMs || 0, el });
+      rows.push({ time: s.mtimeMs || 0, active: false, el });
     }
   }
 
@@ -2852,7 +2855,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
     return;
   }
 
-  rows.sort((a, b) => b.time - a.time);
+  rows.sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0) || b.time - a.time);
   for (const r of rows) sessionList.appendChild(r.el);
 }
 
@@ -2907,6 +2910,10 @@ function renderSessionList(): void {
     }
     editingTitleId = null;
   }
+  // Preserve scroll position across the full teardown/rebuild (#45): the list
+  // re-renders on every live heartbeat/status change, which otherwise snapped the
+  // user back to the top mid-scroll.
+  const prevScroll = sessionList.scrollTop;
   sessionList.innerHTML = '';
 
   // Fresh per-render session memo, then (re)build the agent tab strip.
@@ -3116,6 +3123,9 @@ function renderSessionList(): void {
       sessionList.appendChild(item);
     }
   }
+
+  // Restore the pre-render scroll position (#45). Clamp happens automatically.
+  sessionList.scrollTop = prevScroll;
 }
 
 // ========== Project / agent-picker menus ==========
