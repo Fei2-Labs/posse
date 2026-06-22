@@ -60,6 +60,7 @@ declare global {
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
       writeFile: (filePath: string, content: string) => Promise<{ ok: boolean; error?: string }>;
       readFileBase64: (filePath: string) => Promise<{ ok: boolean; dataUrl?: string; size?: number; ext?: string; error?: string }>;
+      gitBranch: (cwd: string) => Promise<string>;
       claudeSessionsList: (cwd: string) => Promise<Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string }>>;
       projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
         path: string;
@@ -1743,6 +1744,42 @@ function normalizeCwd(cwd: string): string {
   return p;
 }
 
+// ===== Git branch cache (for the macOS window title) =====
+// updateSessionTitleBar is synchronous + called often, but gitBranch is async.
+// Read the cached branch synchronously; if a cwd isn't cached yet, kick off one
+// async fetch, store it, then repaint. Avoid refetch loops by tracking in-flight keys.
+const branchCache: Map<string, string> = new Map(); // normalizeCwd(cwd) -> branch ('' = none)
+const branchFetching: Set<string> = new Set();       // keys with an in-flight fetch
+
+// Synchronously return the cached branch and lazily fetch when missing.
+// On first fetch completion (or when the value changed) it repaints the title bar.
+function getCachedBranch(cwd: string): string {
+  const key = normalizeCwd(cwd);
+  if (!key) return '';
+  const cached = branchCache.get(key);
+  if (cached !== undefined) return cached;
+  void fetchBranch(cwd, /*repaint*/ true);
+  return '';
+}
+
+// Fetch a cwd's branch and store it. Repaints the title bar when the value changed
+// (so the freshly-resolved branch shows up). Guards against concurrent duplicate fetches.
+async function fetchBranch(cwd: string, repaint: boolean): Promise<void> {
+  const key = normalizeCwd(cwd);
+  if (!key || branchFetching.has(key)) return;
+  branchFetching.add(key);
+  try {
+    const branch = (await window.posse.gitBranch(cwd)) || '';
+    const prev = branchCache.get(key);
+    branchCache.set(key, branch);
+    if (repaint && prev !== branch) updateSessionTitleBar();
+  } catch {
+    if (!branchCache.has(key)) branchCache.set(key, '');
+  } finally {
+    branchFetching.delete(key);
+  }
+}
+
 // Use the last path segment as the project name
 function cwdShortName(cwd: string): string {
   if (!cwd) return 'Unknown Project';
@@ -1819,13 +1856,17 @@ function updateSessionTitleBar(): void {
     if (displayName) parts.push(displayName);
     // 'New session' / 'New conversation' are default titles produced by the backend (kept for the comparison to work)
     if (title && title !== 'New session' && title !== 'New conversation') parts.push(title);
-    window.posse.setWindowTitle(parts.join('-'));
+    // Append the active session's git branch so parallel sessions on different branches are distinguishable.
+    const branch = getCachedBranch(cwd);
+    window.posse.setWindowTitle(branch ? `${parts.join('-')} (${branch})` : parts.join('-'));
   } else if (selectedProjectPath) {
     // No active session but a project is selected: label the file panel with the project folder.
     const cwdDisplay = selectedProjectPath.split('/').filter(Boolean).pop() || '';
     fileTreePath.textContent = cwdDisplay || 'Directory';
     fileTreePath.title = selectedProjectPath;
-    window.posse.setWindowTitle(cwdDisplay ? `Posse-${cwdDisplay}` : 'Posse');
+    const base = cwdDisplay ? `Posse-${cwdDisplay}` : 'Posse';
+    const branch = getCachedBranch(selectedProjectPath);
+    window.posse.setWindowTitle(branch ? `${base} (${branch})` : base);
   } else {
     fileTreePath.textContent = 'Directory';
     fileTreePath.title = '';
@@ -4359,6 +4400,13 @@ window.posse.filewatcherGetEditor().then((editorPath) => {
 setInterval(() => {
   if (sessionTitles.size > 0) renderSessionList();
 }, 60000);
+
+// The active cwd's git branch can change (user checks out a new branch in the terminal).
+// Periodically re-fetch just the active cwd's branch; fetchBranch repaints only when it changed.
+setInterval(() => {
+  const cwd = getActiveSessionCwd();
+  if (cwd) void fetchBranch(cwd, /*repaint*/ true);
+}, 20000);
 
 // ========== Sidebar arrow-key session switching ==========
 

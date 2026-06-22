@@ -1890,6 +1890,31 @@ function registerIPC(): void {
     }
   });
 
+  // Resolve the git branch for a cwd (for the macOS window title). Fast + cheap.
+  // Returns the branch name string, or '' for: empty/non-string cwd, not a git repo,
+  // detached HEAD (git prints 'HEAD'), or any error. Never throws across IPC.
+  ipcMain.handle('git:branch', async (_e, cwd: string) => {
+    if (typeof cwd !== 'string' || cwd.trim() === '') return '';
+    try {
+      const { execFile } = require('child_process') as typeof import('child_process');
+      const branch = await new Promise<string>((resolve) => {
+        execFile(
+          'git',
+          ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'],
+          { timeout: 2000, windowsHide: true },
+          (err, stdout) => {
+            if (err) return resolve('');
+            resolve(String(stdout || '').trim());
+          }
+        );
+      });
+      // Detached HEAD reports 'HEAD' — treat as no branch name.
+      return branch === 'HEAD' ? '' : branch;
+    } catch {
+      return '';
+    }
+  });
+
   // Read a file as a base64 data URL (for image previews). Never throws.
   ipcMain.handle('fs:read-file-base64', async (_e, filePath: string) => {
     const remote = activeRemoteBackend();

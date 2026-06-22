@@ -51,6 +51,8 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('fs:write-file', filePath, content),
   // Read a (binary) file as a base64 data URL — used for image previews
   readFileBase64: (filePath: string) => ipcRenderer.invoke('fs:read-file-base64', filePath),
+  // Resolve the git branch for a cwd (used to annotate the window title). '' when not a git repo.
+  gitBranch: (cwd: string) => ipcRenderer.invoke('git:branch', cwd) as Promise<string>,
   // List a directory's native session history in Claude Code
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke('claude-sessions:list', cwd),
   // Projects-first discovery: every AI-CLI session bucketed by project folder
