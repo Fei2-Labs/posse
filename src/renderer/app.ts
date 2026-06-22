@@ -646,6 +646,30 @@ function sortProjects(list: ProjectEntry[]): ProjectEntry[] {
   return arr;
 }
 
+// Frozen recency order snapshot (#45 follow-up): in "recent" mode projectLastActiveMs()
+// changes on every live heartbeat, so re-sorting on every renderSessionList() made the
+// WHOLE project list reshuffle and the sidebar jump. Freeze the order and only recompute
+// when the set of projects changes, the sort mode changes, or the user explicitly
+// refreshes/toggles. Name mode is inherently stable so it's recomputed cheaply.
+let stableProjectOrder: string[] | null = null;
+function invalidateProjectOrder(): void { stableProjectOrder = null; }
+function projectRank(): Map<string, number> {
+  if (projectSortMode === 'name') {
+    return new Map(sortProjects(projects).map((p, i) => [normalizeCwd(p.path), i]));
+  }
+  const current = projects.map(p => normalizeCwd(p.path));
+  const stale = !stableProjectOrder
+    || stableProjectOrder.length !== current.length
+    || current.some(p => !stableProjectOrder!.includes(p));
+  if (stale) stableProjectOrder = sortProjects(projects).map(p => normalizeCwd(p.path));
+  return new Map(stableProjectOrder!.map((p, i) => [p, i]));
+}
+function orderByRank(list: ProjectEntry[], rank: Map<string, number>): ProjectEntry[] {
+  return list.slice().sort(
+    (a, b) => (rank.get(normalizeCwd(a.path)) ?? 1e9) - (rank.get(normalizeCwd(b.path)) ?? 1e9)
+  );
+}
+
 // Does a project match the active search query (by project name OR any session title)?
 function projectMatchesSearch(p: ProjectEntry): boolean {
   const q = projectSearchQuery;
@@ -1658,6 +1682,7 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
     sortBtn.addEventListener('click', () => {
       projectSortMode = projectSortMode === 'recent' ? 'name' : 'recent';
       try { localStorage.setItem(PROJECT_SORT_STORAGE_KEY, projectSortMode); } catch { /* ignore */ }
+      invalidateProjectOrder();
       updateSortLabel();
       renderSessionList();
     });
@@ -2925,8 +2950,10 @@ function renderSessionList(): void {
   const tabFilter = (p: ProjectEntry) =>
     projectSearchQuery.length > 0 || projectVisibleUnderTab(p);
 
-  const pinned = sortProjects(projects.filter(p => p.pinned && projectMatchesSearch(p) && tabFilter(p)));
-  const rest = sortProjects(projects.filter(p => !p.pinned && projectMatchesSearch(p) && tabFilter(p)));
+  // Order by a FROZEN recency rank so live activity doesn't reshuffle the list each render.
+  const rank = projectRank();
+  const pinned = orderByRank(projects.filter(p => p.pinned && projectMatchesSearch(p) && tabFilter(p)), rank);
+  const rest = orderByRank(projects.filter(p => !p.pinned && projectMatchesSearch(p) && tabFilter(p)), rank);
 
   // ========== Pinned section ==========
   // Pinned SESSIONS float to the very top (above all folders), then pinned project
@@ -2980,6 +3007,7 @@ function renderSessionList(): void {
   refreshBtn.title = 'Refresh projects';
   refreshBtn.addEventListener('click', (e) => {
     e.stopPropagation();
+    invalidateProjectOrder();   // explicit refresh → re-sort by fresh recency
     void refreshProjectsData();
   });
 
