@@ -1,13 +1,18 @@
-// Prints the build version derived from git: <major>.<minor>.<commitCount>.
-// Used by build:mac so the version is unique per commit and never hand-picked.
-const { execSync } = require('node:child_process');
+// Prints the build version <major>.<minor>.<patch>.
+//
+// patch is TIME-BASED (seconds since 2026-01-01 UTC), NOT the git commit count.
+// Commit count collides across parallel branches/worktrees: two branches both at
+// "base + N commits" produce the same 1.2.N, so concurrent sessions kept shipping
+// duplicate version numbers. A monotonic clock makes every build's number unique
+// and increasing with no cross-session coordination. The exact commit identity of
+// a build is carried separately by the build-stamp sha shown in the app footer.
 const pkg = require('../package.json');
 
 const parts = String(pkg.version || '1.2.0').split('.');
 const major = parts[0] || '1';
 const minor = parts[1] || '2';
 
-let count = '0';
-try { count = execSync('git rev-list --count HEAD', { encoding: 'utf8' }).trim() || '0'; } catch { /* not a git repo */ }
+const EPOCH = Date.UTC(2026, 0, 1);
+const patch = Math.max(0, Math.floor((Date.now() - EPOCH) / 1000));
 
-process.stdout.write(`${major}.${minor}.${count}`);
+process.stdout.write(`${major}.${minor}.${patch}`);
