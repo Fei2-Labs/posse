@@ -1557,6 +1557,16 @@ html, body {
   display: inline-flex;
 }
 
+/* Touch devices have no hover, so hover-only actions are unreachable. Always show
+   the per-row session + project actions (archive / delete / pin / rename / new)
+   when the pointer is coarse/none. Pure-mouse desktops are unaffected. (#43) */
+@media (hover: none) {
+  .nav-session-action,
+  .nav-project-actions {
+    display: inline-flex;
+  }
+}
+
 .nav-session-action:hover {
   background: var(--bg-secondary, #2a2a2a);
   color: var(--text-primary);
