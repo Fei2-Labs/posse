@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v22';
+const CLIENT_BUILD = 'posse-v23';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -1894,27 +1894,31 @@ function wsSendHex(hexStr) {
 if (window.visualViewport) {
   const vv = window.visualViewport;
   function adjustForKeyboard() {
-    const detailPage = $('detail-page');
-    if (!detailPage || !detailPage.classList.contains('active')) return;
+    // Whichever input-bearing page is active (terminal detail or chat detail).
+    const page = ['detail-page', 'chat-detail-page'].map(id => $(id)).find(p => p && p.classList.contains('active'));
+    if (!page) return;
 
     const inputArea = $('input-area');
     const shortcutBar = $('shortcut-bar');
 
-    // visualViewport.height < window.innerHeight 说明键盘弹出了
-    const keyboardHeight = window.innerHeight - vv.height - vv.offsetTop;
+    const keyboardHeight = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
 
     if (keyboardHeight > 50) {
-      // 键盘弹出：把整个 detail-page 的 bottom 抬高键盘的高度
-      detailPage.style.top = '0';
-      detailPage.style.bottom = keyboardHeight + 'px';
-      detailPage.style.height = 'auto';
+      // Keyboard open. Pin the page to the VISUAL viewport: top = vv.offsetTop and
+      // height = vv.height. Earlier this used top:0 + bottom:keyboardHeight, but iOS
+      // also SCROLLS the layout viewport up to reveal the focused input, which carried
+      // the position:fixed header off-screen (#40). Anchoring to offsetTop + forcing the
+      // layout viewport back to 0 keeps the header pinned at the visible top.
+      page.style.top = vv.offsetTop + 'px';
+      page.style.bottom = 'auto';
+      page.style.height = vv.height + 'px';
       if (inputArea) inputArea.style.paddingBottom = '6px';
       if (shortcutBar) shortcutBar.style.paddingBottom = '0';
+      if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
     } else {
-      // 键盘收起：恢复默认
-      detailPage.style.top = '';
-      detailPage.style.bottom = '';
-      detailPage.style.height = '';
+      page.style.top = '';
+      page.style.bottom = '';
+      page.style.height = '';
       if (inputArea) inputArea.style.paddingBottom = '';
       if (shortcutBar) shortcutBar.style.paddingBottom = '';
     }
@@ -1928,6 +1932,37 @@ if (window.visualViewport) {
   vv.addEventListener('resize', adjustForKeyboard);
   vv.addEventListener('scroll', adjustForKeyboard);
 }
+
+// ===== Swipe-right to go back to the session list (#39) =====
+// Mobile has no persistent sidebar — pages are full-screen swaps. An edge-swipe
+// from the LEFT margin navigates back to the main list, the standard drawer/back
+// gesture. Starting at the edge avoids hijacking terminal horizontal interactions.
+(function setupSwipeBack() {
+  const EDGE = 32;        // px from left where a back-swipe may start
+  const DIST = 70;        // min horizontal travel
+  let sx = 0, sy = 0, tracking = false;
+  function backFor(pageId) {
+    if (pageId === 'detail-page') { const b = $('back-btn'); if (b) b.click(); return true; }
+    if (pageId === 'chat-detail-page') { const b = $('chat-back-btn'); if (b) b.click(); return true; }
+    return false;
+  }
+  document.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { tracking = false; return; }
+    const t = e.touches[0];
+    tracking = t.clientX <= EDGE;
+    sx = t.clientX; sy = t.clientY;
+  }, { passive: true });
+  document.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (dx > DIST && Math.abs(dx) > Math.abs(dy) * 2) {
+      const page = ['detail-page', 'chat-detail-page'].find(id => $(id) && $(id).classList.contains('active'));
+      if (page) backFor(page);
+    }
+  }, { passive: true });
+})();
 
 // 快捷键按钮 — 通过 WebSocket 发送原始键码（不弹键盘）
 

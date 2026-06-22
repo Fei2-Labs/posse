@@ -1689,8 +1689,39 @@ const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 const recentDataBuffer: Map<string, string> = new Map();
 // Sessions with a manually edited title (no longer auto-updated)
 const sessionTitleLocked: Set<string> = new Set();
-// Pinned sessions
-const pinnedSessions: Set<string> = new Set();
+// Pinned sessions — stored as canonical conversationKey()s (NOT ephemeral live PTY
+// ids) so a pin survives restart/resume, and persisted to localStorage. A pinned
+// session is extracted from its folder and floated into the top "Pinned" section.
+const PINNED_SESSIONS_KEY = 'posse_pinned_sessions';
+const pinnedSessions: Set<string> = (() => {
+  try {
+    const raw = localStorage.getItem(PINNED_SESSIONS_KEY);
+    return new Set<string>(raw ? JSON.parse(raw) : []);
+  } catch { return new Set<string>(); }
+})();
+function savePinnedSessions(): void {
+  try { localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify([...pinnedSessions])); } catch { /* ignore */ }
+}
+function isSessionPinned(convKey: string): boolean {
+  return pinnedSessions.has(convKey);
+}
+function toggleSessionPin(convKey: string): void {
+  if (!convKey) return;
+  if (pinnedSessions.has(convKey)) pinnedSessions.delete(convKey);
+  else pinnedSessions.add(convKey);
+  savePinnedSessions();
+  renderSessionList();
+}
+// Canonical pin key per session source (live PTY ids are ephemeral → key by uuid).
+function liveSessionPinKey(id: string): string {
+  return conversationKey(sessionResumeId.get(id) || sessionAgentId.get(id) || id);
+}
+function closedSessionPinKey(cs: ClosedSessionInfo): string {
+  return conversationKey(cs.resumeId || cs.id);
+}
+function historySessionPinKey(s: ClaudeHistorySession): string {
+  return conversationKey(s.id);
+}
 
 // Sync session status to the main process (read by the mobile remote-server)
 function syncSessionStatusToMain(): void {
@@ -2424,10 +2455,22 @@ function sessionStatusColor(id: string): string {
   return '#8a93a6';                                // idle / viewed (slate, distinct from green & history grey)
 }
 
+// A pin/unpin action button for a session row, keyed by its canonical conversationKey.
+function makeSessionPinButton(convKey: string): HTMLButtonElement {
+  const btn = document.createElement('button');
+  const pinned = isSessionPinned(convKey);
+  btn.className = 'nav-session-action' + (pinned ? ' active' : '');
+  btn.innerHTML = ICON.pin;
+  btn.title = pinned ? 'Unpin session' : 'Pin session to top';
+  btn.addEventListener('click', (e) => { e.stopPropagation(); toggleSessionPin(convKey); });
+  return btn;
+}
+
 // Build a session row for a LIVE PTY session inside a project (compact: title + relative time)
 function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   const title = sessionTitles.get(id) || '';
-  const isPinned = pinnedSessions.has(id);
+  const pinKey = liveSessionPinKey(id);
+  const isPinned = isSessionPinned(pinKey);
   const item = document.createElement('div');
   item.className = 'nav-session' + (id === activeId ? ' active' : '');
   item.dataset.sessionId = id;
@@ -2474,6 +2517,7 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   item.appendChild(dot);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
+  item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(editBtn);
   item.appendChild(closeBtn);
 
@@ -2488,8 +2532,9 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
 
 // Build a session row for a CLOSED (resumable) DuoCLI session
 function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
+  const pinKey = closedSessionPinKey(cs);
   const item = document.createElement('div');
-  item.className = 'nav-session nav-session-closed';
+  item.className = 'nav-session nav-session-closed' + (isSessionPinned(pinKey) ? ' pinned' : '');
 
   const dot = document.createElement('span');
   dot.className = 'nav-session-dot';
@@ -2523,6 +2568,7 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   item.appendChild(dot);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
+  item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(resumeBtn);
   item.appendChild(delBtn);
   item.addEventListener('click', () => { void restoreClosedSession(cs); });
@@ -2531,8 +2577,9 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
 
 // Build a session row for a native Claude/Codex history session
 function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
+  const pinKey = historySessionPinKey(s);
   const item = document.createElement('div');
-  item.className = 'nav-session nav-session-closed' + (s.archived ? ' nav-session-archived' : '');
+  item.className = 'nav-session nav-session-closed' + (s.archived ? ' nav-session-archived' : '') + (isSessionPinned(pinKey) ? ' pinned' : '');
 
   const dot = document.createElement('span');
   dot.className = 'nav-session-dot';
@@ -2570,6 +2617,7 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   item.appendChild(dot);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
+  item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(resumeBtn);
   item.appendChild(archiveBtn);
   item.appendChild(deleteBtn);
@@ -2775,17 +2823,21 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   const tagged = activeAgentTab === 'all';
   for (const family of families) {
     const g = groups.get(family)!;
+    // Pinned sessions are extracted into the top "Pinned" section, so skip them here.
     for (const id of g.lives) {
+      if (isSessionPinned(liveSessionPinKey(id))) continue;
       const el = buildLiveSessionRow(id, activeId);
       if (tagged) appendAgentTag(el, family);
       rows.push({ time: sessionUpdateTimes.get(id) || 0, el });
     }
     for (const cs of g.closed) {
+      if (isSessionPinned(closedSessionPinKey(cs))) continue;
       const el = buildClosedSessionRow(cs);
       if (tagged) appendAgentTag(el, family);
       rows.push({ time: cs.closedAt || 0, el });
     }
     for (const s of g.history) {
+      if (isSessionPinned(historySessionPinKey(s))) continue;
       const el = buildHistorySessionRow(s);
       if (tagged) appendAgentTag(el, family);
       rows.push({ time: s.mtimeMs || 0, el });
@@ -2802,6 +2854,42 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
 
   rows.sort((a, b) => b.time - a.time);
   for (const r of rows) sessionList.appendChild(r.el);
+}
+
+// Gather every pinned session across all projects into time-desc rows for the top
+// "Pinned" section. Pinned sessions ignore the active agent tab (always quick-access)
+// and each row carries an agent tag since they're mixed. Deduped by conversationKey.
+function collectPinnedSessionRows(activeId: string | null): Array<{ time: number; el: HTMLElement }> {
+  const out: Array<{ time: number; el: HTMLElement }> = [];
+  const seen = new Set<string>();
+  for (const p of projects) {
+    const groups = getProjectSessions(p.path);
+    for (const [family, g] of groups) {
+      for (const id of g.lives) {
+        const k = liveSessionPinKey(id);
+        if (!isSessionPinned(k) || seen.has(k)) continue;
+        seen.add(k);
+        const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family);
+        out.push({ time: sessionUpdateTimes.get(id) || 0, el });
+      }
+      for (const cs of g.closed) {
+        const k = closedSessionPinKey(cs);
+        if (!isSessionPinned(k) || seen.has(k)) continue;
+        seen.add(k);
+        const el = buildClosedSessionRow(cs); appendAgentTag(el, family);
+        out.push({ time: cs.closedAt || 0, el });
+      }
+      for (const s of g.history) {
+        const k = historySessionPinKey(s);
+        if (!isSessionPinned(k) || seen.has(k)) continue;
+        seen.add(k);
+        const el = buildHistorySessionRow(s); appendAgentTag(el, family);
+        out.push({ time: s.mtimeMs || 0, el });
+      }
+    }
+  }
+  out.sort((a, b) => b.time - a.time);
+  return out;
 }
 
 function renderSessionList(): void {
@@ -2834,7 +2922,10 @@ function renderSessionList(): void {
   const rest = sortProjects(projects.filter(p => !p.pinned && projectMatchesSearch(p) && tabFilter(p)));
 
   // ========== Pinned section ==========
-  if (pinned.length > 0) {
+  // Pinned SESSIONS float to the very top (above all folders), then pinned project
+  // folders — all under one collapsible "Pinned" header.
+  const pinnedSessionRows = collectPinnedSessionRows(activeId);
+  if (pinnedSessionRows.length > 0 || pinned.length > 0) {
     const pinnedCollapsed = collapsedSections.has('pinned');
     const header = document.createElement('div');
     header.className = 'nav-section-header' + (pinnedCollapsed ? ' collapsed' : '');
@@ -2846,6 +2937,7 @@ function renderSessionList(): void {
     header.addEventListener('click', () => toggleSectionCollapsed('pinned'));
     sessionList.appendChild(header);
     if (!pinnedCollapsed) {
+      for (const r of pinnedSessionRows) sessionList.appendChild(r.el);
       for (const p of pinned) renderProjectEntry(p, activeId);
     }
   }
@@ -3524,7 +3616,8 @@ function clearSessionState(id: string): void {
   unreadTimers.delete(id);
   recentDataBuffer.delete(id);
   sessionTitleLocked.delete(id);
-  pinnedSessions.delete(id);
+  // NOTE: don't unpin here — pins are keyed by conversationKey (not the ephemeral
+  // pty id) so a pinned session stays pinned after it closes / is resumed (#38).
   sessionCwds.delete(id);
   sessionDisplayNames.delete(id);
   sessionProviders.delete(id);
