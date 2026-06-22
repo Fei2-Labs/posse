@@ -239,7 +239,8 @@ const CLAUDE_TITLE_FULL_SCAN_MAX_BYTES = 8 * 1024 * 1024;
 const CLAUDE_TITLE_TAIL_BYTES = 512 * 1024;
 
 interface ClaudeTitleFields {
-  customTitle: string; // explicit user rename (authoritative)
+  customTitle: string; // explicit user rename via Posse UI (authoritative)
+  renameTitle: string; // explicit `/rename` in the terminal ("The user named this session …")
   agentName: string; // usually mirrors customTitle
   aiTitle: string; // Claude's auto title
 }
@@ -253,6 +254,16 @@ function scanClaudeTitleFields(chunk: string, acc: ClaudeTitleFields): void {
     const hasCustom = trimmed.includes('"type":"custom-title"');
     const hasAgent = trimmed.includes('"type":"agent-name"');
     const hasAi = trimmed.includes('"type":"ai-title"');
+    // `/rename` in the terminal is recorded as a user message ("The user named this
+    // session …"), which can sit ANYWHERE in the file — detect it in this same scan so
+    // a late rename isn't missed (the head-only read used to miss it). The quoted name
+    // is JSON-escaped in the raw line (\"X\"), so unescape before matching the regex.
+    const hasRename = trimmed.includes('named this session');
+    if (!hasCustom && !hasAgent && !hasAi && !hasRename) continue;
+    if (hasRename) {
+      const rt = extractRenameTitle(trimmed.replace(/\\"/g, '"'));
+      if (rt) acc.renameTitle = rt; // last occurrence wins (most recent rename)
+    }
     if (!hasCustom && !hasAgent && !hasAi) continue;
     try {
       const obj = JSON.parse(trimmed) as {
@@ -279,7 +290,7 @@ function scanClaudeTitleFields(chunk: string, acc: ClaudeTitleFields): void {
 //   - file >  8MB  -> read only the LAST ~512KB (titles are typically late) and scan that.
 // Returns the LAST occurrence of each type. Never throws.
 export function findClaudeTitleFields(filePath: string, size: number): ClaudeTitleFields {
-  const acc: ClaudeTitleFields = { customTitle: '', agentName: '', aiTitle: '' };
+  const acc: ClaudeTitleFields = { customTitle: '', renameTitle: '', agentName: '', aiTitle: '' };
   try {
     if (size > CLAUDE_TITLE_FULL_SCAN_MAX_BYTES) {
       scanClaudeTitleFields(readTail(filePath, size, CLAUDE_TITLE_TAIL_BYTES), acc);
@@ -291,7 +302,11 @@ export function findClaudeTitleFields(filePath: string, size: number): ClaudeTit
 }
 
 // Resolve the best Claude session title from scanned fields + head-derived fallbacks.
-// Priority: customTitle > agentName > aiTitle > first real user prompt > uuid.
+// Priority: customTitle (Posse-UI rename) > renameTitle (terminal /rename) > agentName
+// > aiTitle (auto) > first real user prompt > uuid.
+// renameTitle outranks agentName/aiTitle because an explicit `/rename` is user intent and
+// must not be masked by an auto-generated title (#44). `renameTitle` arg = head-derived
+// fallback; the scan-derived fields.renameTitle (found anywhere in the file) takes priority.
 export function resolveClaudeTitle(
   fields: ClaudeTitleFields,
   firstUserTitle: string,
@@ -299,10 +314,10 @@ export function resolveClaudeTitle(
   uuid: string
 ): string {
   if (fields.customTitle.trim()) return fields.customTitle.trim().slice(0, 60);
+  const rename = (fields.renameTitle || renameTitle).trim();
+  if (rename) return rename.slice(0, 60);
   if (fields.agentName.trim()) return fields.agentName.trim().slice(0, 60);
   if (fields.aiTitle.trim()) return fields.aiTitle.trim().slice(0, 60);
-  // Low-priority legacy fallback: the "The user named this session" marker (pre customTitle).
-  if (renameTitle) return renameTitle;
   if (firstUserTitle) return firstUserTitle;
   return uuid;
 }
