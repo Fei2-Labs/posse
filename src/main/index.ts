@@ -192,6 +192,77 @@ function setSessionArchived(id: string, archived: boolean): void {
   saveArchivedSessionIds(ids);
 }
 
+// ========== Project path remap (rename/moved folder → re-attach historical sessions) ==========
+// When a project folder is renamed/moved, historical agent sessions keep the OLD cwd recorded
+// in their jsonl, so the navigator buckets them under the dead old path. A remap maps an old
+// recorded cwd → a new folder path; buildProjectsList() honors it so those sessions re-attach
+// to the new location and the dead old entry disappears. Posse-internal, reversible, never
+// touches agent data.
+const PATH_REMAPS_FILE = path.join(app.getPath('userData'), 'path-remaps.json');
+
+// Normalize a cwd for stable comparison. Mirrors the renderer's normalizeCwd:
+// strips the macOS /private prefix and trailing slashes.
+function normalizeRemapCwd(cwd: string): string {
+  if (!cwd) return '';
+  let p = String(cwd).trim();
+  if (p.startsWith('/private/')) p = p.slice('/private'.length);
+  if (p.length > 1) p = p.replace(/\/+$/, '');
+  return p;
+}
+
+function loadPathRemaps(): Record<string, string> {
+  try {
+    const raw = fs.readFileSync(PATH_REMAPS_FILE, 'utf-8');
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === 'string' && v) out[String(k)] = v;
+      }
+      return out;
+    }
+  } catch { /* missing / corrupt -> empty */ }
+  return {};
+}
+
+function savePathRemaps(map: Record<string, string>): void {
+  try {
+    fs.writeFileSync(PATH_REMAPS_FILE, JSON.stringify(map, null, 2));
+  } catch { /* ignore */ }
+}
+
+// Add/replace a remap: old recorded cwd → new folder path. Both normalized.
+// A self-mapping (old === new) is treated as a removal.
+function setPathRemap(oldPath: string, newPath: string): void {
+  const oldKey = normalizeRemapCwd(oldPath);
+  const newVal = normalizeRemapCwd(newPath);
+  if (!oldKey || !newVal) return;
+  const map = loadPathRemaps();
+  if (oldKey === newVal) { delete map[oldKey]; }
+  else { map[oldKey] = newVal; }
+  savePathRemaps(map);
+}
+
+function removePathRemap(oldPath: string): void {
+  const oldKey = normalizeRemapCwd(oldPath);
+  if (!oldKey) return;
+  const map = loadPathRemaps();
+  if (oldKey in map) { delete map[oldKey]; savePathRemaps(map); }
+}
+
+// Resolve a recorded cwd through the remap chain (handles a remap whose target was itself
+// later remapped). Returns the final destination path, or the input if unmapped.
+function resolveRemappedCwd(cwd: string, map: Record<string, string>): string {
+  let cur = normalizeRemapCwd(cwd);
+  if (!cur) return cwd;
+  const seen = new Set<string>();
+  while (map[cur] && !seen.has(cur)) {
+    seen.add(cur);
+    cur = normalizeRemapCwd(map[cur]);
+  }
+  return cur;
+}
+
 // ========== Permanent session deletion (targets the agent's OWN store) ==========
 // Routes by agent type to the correct backing store. NEVER throws across IPC.
 function deleteSessionFromStore(
@@ -1502,6 +1573,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
   ];
 
   const archivedIds = loadArchivedSessionIds();
+  const pathRemaps = loadPathRemaps();
 
   const COPILOT_NO_FOLDER = '__copilot_no_folder__';
   // bucketKey -> { path, name, agentMap }
@@ -1525,9 +1597,13 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     let displayPath: string;
     let name: string;
     if (s.cwd) {
-      key = s.cwd;
-      displayPath = s.cwd;
-      name = path.basename(s.cwd) || s.cwd;
+      // Honor a path remap: a session whose recorded cwd matches a remap key is bucketed
+      // under the NEW folder. This re-attaches historical sessions to a renamed/moved folder
+      // and makes the dead old entry disappear (it no longer produces a bucket).
+      const effectiveCwd = resolveRemappedCwd(s.cwd, pathRemaps);
+      key = effectiveCwd;
+      displayPath = effectiveCwd;
+      name = path.basename(effectiveCwd) || effectiveCwd;
     } else if (s.agent === 'copilot') {
       key = COPILOT_NO_FOLDER;
       displayPath = '';
@@ -1556,8 +1632,12 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
   // sessions directly, deduping (agent + id) against anything already discovered globally.
   for (const folder of extraFolders) {
     try {
-      const abs = path.resolve(String(folder || ''));
-      if (!abs) continue;
+      const rawAbs = path.resolve(String(folder || ''));
+      if (!rawAbs) continue;
+      // If this tracked folder's path was remapped (renamed/moved), fold it into the new path
+      // so we don't resurrect the dead old bucket. The per-folder scan still reads the OLD
+      // on-disk location (rawAbs) where the sessions physically live.
+      const abs = resolveRemappedCwd(rawAbs, pathRemaps);
       const bucket = getBucket(abs, abs, path.basename(abs) || abs);
 
       const mergeIntoBucket = (sessions: DiscoveredSession[]) => {
@@ -1579,20 +1659,26 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
         }
       };
 
-      // Claude: scan ~/.claude/projects/<encoded>/ directly, bucketed under this folder.
-      mergeIntoBucket(scanClaudeSessionsForFolder(abs, PROJECTS_MAX_SESSIONS_PER_AGENT));
+      // Scan the physical on-disk session stores. After a remap, historical sessions still live
+      // under the OLD path (rawAbs); the renamed folder on disk is the NEW path (abs). Scan both
+      // (deduped by mergeIntoBucket) so old + new sessions all land in this single bucket.
+      const scanPaths = abs === rawAbs ? [abs] : [rawAbs, abs];
+      for (const scanPath of scanPaths) {
+        // Claude: scan ~/.claude/projects/<encoded>/ directly, bucketed under this folder.
+        mergeIntoBucket(scanClaudeSessionsForFolder(scanPath, PROJECTS_MAX_SESSIONS_PER_AGENT));
 
-      // Codex: reuse the per-cwd reader (cwd matched from session_meta; uncapped at 300).
-      const codex = listCodexSessions(abs);
-      mergeIntoBucket(codex.slice(0, PROJECTS_MAX_SESSIONS_PER_AGENT).map((c) => ({
-        agent: 'codex' as ProjectsAgentId,
-        cwd: abs,
-        id: c.id,
-        title: c.title,
-        mtimeMs: c.mtimeMs,
-        resumeCommand: c.resumeCommand,
-        sourcePath: c.sourcePath || '',
-      })));
+        // Codex: reuse the per-cwd reader (cwd matched from session_meta; uncapped at 300).
+        const codex = listCodexSessions(scanPath);
+        mergeIntoBucket(codex.slice(0, PROJECTS_MAX_SESSIONS_PER_AGENT).map((c) => ({
+          agent: 'codex' as ProjectsAgentId,
+          cwd: abs,
+          id: c.id,
+          title: c.title,
+          mtimeMs: c.mtimeMs,
+          resumeCommand: c.resumeCommand,
+          sourcePath: c.sourcePath || '',
+        })));
+      }
     } catch { /* ignore bad folder */ }
   }
 
@@ -2319,6 +2405,29 @@ function registerIPC(): void {
   ipcMain.handle('remote:add-recent-cwd', (_e, cwd: string) => {
     try { addRemoteRecentCwd(cwd); } catch { /* ignore */ }
     return true;
+  });
+
+  // ========== Project path remap (renamed/moved folder → re-attach historical sessions) ==========
+  ipcMain.handle('project:remap', (_e, oldPath: string, newPath: string) => {
+    try {
+      setPathRemap(String(oldPath || ''), String(newPath || ''));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  ipcMain.handle('project:remaps:list', () => {
+    try { return loadPathRemaps(); } catch { return {}; }
+  });
+
+  ipcMain.handle('project:remap:remove', (_e, oldPath: string) => {
+    try {
+      removePathRemap(String(oldPath || ''));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
   });
 
   // ========== Clipboard image IPC ==========

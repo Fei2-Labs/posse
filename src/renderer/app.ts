@@ -75,6 +75,9 @@ declare global {
       sessionSetArchived: (id: string, archived: boolean) => Promise<{ ok: boolean; error?: string }>;
       sessionListArchived: () => Promise<string[]>;
       sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) => Promise<{ ok: boolean; error?: string }>;
+      projectRemap: (oldPath: string, newPath: string) => Promise<{ ok: boolean; error?: string }>;
+      projectRemapsList: () => Promise<Record<string, string>>;
+      projectRemapRemove: (oldPath: string) => Promise<{ ok: boolean; error?: string }>;
       remoteAddRecentCwd: (cwd: string) => Promise<boolean>;
       verifyResumable: (agent: string, cwd: string, sessionId: string) => Promise<{ exists: boolean }>;
       onPtyData: (cb: (id: string, data: string) => void) => void;
@@ -3169,6 +3172,27 @@ function dismissNavMenus(): void {
   document.querySelectorAll('.nav-popup-menu').forEach(m => m.remove());
 }
 
+// Remap a project's recorded (old) cwd to a moved/renamed folder. Opens a native folder picker
+// for the NEW location, stores the remap in the main process, then refreshes so historical
+// sessions re-attach to the new folder and the dead old project disappears.
+async function remapProjectPath(oldPath: string): Promise<void> {
+  if (!oldPath) return;
+  const newFolder = await window.posse.selectFolder(oldPath);
+  if (!newFolder) return;
+  if (normalizeCwd(newFolder) === normalizeCwd(oldPath)) return;
+  const res = await window.posse.projectRemap(oldPath, newFolder);
+  if (!res?.ok) {
+    window.alert(`Remap failed: ${res?.error || 'unknown error'}`);
+    return;
+  }
+  // Drop the old tracked-folder entry (its sessions now live under the new path) and ensure the
+  // new folder is tracked + selected so it shows immediately.
+  removeProject(oldPath);
+  addProject(newFolder);
+  selectProject(newFolder);
+  await refreshProjectsData();
+}
+
 function showProjectMenu(e: MouseEvent, p: ProjectEntry): void {
   dismissNavMenus();
   const menu = document.createElement('div');
@@ -3178,6 +3202,7 @@ function showProjectMenu(e: MouseEvent, p: ProjectEntry): void {
     { label: 'New conversation', action: () => showAgentPicker(e, p.path) },
     { label: p.pinned ? 'Unpin' : 'Pin', action: () => togglePinProject(p.path) },
     { label: 'Rename', action: () => renameProject(p.path) },
+    { label: 'Remap to a moved/renamed folder…', action: () => void remapProjectPath(p.path) },
     { label: archivedOn ? '✓ Show Archived' : 'Show Archived', action: () => setShowArchived(p.path, !archivedOn) },
     { label: 'Reveal in Finder', action: () => window.posse.openFolder(p.path) },
     { label: 'Remove project', action: () => removeProject(p.path) },

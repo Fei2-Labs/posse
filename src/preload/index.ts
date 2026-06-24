@@ -72,6 +72,16 @@ contextBridge.exposeInMainWorld('posse', {
   sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) =>
     ipcRenderer.invoke('session:delete', meta) as Promise<{ ok: boolean; error?: string }>,
 
+  // ========== Project path remap (renamed/moved folder → re-attach historical sessions) ==========
+  // Map an old recorded cwd → a new folder path so historical sessions re-bucket under the new
+  // location. Posse-internal, reversible, never touches agent data.
+  projectRemap: (oldPath: string, newPath: string) =>
+    ipcRenderer.invoke('project:remap', oldPath, newPath) as Promise<{ ok: boolean; error?: string }>,
+  projectRemapsList: () =>
+    ipcRenderer.invoke('project:remaps:list') as Promise<Record<string, string>>,
+  projectRemapRemove: (oldPath: string) =>
+    ipcRenderer.invoke('project:remap:remove', oldPath) as Promise<{ ok: boolean; error?: string }>,
+
   // Event listeners
   onPtyData: (cb: (id: string, data: string) => void) =>
     ipcRenderer.on('pty:data', (_e, id, data) => cb(id, data)),
