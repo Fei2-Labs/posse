@@ -23,6 +23,7 @@ const ICON: Record<string, string> = {
   collapse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
   chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  sort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 17l3 3 3-3M6 18V4"/></svg>',
 };
 
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
@@ -1679,7 +1680,14 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
   toggleSearchClear();
 
   const updateSortLabel = (): void => {
-    if (sortBtn) sortBtn.textContent = projectSortMode === 'name' ? 'Name' : 'Recent';
+    if (!sortBtn) return;
+    const mode = projectSortMode === 'name' ? 'Name' : 'Recent';
+    sortBtn.innerHTML =
+      `<span class="project-sort-glyph">${ICON.sort}</span>` +
+      `<span class="project-sort-label">Sort: <b>${mode}</b></span>` +
+      `<span class="project-sort-caret">${ICON.chevron}</span>`;
+    sortBtn.title = `Sort projects (current: ${mode}) — click to switch`;
+    sortBtn.dataset.mode = projectSortMode;
   };
   updateSortLabel();
 
@@ -3015,7 +3023,13 @@ function renderSessionList(): void {
     header.className = 'nav-section-header' + (pinnedCollapsed ? ' collapsed' : '');
     const label = document.createElement('span');
     label.className = 'nav-section-label';
-    label.textContent = 'Pinned';
+    const pinIcon = document.createElement('span');
+    pinIcon.className = 'nav-section-icon';
+    pinIcon.innerHTML = ICON.pin;
+    const pinText = document.createElement('span');
+    pinText.textContent = 'Pinned';
+    label.appendChild(pinIcon);
+    label.appendChild(pinText);
     header.appendChild(label);
     // Clicking the header toggles the whole section's collapsed state.
     header.addEventListener('click', () => toggleSectionCollapsed('pinned'));
@@ -3029,12 +3043,18 @@ function renderSessionList(): void {
   // ========== Projects section ==========
   const projectsCollapsed = collapsedSections.has('projects');
   const header = document.createElement('div');
-  header.className = 'nav-section-header' + (projectsCollapsed ? ' collapsed' : '');
+  header.className = 'nav-section-header nav-section-projects' + (projectsCollapsed ? ' collapsed' : '');
   // Clicking the header (excluding its action buttons, which stopPropagation) toggles the section.
   header.addEventListener('click', () => toggleSectionCollapsed('projects'));
   const label = document.createElement('span');
   label.className = 'nav-section-label';
-  label.textContent = 'Projects';
+  const folderIcon = document.createElement('span');
+  folderIcon.className = 'nav-section-icon';
+  folderIcon.innerHTML = ICON.folder;
+  const projectsText = document.createElement('span');
+  projectsText.textContent = 'Projects';
+  label.appendChild(folderIcon);
+  label.appendChild(projectsText);
 
   const actions = document.createElement('span');
   actions.className = 'nav-section-actions';
@@ -3306,23 +3326,19 @@ function openCreateRepoDialog(): Promise<void> {
         </div>
         <div class="preset-form-field">
           <label>Visibility</label>
-          <div style="display:flex;gap:16px;align-items:center">
-            <label style="display:flex;gap:6px;align-items:center;font-weight:normal">
-              <input type="radio" name="repo-visibility" value="private" checked /> Private
-            </label>
-            <label style="display:flex;gap:6px;align-items:center;font-weight:normal">
-              <input type="radio" name="repo-visibility" value="public" /> Public
-            </label>
+          <div class="segmented" id="repo-visibility">
+            <button type="button" class="segmented-btn active" data-value="private">Private</button>
+            <button type="button" class="segmented-btn" data-value="public">Public</button>
           </div>
         </div>
         <div class="preset-form-field">
           <label>Clone into</label>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span id="repo-parent-path" style="flex:1;font-size:12px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-            <button class="btn-cancel" id="repo-choose-folder" style="flex:none">Choose…</button>
+          <div class="field-row">
+            <span id="repo-parent-path" class="field-path"></span>
+            <button class="btn-secondary" id="repo-choose-folder" type="button">Choose…</button>
           </div>
         </div>
-        <div class="preset-form-error" id="repo-create-error" style="color:var(--danger);min-height:16px;font-size:12px"></div>
+        <div class="form-error" id="repo-create-error" hidden></div>
       </div>
       <div class="confirm-buttons" style="margin-top:16px">
         <button class="btn-cancel">Cancel</button>
@@ -3335,8 +3351,24 @@ function openCreateRepoDialog(): Promise<void> {
     const parentPathEl = dialog.querySelector('#repo-parent-path') as HTMLElement;
     const chooseBtn = dialog.querySelector('#repo-choose-folder') as HTMLButtonElement;
     const errorEl = dialog.querySelector('#repo-create-error') as HTMLElement;
+    const visibilityGroup = dialog.querySelector('#repo-visibility') as HTMLElement;
     const createBtn = dialog.querySelector('.btn-close-confirm') as HTMLButtonElement;
     nameInput.focus();
+
+    let visibility: 'private' | 'public' = 'private';
+    visibilityGroup.querySelectorAll<HTMLButtonElement>('.segmented-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        visibility = (btn.dataset.value as 'private' | 'public') || 'private';
+        visibilityGroup.querySelectorAll('.segmented-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+      });
+    });
+
+    const showError = (msg: string) => {
+      errorEl.textContent = msg;
+      if (msg) errorEl.removeAttribute('hidden');
+      else errorEl.setAttribute('hidden', '');
+    };
 
     const renderParent = () => { parentPathEl.textContent = parentDir || '(choose a folder)'; };
     renderParent();
@@ -3352,16 +3384,14 @@ function openCreateRepoDialog(): Promise<void> {
 
     const onCreate = async () => {
       const name = nameInput.value.trim();
-      const visibility = (dialog.querySelector('input[name="repo-visibility"]:checked') as HTMLInputElement)?.value === 'public'
-        ? 'public' : 'private';
       if (!name) { nameInput.style.borderColor = 'var(--danger)'; return; }
-      if (!parentDir) { errorEl.textContent = 'Choose a folder to clone into'; return; }
+      if (!parentDir) { showError('Choose a folder to clone into'); return; }
       createBtn.disabled = true;
       createBtn.textContent = 'Creating repo…';
-      errorEl.textContent = '';
+      showError('');
       const res = await window.posse.projectCreateGithubRepo({ name, visibility, parentDir });
       if (!res.ok || !res.path) {
-        errorEl.textContent = res.error || 'Failed to create repository';
+        showError(res.error || 'Failed to create repository');
         createBtn.disabled = false;
         createBtn.textContent = 'Create';
         return;

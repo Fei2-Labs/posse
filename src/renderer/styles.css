@@ -1242,11 +1242,19 @@ html, body {
   margin-top: 2px;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
-  color: var(--text-secondary, #888);
+  /* Brighter than --text-secondary so the headers read clearly against the sidebar bg */
+  color: color-mix(in srgb, var(--text-primary, #c9d1d1) 78%, transparent);
   user-select: none;
   cursor: pointer;
+}
+
+/* Separate the PROJECTS block from the PINNED block above it with a hairline divider + spacing */
+.nav-section-header.nav-section-projects {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
 }
 
 .nav-section-header.collapsed .nav-section-label {
@@ -1256,9 +1264,28 @@ html, body {
 .nav-section-label {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Leading section icon (pin / folder), inherits the brighter header color */
+.nav-section-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  opacity: 0.85;
+}
+.nav-section-icon svg {
+  width: 13px;
+  height: 13px;
+  display: block;
 }
 
 .nav-section-actions {
@@ -2498,6 +2525,96 @@ select.ai-form-input {
   border-color: var(--accent);
 }
 
+/* ===== Shared dialog form helpers (create-repo etc.) ===== */
+
+/* Secondary button matching the dialog's dark chrome (used by "Choose…") */
+.btn-secondary {
+  flex: none;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s;
+}
+.btn-secondary:hover {
+  background: var(--hover-bg);
+  border-color: var(--accent-green);
+}
+
+/* Inline row: a flexible value + a trailing control */
+.field-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.field-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Segmented toggle (dark-theme radio replacement) */
+.segmented {
+  display: inline-flex;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.segmented-btn {
+  padding: 5px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.segmented-btn:hover {
+  color: var(--text-primary);
+}
+.segmented-btn.active {
+  background: var(--bg-active);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-green) 45%, transparent);
+}
+
+/* Framed inline error row (icon + subtle red-tinted background) */
+.form-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  line-height: 1.4;
+}
+.form-error[hidden] { display: none; }
+.form-error::before {
+  content: '';
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='12' y1='8' x2='12' y2='12'/%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='12' y1='8' x2='12' y2='12'/%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
 .preset-manage-list {
   display: flex;
   flex-direction: column;
@@ -3123,20 +3240,42 @@ select.ai-form-input {
 
 #project-sort {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: var(--input-bg);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
   border-radius: 7px;
-  padding: 5px 9px;
+  padding: 5px 8px;
   font-size: 11px;
   font-family: var(--font-mono);
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+#project-sort .project-sort-glyph,
+#project-sort .project-sort-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#project-sort .project-sort-glyph svg { width: 13px; height: 13px; display: block; }
+#project-sort .project-sort-caret svg {
+  width: 11px; height: 11px; display: block;
+  transform: rotate(90deg);  /* chevron points down to read as a dropdown affordance */
+  opacity: 0.7;
+}
+/* The active mode label reads brighter so users see which mode is on */
+#project-sort .project-sort-label b {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 #project-sort:hover {
   color: var(--text-primary);
+  background: var(--hover-bg);
   border-color: var(--accent-green);
 }
 
