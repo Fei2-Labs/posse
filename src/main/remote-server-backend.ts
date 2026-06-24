@@ -408,6 +408,41 @@ export class RemoteServerBackend implements PtyBackend {
     }
   }
 
+  /**
+   * Write a remote BINARY file from base64 (POST /api/fs/write-base64). Backs the
+   * `remote:upload-files` desktop->remote transfer. Uses a long (2min) timeout since a
+   * ~50MB upload would exceed the default 10s `request()` budget over Tailscale/ssh -L.
+   */
+  async fsWriteBase64(filePath: string, dataBase64: string): Promise<{ ok: boolean; error?: string }> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+      'Content-Type': 'application/json',
+    };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+    try {
+      const res = await fetch(`${this.baseUrl}/api/fs/write-base64`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ path: filePath, dataBase64 }),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        return { ok: false, error: `write-base64 failed: ${res.status} ${text.slice(0, 200)}` };
+      }
+      try {
+        return JSON.parse(text) as { ok: boolean; error?: string };
+      } catch {
+        return { ok: false, error: 'write-base64 returned non-JSON' };
+      }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   /** ws:// or wss:// origin derived from the http(s) baseUrl. */
   private wsBaseUrl(): string {
     if (this.baseUrl.startsWith('https://')) return 'wss://' + this.baseUrl.slice('https://'.length);

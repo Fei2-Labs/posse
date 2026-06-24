@@ -62,6 +62,8 @@ declare global {
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
       writeFile: (filePath: string, content: string) => Promise<{ ok: boolean; error?: string }>;
       readFileBase64: (filePath: string) => Promise<{ ok: boolean; dataUrl?: string; size?: number; ext?: string; error?: string }>;
+      remoteUploadFiles: (args: { destDir: string }) => Promise<{ ok: boolean; uploaded: string[]; skipped?: string[]; error?: string }>;
+      remoteDownloadFile: (args: { remotePath: string }) => Promise<{ ok: boolean; savedTo?: string; error?: string }>;
       gitBranch: (cwd: string) => Promise<string>;
       claudeSessionsList: (cwd: string) => Promise<Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string }>>;
       projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
@@ -1560,6 +1562,7 @@ const newSessionCancelBtn = document.getElementById('new-session-cancel')!;
 const newSessionCreateBtn = document.getElementById('new-session-create')!;
 const fileTreeList = document.getElementById('file-tree-list')!;
 const fileTreeRefreshBtn = document.getElementById('file-tree-refresh-btn')!;
+const fileTreeUploadBtn = document.getElementById('file-tree-upload-btn') as HTMLButtonElement | null;
 
 // File preview panel
 const filePreviewPanel = document.getElementById('file-preview-panel')! as HTMLElement;
@@ -2143,6 +2146,22 @@ async function trashTreeItem(itemPath: string, isDir: boolean): Promise<void> {
   showBriefNotice(`Moved "${name}" to Trash`);
 }
 
+// Download a remote file to a local path the user picks (native save dialog in main).
+async function downloadTreeFile(remotePath: string): Promise<void> {
+  const name = remotePath.split(/[/\\]/).pop() || remotePath;
+  try {
+    const res = await window.posse.remoteDownloadFile({ remotePath });
+    if (res.ok && res.savedTo) {
+      showBriefNotice(`Saved to ${res.savedTo}`);
+    } else if (res.error && res.error !== 'canceled') {
+      showBriefNotice(`Download failed: ${res.error}`);
+    }
+  } catch (err) {
+    console.error('remoteDownloadFile failed', err);
+    showBriefNotice(`Failed to download "${name}"`);
+  }
+}
+
 function showTreeContextMenu(e: MouseEvent, itemPath: string, isDir: boolean): void {
   // Remove any existing menu
   document.querySelectorAll('.term-context-menu').forEach(m => m.remove());
@@ -2165,6 +2184,10 @@ function showTreeContextMenu(e: MouseEvent, itemPath: string, isDir: boolean): v
       { label: 'Open in editor', action: () => window.posse.filewatcherOpen(itemPath) },
       { label: 'Insert path into terminal', action: () => insertPathToActiveTerminal(itemPath) },
     );
+    // Download to local — only meaningful on a remote connection (local files are already local).
+    if (activeConnectionIsRemote) {
+      items.push({ label: 'Download to local…', action: () => { void downloadTreeFile(itemPath); } });
+    }
   }
   // Destructive (but recoverable) action: send to OS trash
   items.push({ label: 'Move to Trash', action: () => { void trashTreeItem(itemPath, isDir); }, danger: true, separated: true });
@@ -4139,6 +4162,33 @@ document.addEventListener('mouseup', () => {
 
 fileTreeRefreshBtn.addEventListener('click', () => { void refreshFileTree(true); });
 
+// Show the Upload affordance only when the active connection is a REMOTE host. On a local
+// connection the tree IS the local FS, so no transfer is needed. Driven by the same
+// `activeConnectionIsRemote` flag that gates the subscription toggle, refreshed on
+// connection change (see onConnectionChanged + updateTransferAffordances()).
+function updateTransferAffordances(): void {
+  if (fileTreeUploadBtn) fileTreeUploadBtn.hidden = !activeConnectionIsRemote;
+}
+
+fileTreeUploadBtn?.addEventListener('click', async () => {
+  if (!activeConnectionIsRemote) return;
+  const destDir = fileTreeRootCwd || getActiveSessionCwd();
+  if (!destDir) { showBriefNotice('Open a session directory first'); return; }
+  try {
+    const res = await window.posse.remoteUploadFiles({ destDir });
+    if (res.ok) {
+      const skippedNote = res.skipped && res.skipped.length ? ` (${res.skipped.length} skipped)` : '';
+      showBriefNotice(`Uploaded ${res.uploaded.length} file(s)${skippedNote}`);
+      await refreshFileTree(true);
+    } else if (res.error && res.error !== 'canceled') {
+      showBriefNotice(`Upload failed: ${res.error}`);
+    }
+  } catch (err) {
+    console.error('remoteUploadFiles failed', err);
+    showBriefNotice('Upload failed');
+  }
+});
+
 // Directory auto-refresh - refresh every 30 seconds
 let fileTreeAutoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 function startFileTreeAutoRefresh(): void {
@@ -5261,13 +5311,13 @@ if (hostSwitcherBtn) {
 // tree so the sidebar reflects the new host's sessions and the file panel reroots.
 window.posse.onConnectionChanged(() => {
   void refreshHostSwitcherLabel();
-  void refreshSubscriptionState();
+  void refreshSubscriptionState().then(updateTransferAffordances);
   void refreshProjectsData();
   void renderFileTree();
 });
 
 void refreshHostSwitcherLabel();
-void refreshSubscriptionState();
+void refreshSubscriptionState().then(updateTransferAffordances);
 
 // ========== Mobile Access collapse toggle ==========
 

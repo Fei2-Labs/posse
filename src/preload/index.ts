@@ -54,6 +54,13 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('fs:write-file', filePath, content),
   // Read a (binary) file as a base64 data URL — used for image previews
   readFileBase64: (filePath: string) => ipcRenderer.invoke('fs:read-file-base64', filePath),
+  // Desktop -> remote upload: native multi-select dialog, then write the picked file(s)
+  // into destDir on the active connection (remote over HTTP, or local copy). 50MB/file cap.
+  remoteUploadFiles: (args: { destDir: string }) =>
+    ipcRenderer.invoke('remote:upload-files', args) as Promise<{ ok: boolean; uploaded: string[]; skipped?: string[]; error?: string }>,
+  // Remote -> desktop download: read the file from the active connection, then native save dialog.
+  remoteDownloadFile: (args: { remotePath: string }) =>
+    ipcRenderer.invoke('remote:download-file', args) as Promise<{ ok: boolean; savedTo?: string; error?: string }>,
   // Resolve the git branch for a cwd (used to annotate the window title). '' when not a git repo.
   gitBranch: (cwd: string) => ipcRenderer.invoke('git:branch', cwd) as Promise<string>,
   // List a directory's native session history in Claude Code

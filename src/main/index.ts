@@ -2218,6 +2218,118 @@ function registerIPC(): void {
     }
   });
 
+  // ===== Desktop <-> remote file transfer (issue #74) =====
+  // Both honor the calling window's active connection via remoteBackendForEvent(): when a
+  // remote backend is active the bytes flow over HTTP (base64); on a local connection they
+  // are a plain local FS copy/save. 50MB/file cap (no chunking). Never throw across IPC.
+  const TRANSFER_MAX_BYTES = 50 * 1024 * 1024;
+
+  // Upload local file(s) to the active connection's destDir. Opens a native multi-select
+  // OPEN dialog; for each picked file: read -> (remote ? fsWriteBase64 : local copy) to
+  // destDir/<basename>. Files over 50MB are skipped + reported.
+  ipcMain.handle(
+    'remote:upload-files',
+    async (
+      _e,
+      args: { destDir?: string }
+    ): Promise<{ ok: boolean; uploaded: string[]; skipped?: string[]; error?: string }> => {
+      try {
+        const destDir = String(args?.destDir || '').trim();
+        if (!destDir) return { ok: false, uploaded: [], error: 'no-dest-dir' };
+        const remote = remoteBackendForEvent(_e);
+        const ownerWindow = BrowserWindow.fromWebContents(_e.sender) || (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+        const dialogOptions: Electron.OpenDialogOptions = {
+          title: 'Select file(s) to upload',
+          buttonLabel: 'Upload',
+          properties: ['openFile', 'multiSelections'],
+        };
+        const result = ownerWindow
+          ? await dialog.showOpenDialog(ownerWindow, dialogOptions)
+          : await dialog.showOpenDialog(dialogOptions);
+        if (result.canceled || result.filePaths.length === 0) {
+          return { ok: false, uploaded: [], error: 'canceled' };
+        }
+
+        const uploaded: string[] = [];
+        const skipped: string[] = [];
+        for (const localPath of result.filePaths) {
+          const base = path.basename(localPath);
+          try {
+            const st = fs.statSync(localPath);
+            if (!st.isFile()) { skipped.push(base); continue; }
+            if (st.size > TRANSFER_MAX_BYTES) { skipped.push(base); continue; }
+            const buf = fs.readFileSync(localPath);
+            // Remote destinations use POSIX joins (the remote may be Linux); local copies
+            // use the host path module.
+            if (remote) {
+              const destPath = `${destDir.replace(/\/+$/, '')}/${base}`;
+              const r = await remote.fsWriteBase64(destPath, buf.toString('base64'));
+              if (!r.ok) { skipped.push(base); continue; }
+            } else {
+              const destPath = path.join(destDir, base);
+              fs.mkdirSync(path.dirname(destPath), { recursive: true });
+              fs.writeFileSync(destPath, buf);
+            }
+            uploaded.push(base);
+          } catch {
+            skipped.push(base);
+          }
+        }
+        return { ok: uploaded.length > 0, uploaded, skipped };
+      } catch (err) {
+        return { ok: false, uploaded: [], error: (err as Error).message };
+      }
+    }
+  );
+
+  // Download a file from the active connection to a local path. Reads it as base64
+  // (remote ? fsReadBase64 : local read), opens a native SAVE dialog defaulting to the
+  // basename, writes the decoded bytes to the chosen path.
+  ipcMain.handle(
+    'remote:download-file',
+    async (
+      _e,
+      args: { remotePath?: string }
+    ): Promise<{ ok: boolean; savedTo?: string; error?: string }> => {
+      try {
+        const remotePath = String(args?.remotePath || '').trim();
+        if (!remotePath) return { ok: false, error: 'no-path' };
+        const remote = remoteBackendForEvent(_e);
+        const base = remotePath.split(/[/\\]/).pop() || 'download';
+
+        // Resolve file bytes as a Buffer.
+        let buf: Buffer;
+        if (remote) {
+          const r = await remote.fsReadBase64(remotePath);
+          if (!r.ok || !r.dataUrl) return { ok: false, error: r.error || 'read-failed' };
+          const comma = r.dataUrl.indexOf(',');
+          const b64 = comma >= 0 ? r.dataUrl.slice(comma + 1) : r.dataUrl;
+          buf = Buffer.from(b64, 'base64');
+        } else {
+          const abs = path.resolve(remotePath);
+          const st = fs.statSync(abs);
+          if (!st.isFile()) return { ok: false, error: 'not-a-file' };
+          if (st.size > TRANSFER_MAX_BYTES) return { ok: false, error: 'too-large' };
+          buf = fs.readFileSync(abs);
+        }
+
+        const ownerWindow = BrowserWindow.fromWebContents(_e.sender) || (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+        const saveOptions: Electron.SaveDialogOptions = {
+          title: 'Save downloaded file',
+          defaultPath: path.join(os.homedir(), base),
+        };
+        const result = ownerWindow
+          ? await dialog.showSaveDialog(ownerWindow, saveOptions)
+          : await dialog.showSaveDialog(saveOptions);
+        if (result.canceled || !result.filePath) return { ok: false, error: 'canceled' };
+        fs.writeFileSync(result.filePath, buf);
+        return { ok: true, savedTo: result.filePath };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+  );
+
   // Resolve the git branch for a cwd (for the macOS window title). Fast + cheap.
   // Returns the branch name string, or '' for: empty/non-string cwd, not a git repo,
   // detached HEAD (git prints 'HEAD'), or any error. Never throws across IPC.

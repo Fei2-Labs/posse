@@ -788,6 +788,34 @@ export function startRemoteServer(
     }
   });
 
+  // Write a BINARY file from a base64 payload (desktop->remote upload / file transfer).
+  // The global `express.json()` parser caps bodies at ~100kb, so this route uses a dedicated
+  // 50mb json parser (base64 of a 50MB file is ~67MB). Mirrors `remote:upload-files`' write
+  // step: decode -> Buffer -> mkdir -p parent -> write. Same auth (authMiddleware) + path
+  // resolution as `/api/fs/write`.
+  app.post('/api/fs/write-base64', express.json({ limit: '70mb' }), (req, res) => {
+    const MAX_BYTES = 50 * 1024 * 1024; // 50MB cap on the decoded file
+    try {
+      const { path: filePath, dataBase64 } = req.body || {};
+      if (typeof filePath !== 'string' || filePath.trim() === '') {
+        res.status(400).json({ ok: false, error: 'invalid-path' }); return;
+      }
+      if (typeof dataBase64 !== 'string') {
+        res.status(400).json({ ok: false, error: 'invalid-content' }); return;
+      }
+      const buf = Buffer.from(dataBase64, 'base64');
+      if (buf.length > MAX_BYTES) {
+        res.status(413).json({ ok: false, error: 'too-large', size: buf.length }); return;
+      }
+      const abs = path.resolve(filePath);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, buf);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  });
+
   // Create a session — created via ptyManager, notifying the desktop
   app.post('/api/sessions', async (req, res) => {
     const { cwd, presetCommand, themeId, providerEnv } = req.body;
