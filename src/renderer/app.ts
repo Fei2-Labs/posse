@@ -159,6 +159,8 @@ declare global {
       connectionsBootstrapSshHost: (host: string) => Promise<{ ok: boolean; id?: string; label?: string; baseUrl?: string; error?: string }>;
       connectionsRemove: (id: string) => Promise<{ ok: boolean; error?: string }>;
       connectionsSetActive: (id: string) => Promise<{ ok: boolean; error?: string }>;
+      connectionsBindWindow: (id: string) => Promise<{ ok: boolean; error?: string }>;
+      windowOpenWithConnection: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onConnectionChanged: (cb: (id: string) => void) => void;
     };
   }
@@ -1888,6 +1890,10 @@ function normalizeCwd(cwd: string): string {
   return p;
 }
 
+// The host THIS window is bound to. '' for the local connection (no prefix in the title);
+// a remote label otherwise so each window's title shows its host. Set by refreshHostSwitcherLabel().
+let currentRemoteHostLabel = '';
+
 // ===== Git branch cache (for the macOS window title) =====
 // updateSessionTitleBar is synchronous + called often, but gitBranch is async.
 // Read the cached branch synchronously; if a cwd isn't cached yet, kick off one
@@ -1996,7 +2002,7 @@ function updateSessionTitleBar(): void {
     // macOS window title: keep full information
     const title = sessionTitles.get(activeId) || '';
     const displayName = sessionDisplayNames.get(activeId) || '';
-    const parts = ['Posse'];
+    const parts = [currentRemoteHostLabel ? `Posse @ ${currentRemoteHostLabel}` : 'Posse'];
     if (displayName) parts.push(displayName);
     // 'New session' / 'New conversation' are default titles produced by the backend (kept for the comparison to work)
     if (title && title !== 'New session' && title !== 'New conversation') parts.push(title);
@@ -4745,14 +4751,16 @@ async function refreshSubscriptionState(): Promise<void> {
 }
 
 async function refreshHostSwitcherLabel(): Promise<void> {
-  if (!hostSwitcherLabel) return;
   try {
     const list = await window.posse.connectionsList();
     const active = list.find((c) => c.active) || list[0];
-    hostSwitcherLabel.textContent = active ? active.label : 'Local';
+    if (hostSwitcherLabel) hostSwitcherLabel.textContent = active ? active.label : 'Local';
+    currentRemoteHostLabel = active && active.kind === 'remote' ? active.label : '';
   } catch {
-    hostSwitcherLabel.textContent = 'Local';
+    if (hostSwitcherLabel) hostSwitcherLabel.textContent = 'Local';
+    currentRemoteHostLabel = '';
   }
+  updateSessionTitleBar();
 }
 
 function closeHostMenu(): void {
@@ -4791,6 +4799,19 @@ async function openHostMenu(): Promise<void> {
     name.textContent = c.label;
     item.appendChild(check);
     item.appendChild(name);
+    // "Open this host in a new window" — spawns a second window bound to this connection so
+    // multiple hosts run in parallel (each window stays "one host").
+    const newWin = document.createElement('button');
+    newWin.className = 'host-switcher-newwin';
+    newWin.title = 'Open this host in a new window';
+    newWin.textContent = '⧉';
+    newWin.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      closeHostMenu();
+      const res = await window.posse.windowOpenWithConnection(c.id);
+      if (!res.ok) console.error('open-with-connection failed', res.error);
+    });
+    item.appendChild(newWin);
     if (c.kind === 'remote') {
       const rm = document.createElement('button');
       rm.className = 'host-switcher-remove';
@@ -4807,8 +4828,10 @@ async function openHostMenu(): Promise<void> {
     item.addEventListener('click', async () => {
       closeHostMenu();
       if (c.active) return;
-      const res = await window.posse.connectionsSetActive(c.id);
-      if (!res.ok) { console.error('set-active failed', res.error); return; }
+      // Bind THIS window to the chosen host (in-window switch). connection:changed then
+      // refreshes this window's navigator + file tree.
+      const res = await window.posse.connectionsBindWindow(c.id);
+      if (!res.ok) { console.error('bind-window failed', res.error); return; }
       await refreshHostSwitcherLabel();
     });
     menu.appendChild(item);

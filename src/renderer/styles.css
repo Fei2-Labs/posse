@@ -3201,4 +3201,15 @@ select.ai-form-input {
   padding: 0 4px;
 }
 .host-switcher-remove:hover { color: var(--danger); }
+.host-switcher-newwin {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.host-switcher-newwin:hover { color: var(--accent); }
 .host-switcher-add { color: var(--accent); }

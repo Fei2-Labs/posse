@@ -211,6 +211,10 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('connections:bootstrap-ssh-host', host),
   connectionsRemove: (id: string) => ipcRenderer.invoke('connections:remove', id),
   connectionsSetActive: (id: string) => ipcRenderer.invoke('connections:set-active', id),
+  // D3: bind THIS window to a connection (in-window host switch).
+  connectionsBindWindow: (id: string) => ipcRenderer.invoke('connections:bind-window', id),
+  // D3: open a NEW window bound to a connection ("open host in new window").
+  windowOpenWithConnection: (id: string) => ipcRenderer.invoke('window:open-with-connection', id),
 
   // Claude subscription token (for "use my subscription" remote agent sessions).
   // status never returns the full token — only { set, maskedSuffix }.

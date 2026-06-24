@@ -578,22 +578,72 @@ let mainWindow: BrowserWindow | null = null;
 // before anything reads from it (setupPtyManager is awaited at app startup).
 const connectionRegistry = new ConnectionRegistry();
 
-// SEAM: window <-> connection binding. Today there is exactly one window and one
-// connection ('local'), so the window's bound connection id is always 'local'.
-// A later chunk will replace this single id with a BrowserWindow -> connection-id
-// map so each window can bind to a different host, and route activeBackend()
-// through the focused window's bound connection.
-// TODO(remote): map BrowserWindow -> connection id; per-window host binding.
+// ========== Window <-> connection binding (D3: per-window host) ==========
+// Each window binds to exactly ONE connection. The PRIMARY window (mainWindow) defaults
+// to 'local' and behaves exactly as before. Secondary windows ("open host in new window")
+// bind to a different connection so multiple hosts run in parallel.
+//
+// `activeConnectionId` is retained as the PRIMARY-window binding + the fallback for any
+// code path that has no originating window (timers, tray, the mobile relay). Per-window
+// IPC handlers resolve the calling window via BrowserWindow.fromWebContents(event.sender)
+// and use that window's bound connection instead.
+interface WindowBinding {
+  window: BrowserWindow;
+  connectionId: string;
+}
+const windowBindings = new Map<number /* webContents.id */, WindowBinding>();
+
+/** The primary window's bound connection. Fallback when no event window is available. */
 let activeConnectionId: string = LOCAL_CONNECTION_ID;
 
+/** Register/update a window's bound connection. Keyed by webContents.id. */
+function bindWindowConnection(window: BrowserWindow, connectionId: string): void {
+  windowBindings.set(window.webContents.id, { window, connectionId });
+  if (window === mainWindow) activeConnectionId = connectionId;
+}
+
+/** Remove a window's binding (on 'closed'). Never touches the connection itself. */
+function unbindWindow(window: BrowserWindow): void {
+  windowBindings.delete(window.webContents.id);
+}
+
+/** The connection id bound to a given window, or the primary fallback. */
+function connectionIdForWindow(window: BrowserWindow | null): string {
+  if (window) {
+    const binding = windowBindings.get(window.webContents.id);
+    if (binding) return binding.connectionId;
+  }
+  return activeConnectionId;
+}
+
+/** Resolve the connection id for the window that sent an IPC event (primary fallback). */
+function connectionIdForEvent(event?: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): string {
+  if (event) {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (window) return connectionIdForWindow(window);
+  }
+  return activeConnectionId;
+}
+
 /**
- * The PtyBackend of the active connection. Resolves from the registry every call
- * so it always reflects the current binding. Replaces the former global
- * `ptyManager` binding — same value today (the local backend), routed through
- * the registry so a future chunk can swap in a remote connection.
+ * The PtyBackend for a given connection id (defaults to the primary/active connection).
+ * Resolves from the registry every call so it always reflects the current binding.
+ */
+function backendFor(connectionId: string = activeConnectionId): PtyBackend {
+  return connectionRegistry.get(connectionId)?.backend ?? connectionRegistry.getActive().backend;
+}
+
+/** The PtyBackend for the window that sent an IPC event (primary fallback). */
+function backendForEvent(event?: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): PtyBackend {
+  return backendFor(connectionIdForEvent(event));
+}
+
+/**
+ * The active connection's backend (primary fallback). Retained for the non-event code
+ * paths (timers/notifications) that historically read the single global backend.
  */
 function activeBackend(): PtyBackend {
-  return connectionRegistry.get(activeConnectionId)?.backend ?? connectionRegistry.getActive().backend;
+  return backendFor(activeConnectionId);
 }
 const aiConfigManager = new AIConfigManager();
 let cloudflaredManager: CloudflaredManager | null = null;
@@ -717,8 +767,14 @@ function loadAppIcon(): Electron.NativeImage | undefined {
   return undefined;
 }
 
-function createWindow(appIcon?: Electron.NativeImage): void {
-  mainWindow = new BrowserWindow({
+/**
+ * Create a window bound to `connectionId` (defaults to 'local'). The FIRST window created becomes
+ * the primary (`mainWindow`); subsequent windows are secondary and bind to their own connection.
+ * Returns the window so callers ("open host in new window") can act on it.
+ */
+function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOCAL_CONNECTION_ID): BrowserWindow {
+  const isPrimary = mainWindow === null;
+  const win = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
@@ -732,14 +788,20 @@ function createWindow(appIcon?: Electron.NativeImage): void {
     },
   });
 
-  mainWindow.maximize();
+  if (isPrimary) mainWindow = win;
 
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  // Register the window <-> connection binding BEFORE loading so connection-scoped events route
+  // correctly from first paint.
+  bindWindowConnection(win, connectionId);
 
-  mainWindow.webContents.on('before-input-event', (event, input) => {
+  win.maximize();
+
+  win.loadFile(path.join(__dirname, '../renderer/index.html'));
+
+  win.webContents.on('before-input-event', (event, input) => {
     if ((input.meta || input.control) && input.key.toLowerCase() === 'w') {
       event.preventDefault();
-      mainWindow?.webContents.send('app:close-current-session');
+      win.webContents.send('app:close-current-session');
     }
     // Block Cmd+R / Ctrl+R refresh ONLY inside Posse's own window. Using a
     // window-scoped before-input-event (not globalShortcut.register, which would
@@ -749,18 +811,65 @@ function createWindow(appIcon?: Electron.NativeImage): void {
     }
   });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  win.on('closed', () => {
+    // Closing a window NEVER kills its connection (remote daemons keep running 24/7). Just drop
+    // the binding so its frames stop routing here.
+    unbindWindow(win);
+    if (win === mainWindow) {
+      mainWindow = null;
+      // Promote another open window (if any) to primary so non-window code paths keep a target.
+      const next = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+      if (next) {
+        mainWindow = next;
+        activeConnectionId = connectionIdForWindow(next);
+      }
+    }
   });
+
+  return win;
 }
 
-function safeSend(channel: string, ...args: unknown[]): void {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+function sendToWindow(window: BrowserWindow, channel: string, ...args: unknown[]): void {
+  if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     try {
-      mainWindow.webContents.send(channel, ...args);
+      window.webContents.send(channel, ...args);
     } catch {
       // render frame disposed during GPU crash/restart
     }
+  }
+}
+
+/**
+ * Broadcast an app-wide (non-connection-scoped) event to EVERY open window — theme changes,
+ * closed-session lists, chat deltas, etc. The primary window always receives these.
+ */
+function safeSend(channel: string, ...args: unknown[]): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    sendToWindow(win, channel, ...args);
+  }
+}
+
+/**
+ * Route a CONNECTION-SCOPED event (pty:data / title / exit / remote-created / auto-switch)
+ * ONLY to the window(s) bound to that connection. This is the multi-window crux: each
+ * connection's pty output reaches only its own window(s), so `term-N` ids never collide
+ * across windows. Falls back to the primary window when no window is bound to the connection
+ * yet (e.g. the local connection before any secondary window exists — preserves today's
+ * single-window behavior).
+ */
+function sendToConnection(connectionId: string, channel: string, ...args: unknown[]): void {
+  let delivered = false;
+  for (const { window, connectionId: boundId } of windowBindings.values()) {
+    if (boundId === connectionId) {
+      sendToWindow(window, channel, ...args);
+      delivered = true;
+    }
+  }
+  // Safety net: if no window is bound (binding not yet registered, e.g. during early startup
+  // before the primary window's binding lands), deliver to the primary window when it is the
+  // active connection. Keeps the single-window path identical to before.
+  if (!delivered && connectionId === activeConnectionId && mainWindow) {
+    sendToWindow(mainWindow, channel, ...args);
   }
 }
 
@@ -794,7 +903,7 @@ function sendUserNotification(id: string, title: string, body: string): void {
   sendIMessageNotification(`[Posse] ${title}：${body}`);
 }
 
-function maybeNotifyAttention(id: string, data: string): void {
+function maybeNotifyAttention(id: string, data: string, connectionId: string = activeConnectionId): void {
   const now = Date.now();
   const lastNotify = sessionLastNotifyAt.get(id) || 0;
   if (now - lastNotify < NOTIFY_COOLDOWN_MS) return;
@@ -813,7 +922,7 @@ function maybeNotifyAttention(id: string, data: string): void {
   const lastInputAt = sessionLastInputAt.get(id) || 0;
   const waitedLongEnough = now - lastInputAt >= WAITING_INPUT_DELAY_MS;
 
-  const session = activeBackend().getSession(id);
+  const session = backendFor(connectionId).getSession(id);
   const title = session?.title || session?.presetCommand || 'Terminal';
 
   if (hasPrompt && needDecision) {
@@ -835,22 +944,21 @@ function maybeNotifyAttention(id: string, data: string): void {
 }
 
 /**
- * Build the PtyBackendEvents for a given connection. EVERY renderer-bound callback is guarded
- * by `connId === activeConnectionId` so only the ACTIVE connection drives the single renderer
- * window. Non-active connections keep running (24/7 remotes) but stay silent — their `pty:data`
- * / title / exit / auto-switch frames are dropped at the source, so local + remote `term-N` ids
- * never interleave or collide in the renderer. Switching active + refreshing surfaces that
- * connection's sessions. `onRawData` (mobile push) is NOT guarded for the local connection so
- * the mobile relay keeps streaming regardless of which host the desktop is viewing.
+ * Build the PtyBackendEvents for a given connection. Each renderer-bound callback routes via
+ * `sendToConnection(connId, ...)`, so a connection's `pty:data` / title / exit / auto-switch
+ * frames reach ONLY the window(s) bound to THAT connection. Multiple windows can therefore view
+ * different hosts in parallel: each window's renderer only ever receives its own connection's
+ * events, so local + remote `term-N` ids never interleave or collide in the UI. A connection
+ * with no bound window (a 24/7 remote nobody is viewing) keeps running but its frames fall on the
+ * floor (sendToConnection finds no target) — reopening a window bound to it resurfaces it.
+ * `onRawData` (mobile push) mirrors only the LOCAL backend regardless of which host any desktop
+ * window is viewing.
  */
 function buildConnectionEvents(connId: string): import('./pty-backend').PtyBackendEvents {
-  const isActive = () => connId === activeConnectionId;
   return {
     onData: (id, data) => {
-      if (isActive()) {
-        safeSend('pty:data', id, data);
-        maybeNotifyAttention(id, data);
-      }
+      sendToConnection(connId, 'pty:data', id, data);
+      maybeNotifyAttention(id, data, connId);
     },
     onRawData: (id, data) => {
       // The mobile relay mirrors the LOCAL backend's raw output regardless of the desktop's
@@ -858,12 +966,11 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
       if (connId === LOCAL_CONNECTION_ID) pushRawDataToRemote(id, data);
     },
     onTitleUpdate: (id, title) => {
-      if (isActive()) safeSend('pty:title-update', id, title);
+      sendToConnection(connId, 'pty:title-update', id, title);
     },
     onExit: (id, exitedSession) => {
-      if (!isActive()) return;
       // Save sessions that have a resume ID to the closed list
-      const session = exitedSession || activeBackend().getSession(id);
+      const session = exitedSession || backendFor(connId).getSession(id);
       if (session?.resumeId) {
         addClosedSession({
           title: session.title,
@@ -885,15 +992,14 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
       sessionArmedForNotify.delete(id);
       sessionLastNotifyAt.delete(id);
 
-      safeSend('pty:exit', id);
+      sendToConnection(connId, 'pty:exit', id);
     },
     onPasteInput: (id, _cwd) => {
-      if (!isActive()) return;
       sessionLastInputAt.set(id, Date.now());
       sessionArmedForNotify.add(id);
     },
     onAutoSwitchStatus: (id, status, detail) => {
-      if (isActive()) safeSend('pty:auto-switch-status', id, status, detail);
+      sendToConnection(connId, 'pty:auto-switch-status', id, status, detail);
     },
   };
 }
@@ -941,11 +1047,25 @@ async function addRemoteConnection(opts: { label: string; baseUrl: string; token
   return { id, label };
 }
 
-/** Switch the active connection and tell the renderer to refresh its navigator/file tree. */
-function setActiveConnection(id: string): void {
-  connectionRegistry.setActive(id);
-  activeConnectionId = id;
-  safeSend('connection:changed', id);
+/**
+ * Bind a window to a connection (the in-window host switch). Rebinds the given window — or the
+ * primary window when none is supplied (the historical "set active" path / non-window callers).
+ * Tells that window's renderer to refresh its navigator/file tree. Only the rebound window is
+ * notified, so other windows keep viewing their own hosts.
+ */
+function bindConnectionToWindow(id: string, window: BrowserWindow | null): void {
+  // Keep the registry's "active" pointer following the primary window for the non-window code
+  // paths (mobile relay / timers) that still read connectionRegistry / activeConnectionId.
+  const target = window ?? mainWindow;
+  if (target) {
+    bindWindowConnection(target, id);
+    if (target === mainWindow) connectionRegistry.setActive(id);
+    sendToWindow(target, 'connection:changed', id);
+  } else {
+    // No window at all (shouldn't happen post-startup) — just track the active pointer.
+    connectionRegistry.setActive(id);
+    activeConnectionId = id;
+  }
 }
 
 /** Remove a remote connection (never 'local'); disposes its client. The remote keeps running. */
@@ -955,12 +1075,26 @@ function removeConnection(id: string): void {
   if (removed) {
     try { (removed.backend as RemoteServerBackend).dispose?.(); } catch { /* ignore */ }
   }
-  // unregister() falls active back to local when needed; reflect that.
-  const active = connectionRegistry.getActiveId() ?? LOCAL_CONNECTION_ID;
-  if (active !== activeConnectionId) {
-    activeConnectionId = active;
-    safeSend('connection:changed', active);
+  // Any window still bound to the removed connection falls back to local and is told to refresh.
+  for (const binding of windowBindings.values()) {
+    if (binding.connectionId === id) {
+      bindWindowConnection(binding.window, LOCAL_CONNECTION_ID);
+      sendToWindow(binding.window, 'connection:changed', LOCAL_CONNECTION_ID);
+    }
   }
+  // unregister() falls registry active back to local when needed; keep the global in sync.
+  const active = connectionRegistry.getActiveId() ?? LOCAL_CONNECTION_ID;
+  activeConnectionId = active;
+}
+
+/**
+ * Open a NEW window bound to the given connection. The window's renderer resolves its session
+ * list / file tree from that connection via the per-window backend resolution. The remote keeps
+ * running 24/7 independent of this window.
+ */
+function openWindowWithConnection(connectionId: string): BrowserWindow {
+  const win = createWindow(currentAppIcon, connectionId);
+  return win;
 }
 
 
@@ -1484,10 +1618,15 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
  * The active connection's backend IFF it is a remote one, else null. Lets navigator/file IPC
  * branch "remote vs local fs" without leaking the registry into every handler.
  */
-function activeRemoteBackend(): RemoteServerBackend | null {
-  const conn = connectionRegistry.get(activeConnectionId);
+function activeRemoteBackend(connectionId: string = activeConnectionId): RemoteServerBackend | null {
+  const conn = connectionRegistry.get(connectionId);
   if (conn && conn.kind === 'remote') return conn.backend as RemoteServerBackend;
   return null;
+}
+
+/** The remote backend (or null) for the window that sent an IPC event (primary fallback). */
+function remoteBackendForEvent(event?: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): RemoteServerBackend | null {
+  return activeRemoteBackend(connectionIdForEvent(event));
 }
 
 /**
@@ -1568,25 +1707,28 @@ async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<Pro
 }
 
 function registerIPC(): void {
-  // Set window title
-  ipcMain.on('window:set-title', (_e, title: string) => {
-    if (mainWindow) mainWindow.setTitle(title);
+  // Set window title — for the CALLING window (each window titles itself with its own host/branch).
+  ipcMain.on('window:set-title', (event, title: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win) win.setTitle(title);
+    else if (mainWindow) mainWindow.setTitle(title);
   });
 
   // Create terminal
   ipcMain.handle('pty:create', async (_e, cwd: string, presetCommand: string, themeId: string, providerEnv?: Record<string, string>, useSubscription?: boolean) => {
+    const backend = backendForEvent(_e);
     // "Use my Claude subscription" (chunk F): for a REMOTE connection only, inject the
     // stored CLAUDE_CODE_OAUTH_TOKEN so the remote claude agent uses the user's Claude
     // subscription (truly 24/7, independent of the Mac). Skipped for LOCAL (the Mac already
     // has the login) and for remote-native sessions (the default — inject nothing LLM-related).
     let effectiveProviderEnv = providerEnv;
-    if (useSubscription && activeRemoteBackend()) {
+    if (useSubscription && remoteBackendForEvent(_e)) {
       const subToken = loadSubscriptionToken();
       if (subToken) {
         effectiveProviderEnv = { ...(providerEnv || {}), CLAUDE_CODE_OAUTH_TOKEN: subToken };
       }
     }
-    const session = await activeBackend().create(cwd, presetCommand, themeId, effectiveProviderEnv);
+    const session = await backend.create(cwd, presetCommand, themeId, effectiveProviderEnv);
     // If providerEnv is present, infer the provider name from baseUrl
     let provider: string | null = null;
     if (providerEnv && providerEnv.ANTHROPIC_BASE_URL) {
@@ -1607,7 +1749,7 @@ function registerIPC(): void {
     } else {
       provider = getCliProvider(presetCommand);
     }
-    await activeBackend().setProvider(session.id, provider);
+    await backend.setProvider(session.id, provider);
     return {
       id: session.id,
       title: session.title,
@@ -1622,21 +1764,22 @@ function registerIPC(): void {
   // Write data
   ipcMain.handle('pty:write', async (_e, id: string, data: string) => {
     console.log(`[Main] pty:write received, id=${id}, data="${data}"`);
-    await activeBackend().write(id, data);
+    await backendForEvent(_e).write(id, data);
     return true;
   });
 
   // Resize
   ipcMain.handle('pty:resize', async (_e, id: string, cols: number, rows: number) => {
-    await activeBackend().resize(id, cols, rows, 'local');
+    await backendForEvent(_e).resize(id, cols, rows, 'local');
     return true;
   });
 
   // Destroy terminal
   ipcMain.on('pty:destroy', async (_e, id: string) => {
+    const backend = backendForEvent(_e);
     // Fallback: extract the resume ID from the buffer and save to the closed list
-    await activeBackend().captureResumeFromBuffer(id);
-    const session = activeBackend().getSession(id);
+    await backend.captureResumeFromBuffer(id);
+    const session = backend.getSession(id);
     if (session?.resumeId) {
       addClosedSession({
         title: session.title,
@@ -1648,7 +1791,7 @@ function registerIPC(): void {
     }
 
     sessionUserClosed.add(id);
-    await activeBackend().destroy(id);
+    await backend.destroy(id);
     sessionOutputTail.delete(id);
     sessionLastInputAt.delete(id);
     sessionArmedForNotify.delete(id);
@@ -1658,19 +1801,19 @@ function registerIPC(): void {
 
   // Rename terminal
   ipcMain.on('pty:rename', (_e, id: string, title: string) => {
-    activeBackend().rename(id, title).catch((error) => {
+    backendForEvent(_e).rename(id, title).catch((error) => {
       console.error('[Main] Failed to rename PTY session:', error);
     });
   });
 
   // Regenerate title with AI
   ipcMain.handle('pty:regenerate-title', async (_e, id: string) => {
-    await activeBackend().regenerateTitle(id);
+    await backendForEvent(_e).regenerateTitle(id);
   });
 
   // Get info for all sessions
-  ipcMain.handle('pty:sessions', async () => {
-    const sessions = await activeBackend().refreshSessions();
+  ipcMain.handle('pty:sessions', async (_e) => {
+    const sessions = await backendForEvent(_e).refreshSessions();
     return sessions.map((s) => ({
       id: s.id,
       title: s.title,
@@ -1686,17 +1829,19 @@ function registerIPC(): void {
   // Gracefully restart the background PTY daemon.
   // Saves every live session as resumable FIRST so nothing is lost, then
   // stops the old daemon and starts a fresh one (picks up new daemon code).
-  ipcMain.handle('daemon:restart', async (): Promise<{ ok: boolean; error?: string }> => {
+  ipcMain.handle('daemon:restart', async (_e): Promise<{ ok: boolean; error?: string }> => {
     try {
+      const backend = backendForEvent(_e);
+      const connId = connectionIdForEvent(_e);
       // 1. Persist every live session as resumable before stopping the daemon.
-      const liveSessions = activeBackend().getAllSessions();
+      const liveSessions = backend.getAllSessions();
       for (const live of liveSessions) {
         try {
-          await activeBackend().captureResumeFromBuffer(live.id);
+          await backend.captureResumeFromBuffer(live.id);
         } catch {
           // Best-effort: keep going even if one capture fails.
         }
-        const session = activeBackend().getSession(live.id) || live;
+        const session = backend.getSession(live.id) || live;
         // Persist EVERY live session, even without a captured resumeId. Entries
         // without a resume id are re-opened as a fresh terminal in the original
         // cwd running the original command (handled in restoreClosedSession).
@@ -1710,10 +1855,10 @@ function registerIPC(): void {
       }
 
       // 2-3. Stop the old daemon and start a fresh one, reconnecting events.
-      await activeBackend().restart();
+      await backend.restart();
 
-      // 5. Tell the renderer the live list is now empty so it refreshes.
-      safeSend('daemon:restarted');
+      // 5. Tell the window(s) bound to this connection the live list is now empty so they refresh.
+      sendToConnection(connId, 'daemon:restarted');
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1801,7 +1946,7 @@ function registerIPC(): void {
 
   // Read directory (left-side file tree)
   ipcMain.handle('file-tree:list-dir', async (_e, dirPath: string) => {
-    const remote = activeRemoteBackend();
+    const remote = remoteBackendForEvent(_e);
     if (remote) {
       try { return await remote.fsList(String(dirPath || '')); } catch { return []; }
     }
@@ -1847,7 +1992,7 @@ function registerIPC(): void {
 
   // Read file contents for the right-side preview panel (read-only, with size/binary guards)
   ipcMain.handle('fs:read-file', async (_e, filePath: string) => {
-    const remote = activeRemoteBackend();
+    const remote = remoteBackendForEvent(_e);
     if (remote) return remote.fsRead(String(filePath || ''));
     const MAX_PREVIEW_BYTES = 1024 * 1024; // 1MB cap to avoid lag
     try {
@@ -1876,7 +2021,7 @@ function registerIPC(): void {
 
   // Write a text file (utf8) for the in-app editable preview. Never throws across IPC.
   ipcMain.handle('fs:write-file', async (_e, filePath: string, content: string) => {
-    const remote = activeRemoteBackend();
+    const remote = remoteBackendForEvent(_e);
     if (remote) {
       if (typeof filePath !== 'string' || filePath.trim() === '') return { ok: false, error: 'invalid-path' };
       if (typeof content !== 'string') return { ok: false, error: 'invalid-content' };
@@ -1924,7 +2069,7 @@ function registerIPC(): void {
 
   // Read a file as a base64 data URL (for image previews). Never throws.
   ipcMain.handle('fs:read-file-base64', async (_e, filePath: string) => {
-    const remote = activeRemoteBackend();
+    const remote = remoteBackendForEvent(_e);
     if (remote) return remote.fsReadBase64(String(filePath || ''));
     const MAX_IMAGE_BYTES = 16 * 1024 * 1024; // 16MB cap
     try {
@@ -2012,7 +2157,7 @@ function registerIPC(): void {
   // the renderer's navigator renders them unchanged (see buildRemoteProjectsList()).
   ipcMain.handle('projects:list', async (_e, opts?: { extraFolders?: string[] }) => {
     try {
-      const remote = activeRemoteBackend();
+      const remote = remoteBackendForEvent(_e);
       if (remote) return await buildRemoteProjectsList(remote);
       return buildProjectsList(opts?.extraFolders ?? []);
     } catch {
@@ -2023,27 +2168,31 @@ function registerIPC(): void {
   // Archive (soft-hide, reversible, does NOT touch agent data).
   // ========== Connection registry (D2: add/switch remote hosts) ==========
   // All wrapped to never throw across IPC.
-  ipcMain.handle('connections:list', () => {
+  // `active` is reported relative to the CALLING window's binding, so each window's host switcher
+  // highlights the host THAT window is viewing (not a single global active host).
+  ipcMain.handle('connections:list', (event) => {
     try {
+      const boundId = connectionIdForEvent(event);
       return connectionRegistry.list().map((c) => ({
         id: c.id,
         label: c.label,
         kind: c.kind,
-        active: c.id === activeConnectionId,
+        active: c.id === boundId,
       }));
     } catch {
       return [{ id: LOCAL_CONNECTION_ID, label: 'Local', kind: 'local', active: true }];
     }
   });
 
-  ipcMain.handle('connections:add', async (_e, opts: { label?: string; baseUrl?: string; token?: string }) => {
+  ipcMain.handle('connections:add', async (event, opts: { label?: string; baseUrl?: string; token?: string }) => {
     try {
       const { id, label } = await addRemoteConnection({
         label: String(opts?.label || ''),
         baseUrl: String(opts?.baseUrl || ''),
         token: String(opts?.token || ''),
       });
-      setActiveConnection(id);
+      // Bind the CALLING window to the newly added host (in-place switch).
+      bindConnectionToWindow(id, BrowserWindow.fromWebContents(event.sender));
       return { ok: true, id, label };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -2052,13 +2201,13 @@ function registerIPC(): void {
 
   // Bootstrap a remote SSH host: deploy + start the headless backend, then connect to it.
   // Reuses addRemoteConnection so the resulting connection behaves identically to a manual add.
-  ipcMain.handle('connections:bootstrap-ssh-host', async (_e, host: string) => {
+  ipcMain.handle('connections:bootstrap-ssh-host', async (event, host: string) => {
     try {
       const sshHost = String(host || '').trim();
       if (!sshHost) return { ok: false, error: 'ssh host is required' };
       const { baseUrl, token } = await bootstrapRemoteHost(sshHost);
       const { id, label } = await addRemoteConnection({ label: sshHost, baseUrl, token });
-      setActiveConnection(id);
+      bindConnectionToWindow(id, BrowserWindow.fromWebContents(event.sender));
       return { ok: true, id, label, baseUrl };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -2074,11 +2223,38 @@ function registerIPC(): void {
     }
   });
 
-  ipcMain.handle('connections:set-active', (_e, id: string) => {
+  // Bind the CALLING window to a connection (the in-window host switch). Replaces the global
+  // "set active" for that window; other windows keep their own binding untouched.
+  ipcMain.handle('connections:bind-window', (event, id: string) => {
     try {
       const target = String(id || '');
       if (!connectionRegistry.get(target)) return { ok: false, error: 'no-such-connection' };
-      setActiveConnection(target);
+      bindConnectionToWindow(target, BrowserWindow.fromWebContents(event.sender));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  // Back-compat alias: behaves like bind-window (binds the calling window).
+  ipcMain.handle('connections:set-active', (event, id: string) => {
+    try {
+      const target = String(id || '');
+      if (!connectionRegistry.get(target)) return { ok: false, error: 'no-such-connection' };
+      bindConnectionToWindow(target, BrowserWindow.fromWebContents(event.sender));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  // Open a NEW window bound to the given connection ("open host in new window"). The remote keeps
+  // running 24/7; the new window resolves its sessions/file tree from that connection.
+  ipcMain.handle('window:open-with-connection', (_e, id: string) => {
+    try {
+      const target = String(id || '') || LOCAL_CONNECTION_ID;
+      if (!connectionRegistry.get(target)) return { ok: false, error: 'no-such-connection' };
+      openWindowWithConnection(target);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -2734,11 +2910,11 @@ app.whenReady().then(async () => {
   setAppVersionProvider(() => app.getVersion());
   // The mobile remote-server always serves the LOCAL connection's sessions.
   startRemoteServer(connectionRegistry.local().backend, (sessionInfo) => {
-    // The mobile client created a session; notify the desktop renderer to refresh
-    safeSend('pty:remote-created', sessionInfo);
+    // The mobile client created a LOCAL session; notify only local-bound desktop windows.
+    sendToConnection(LOCAL_CONNECTION_ID, 'pty:remote-created', sessionInfo);
   }, (id) => {
-    // The mobile client destroyed a session; notify the desktop renderer
-    safeSend('pty:exit', id);
+    // The mobile client destroyed a LOCAL session; notify only local-bound desktop windows.
+    sendToConnection(LOCAL_CONNECTION_ID, 'pty:exit', id);
   }, (info) => {
     // After the server starts, send the connection info to the renderer for display
     const tunnel = cloudflaredManager?.start();
