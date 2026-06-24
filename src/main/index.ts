@@ -14,7 +14,7 @@ import { startRemoteServer, setAppVersionProvider, pushRawDataToRemote, sendRemo
 import { CloudflaredManager } from './cloudflared-manager';
 import { ChatSessionManager } from './chat-session-manager';
 import { WindsurfProxyManager } from './windsurf-proxy-manager';
-import { bootstrapRemoteHost } from './remote-bootstrap';
+import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
 import { autoUpdater } from 'electron-updater';
 import buildStamp from './build-stamp.json';
 import {
@@ -2493,7 +2493,15 @@ function registerIPC(): void {
     try {
       const sshHost = String(host || '').trim();
       if (!sshHost) return { ok: false, error: 'ssh host is required' };
-      const { baseUrl, token } = await bootstrapRemoteHost(sshHost);
+      // Always pin the version (packaged Resources has no derive-version.js fallback).
+      // Pass sourceDir only when the resolved remote-bundle dir actually exists, so a dev
+      // checkout without a built bundle still falls back to the script's default behavior.
+      const bundleDir = resolveRemoteBundleDir();
+      const sourceDir = fs.existsSync(bundleDir) ? bundleDir : undefined;
+      const { baseUrl, token } = await bootstrapRemoteHost(sshHost, {
+        version: app.getVersion(),
+        sourceDir,
+      });
       const { id, label } = await addRemoteConnection({ label: sshHost, baseUrl, token });
       bindConnectionToWindow(id, BrowserWindow.fromWebContents(event.sender));
       return { ok: true, id, label, baseUrl };

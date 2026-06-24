@@ -36,6 +36,8 @@ extraResources:
       - cloudflared-config.yml
   - from: scripts/posse-remote-bootstrap.sh
     to: scripts/posse-remote-bootstrap.sh
+  - from: release/remote-bundle
+    to: remote-bundle
 
 directories:
   output: release

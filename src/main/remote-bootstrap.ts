@@ -23,6 +23,31 @@ export interface RemoteBootstrapResult {
   token: string;
 }
 
+/**
+ * Resolve the local remote-bundle dir (the rsync SOURCE for the bootstrap script).
+ * Mirrors resolveScriptPath()'s packaged-vs-dev detection:
+ *   - packaged: extraResources copies release/remote-bundle -> process.resourcesPath/remote-bundle
+ *   - dev:      <repo>/release/remote-bundle  (__dirname = dist/main -> ../../release/remote-bundle)
+ * Returns the first candidate that exists; if neither exists, returns the dev path so the
+ * caller can decide to omit sourceDir (letting the script use its own default).
+ */
+export function resolveRemoteBundleDir(): string {
+  const candidates = [
+    // packaged: extraResources copies release/remote-bundle next to the asar
+    path.join(process.resourcesPath || '', 'remote-bundle'),
+    // dev: dist/main -> ../../release/remote-bundle
+    path.join(__dirname, '..', '..', 'release', 'remote-bundle'),
+  ];
+  for (const c of candidates) {
+    try {
+      if (c && fs.existsSync(c)) return c;
+    } catch {
+      /* ignore */
+    }
+  }
+  return candidates[1];
+}
+
 function resolveScriptPath(): string {
   const candidates = [
     // packaged: extraResources copies scripts/ next to the asar
