@@ -676,7 +676,14 @@ function bindWindowConnection(window: BrowserWindow, connectionId: string): void
 
 /** Remove a window's binding (on 'closed'). Never touches the connection itself. */
 function unbindWindow(window: BrowserWindow): void {
-  windowBindings.delete(window.webContents.id);
+  let foundId: number | undefined;
+  for (const [id, binding] of windowBindings) {
+    if (binding.window === window) {
+      foundId = id;
+      break;
+    }
+  }
+  if (foundId !== undefined) windowBindings.delete(foundId);
 }
 
 /** The connection id bound to a given window, or the primary fallback. */
