@@ -447,7 +447,9 @@ const LanSwitcher = (() => {
   const PROBE_TIMEOUT_MS = 2000;
   const STORAGE_CLOUD_URL = 'duocli_cloud_url';   // 上次的远程入口 origin（用户自定义 cloud URL；非特指 CF）
   const STORAGE_LAST_LAN_IP = 'duocli_last_lan_ip'; // 上次成功用过的 LAN IP
-  const STORAGE_TS_URL = 'posse_tailscale_url';   // 本机 Tailscale https 入口（来自 /api/lan-info）
+  const STORAGE_TS_URL = 'posse_tailscale_url';   // 本机 Tailscale 稳定入口（来自 /api/lan-info）：
+                                                  // 优先 http://<100.x>:<port>（稳定、不依赖 tailscale serve），
+                                                  // 否则回退 https://<dnsName>。#58: 比动态 LAN IP 更稳定。
 
   let probeTimer = null;
 
@@ -514,9 +516,12 @@ const LanSwitcher = (() => {
       showCopyToast('拿不到局域网信息（token 失效？）');
       return;
     }
-    // 记下本机 Tailscale https 入口（供 off-LAN 时切到用户自己的节点，而非任何第三方域名）
-    if (info && info.tailscaleUrl) {
-      localStorage.setItem(STORAGE_TS_URL, info.tailscaleUrl);
+    // 记下本机 Tailscale 稳定入口（供 off-LAN 时切到用户自己的节点，而非任何第三方域名）。
+    // #58: 优先 http://<100.x>:<port>（tailnet 内固定可达，不依赖 tailscale serve https），
+    // 否则回退 https://<dnsName>。两者都比会随 DHCP 变化的动态 LAN IP 更稳定。
+    const tsStable = (info && (info.tailscaleHttpUrl || info.tailscaleUrl)) || null;
+    if (tsStable) {
+      localStorage.setItem(STORAGE_TS_URL, tsStable);
     }
     const ip = pickBestIp(info && info.lanIps);
     if (!ip) {

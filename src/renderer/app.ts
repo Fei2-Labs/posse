@@ -8,7 +8,7 @@ function isImageExt(ext: string): boolean {
 }
 import QRCode from 'qrcode';
 
-let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null } | null = null;
+let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null; tailscaleHttpUrl?: string | null } | null = null;
 
 // Inline Lucide-style monochrome icons (16px, stroke=currentColor). Set via innerHTML on buttons.
 const ICON: Record<string, string> = {
@@ -86,8 +86,8 @@ declare global {
       onPtyExit: (cb: (id: string) => void) => void;
       onDaemonRestarted: (cb: () => void) => void;
       onRemoteCreated: (cb: (sessionInfo: PtySessionInfo) => void) => void;
-      onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null }) => void) => void;
-      getRemoteServerInfo: () => Promise<{ lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null } | null>;
+      onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null; tailscaleHttpUrl?: string | null }) => void) => void;
+      getRemoteServerInfo: () => Promise<{ lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null; tailscaleHttpUrl?: string | null } | null>;
       clipboardSaveImage: () => Promise<string | null>;
       clipboardGetFilePath: () => Promise<string | null>;
       // File watcher API
@@ -1230,11 +1230,19 @@ function renderRemoteServerInfo(): void {
   const setupHintEl = remoteServerInfoEl.querySelector('.remote-info-setup-hint') as HTMLElement;
 
   const token = remoteServerInfo.token;
+  const tailscaleHttpUrl = remoteServerInfo.tailscaleHttpUrl || null;
   const tailscaleUrl = remoteServerInfo.tailscaleUrl || null;
   const lanUrl = remoteServerInfo.lanUrl || null;
 
-  // URL priority: Tailscale (reachable on AND off LAN) > LAN. Both carry the embedded token.
-  const bestBase = tailscaleUrl || lanUrl;
+  // URL priority (most → least stable):
+  //   1. tailscaleHttpUrl — http://<100.x>:<port>, the stable Tailscale IP. Always reachable on
+  //      the tailnet (WireGuard-encrypted underneath) WITHOUT `tailscale serve`, and the IP never
+  //      changes with DHCP. Preferred for reliability — this fixes #58 (no more dynamic LAN IP).
+  //   2. tailscaleUrl — https://<dnsName>, only works if `tailscale serve` https is configured.
+  //   3. lanUrl — http://<192.168.x>:<port>, dynamic LAN IP (changes on DHCP). Last resort.
+  // All carry the embedded token.
+  const bestBase = tailscaleHttpUrl || tailscaleUrl || lanUrl;
+  const usingTailscale = !!(tailscaleHttpUrl || tailscaleUrl);
   const bestConnectUrl = bestBase ? withToken(`${bestBase}/`, token) : null;
 
   // Primary connect URL (selectable, tap-to-copy). Show base without token for readability.
@@ -1247,8 +1255,9 @@ function renderRemoteServerInfo(): void {
     urlEl.style.display = 'none';
   }
 
-  // If Tailscale is the QR target, still surface the LAN URL as a secondary text line.
-  if (tailscaleUrl && lanUrl) {
+  // If a Tailscale address is the primary/QR target, still surface the LAN URL as a secondary
+  // text line (for the same-LAN, no-Tailscale-on-phone case).
+  if (usingTailscale && lanUrl && lanUrl !== bestBase) {
     lanEl.textContent = `LAN: ${lanUrl}`;
     lanEl.style.display = 'block';
   } else {

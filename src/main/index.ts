@@ -729,6 +729,7 @@ type RemoteServerInfoWithTunnel = RemoteConnectionStatus & {
   publicUrl?: string;
   tunnel?: unknown;
   tailscaleUrl?: string | null;
+  tailscaleHttpUrl?: string | null;
 };
 
 type TrayState = {
@@ -3136,6 +3137,9 @@ app.whenReady().then(async () => {
     const tunnel = cloudflaredManager?.start();
     const ts = getTailscaleInfo();
     const tailscaleUrl = ts && ts.dnsName ? `https://${ts.dnsName}` : null;
+    // Stable Tailscale address: http://<100.x>:<port> (WireGuard-encrypted underneath).
+    // Preferred over the dynamic LAN IP and does not depend on `tailscale serve` https.
+    const tailscaleHttpUrl = ts && ts.ip ? `http://${ts.ip}:${info.port}` : null;
     const serverInfo: RemoteServerInfoWithTunnel = {
       ...info,
       connectedClients: trayState.connectedClients,
@@ -3143,6 +3147,7 @@ app.whenReady().then(async () => {
       publicUrl: tunnel?.url || undefined,
       tunnel,
       tailscaleUrl,
+      tailscaleHttpUrl,
     };
     cachedRemoteServerInfo = serverInfo;
     trayState.isOnline = true;

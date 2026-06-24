@@ -102,7 +102,7 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.on('pty:remote-created', (_e, info) => cb(info)),
 
   // Remote server connection info
-  onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null }) => void) =>
+  onRemoteServerInfo: (cb: (info: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null; tailscaleHttpUrl?: string | null }) => void) =>
     ipcRenderer.on('remote:server-info', (_e, info) => cb(info)),
   // Renderer proactively fetches remote server info (resolves a race condition)
   getRemoteServerInfo: () => ipcRenderer.invoke('remote:get-server-info'),

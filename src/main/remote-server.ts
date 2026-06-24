@@ -585,7 +585,11 @@ export function startRemoteServer(
     const ts = getTailscaleInfo();
     const tailscaleUrl = ts && ts.dnsName ? `https://${ts.dnsName}` : null;
     const tailscaleIp = ts && ts.ip ? ts.ip : null;
-    res.json({ lanIps, port: PORT, hostname: os.hostname(), tailscaleUrl, tailscaleIp });
+    // 稳定地址：100.x 的 Tailscale IP + 端口的明文 http（WireGuard 在下层加密）。
+    // 不依赖 `tailscale serve` 的 https 反代（常未配置而失效），且 IP 在 tailnet 内固定不变，
+    // 是移动端首选的稳定/重连地址（优于会随 DHCP 变化的 LAN IP）。
+    const tailscaleHttpUrl = tailscaleIp ? `http://${tailscaleIp}:${PORT}` : null;
+    res.json({ lanIps, port: PORT, hostname: os.hostname(), tailscaleUrl, tailscaleHttpUrl, tailscaleIp });
   });
 
   // 1x1 transparent PNG for the mobile <img> probe (on an HTTPS page, fetching HTTP is blocked
