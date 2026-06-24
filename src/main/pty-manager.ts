@@ -447,6 +447,23 @@ export class PtyManager {
         env[key] = value;
       }
     }
+
+    // Force a UTF-8 locale for the pty.
+    //
+    // When Posse is launched from Finder/Dock (not from a terminal), it inherits NO LANG/LC_*.
+    // Without a UTF-8 locale, the shell and many CLI programs fall back to the C/POSIX locale and
+    // stop treating their byte stream as UTF-8 — so multibyte text (e.g. Chinese) gets emitted/handled
+    // as single bytes. That stream then lands in xterm's buffer as one-codepoint-per-UTF-8-byte, and
+    // copying the selection produces mojibake like `ÁêÜËÆ∫‰∏äÊõ¥` when pasted elsewhere (UTF-8 bytes
+    // read as Mac Roman). Forcing UTF-8 keeps the pty byte stream UTF-8 end to end so the copy is clean.
+    //
+    // Only fill in when the user hasn't deliberately set a locale (do not override an explicit LC_ALL/LANG).
+    if (!env.LANG && !env.LC_ALL && !env.LC_CTYPE) {
+      env.LANG = 'en_US.UTF-8';
+    }
+    if (!env.LC_CTYPE && !env.LC_ALL) {
+      env.LC_CTYPE = 'UTF-8';
+    }
     if (envOverrides) {
       for (const [key, value] of Object.entries(envOverrides)) {
         if (value === '') {
@@ -466,6 +483,13 @@ export class PtyManager {
       rows: 24,
       cwd,
       env,
+      // Decode pty bytes as UTF-8 explicitly. node-pty defaults to 'utf8', but pin it so onData always
+      // emits proper UTF-8 strings (the native reader holds back partial multibyte sequences so a
+      // character is never split across two onData chunks). This is the byte->string boundary; getting
+      // it right here keeps the whole path (onData -> JSON/IPC -> xterm -> selection -> copy) UTF-8 clean.
+      // It does not touch ANSI/control bytes (those are 7-bit ASCII, unaffected by UTF-8 decoding) and is
+      // independent of the base64 INPUT path (input is encoded/decoded separately before pty.write).
+      encoding: 'utf8',
     });
 
     const session: PtySession = {
