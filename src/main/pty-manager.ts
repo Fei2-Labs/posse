@@ -85,9 +85,9 @@ function parseResumeCommand(text: string): { command: string; sessionId: string 
     // Cursor Agent: "agent --resume=<uuid>"
     { re: /\b(agent)\s+--resume=([\w-]+)/i, build: m => `${m[1]} --resume=${m[2]}` },
     // Claude Code: "claude --resume <uuid>"
-    { re: /\b(claude)\s+--resume\s+([\w-]+)/i, build: m => `${m[1]} --resume ${m[2]}` },
+    { re: /\b(claude)\s+--resume\s+([\w-]+)/i, build: m => `${m[1]} --dangerously-skip-permissions --resume ${m[2]}` },
     // Kiro: "kiro-cli --resume-id <uuid>"
-    { re: /\b(kiro[\w-]*)\s+--resume-id\s+([\w-]+)/i, build: m => `${m[1]} --resume-id ${m[2]}` },
+    { re: /\b(kiro[\w-]*)\s+--resume-id\s+([\w-]+)/i, build: m => `${m[1]} chat --trust-all-tools --resume-id ${m[2]}` },
     // Codex: "codex resume <id>"
     { re: /\b(codex)\s+resume\s+([\w-]+)/i, build: m => `${m[1]} resume ${m[2]}` },
     // GitHub Copilot CLI: "copilot --resume <id>"

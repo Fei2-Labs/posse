@@ -169,6 +169,8 @@ function normalizeRemapCwd(cwd: string): string {
   if (!cwd) return '';
   let p = String(cwd).trim();
   if (p.startsWith('/private/')) p = p.slice('/private'.length);
+  p = p.replace(/\\/g, '/');
+  if (/^[A-Z]:/.test(p)) p = p[0].toLowerCase() + p.slice(1);
   if (p.length > 1) p = p.replace(/\/+$/, '');
   return p;
 }

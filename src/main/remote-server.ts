@@ -327,7 +327,9 @@ function loadOrCreateConfig(): RemoteConfig {
 const MAX_RECENT_CWDS = 20;
 
 function normalizeCwd(cwd: string): string {
-  return (cwd || '').trim().replace(/\/+$/, '');
+  let p = (cwd || '').trim().replace(/\\/g, '/');
+  if (/^[A-Z]:/.test(p)) p = p[0].toLowerCase() + p.slice(1);
+  return p.replace(/\/+$/, '');
 }
 
 function addRecentCwdInConfig(config: RemoteConfig, cwd: string): void {

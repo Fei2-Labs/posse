@@ -542,6 +542,7 @@ function loadProjects(): ProjectEntry[] {
   try {
     const raw = JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) || '[]');
     if (!Array.isArray(raw)) return [];
+    const seen = new Set<string>();
     return raw
       .filter((p: any) => p && typeof p.path === 'string')
       .map((p: any) => ({
@@ -549,7 +550,13 @@ function loadProjects(): ProjectEntry[] {
         pinned: Boolean(p.pinned),
         addedAt: typeof p.addedAt === 'number' ? p.addedAt : Date.now(),
         name: typeof p.name === 'string' ? p.name : undefined,
-      }));
+      }))
+      .filter((p: ProjectEntry) => {
+        const key = normalizeCwd(p.path);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
   } catch {
     return [];
   }
@@ -599,15 +606,37 @@ function togglePinProject(path: string): void {
   renderSessionList();
 }
 
-function renameProject(path: string): void {
-  const p = findProject(path);
+function renameProject(projPath: string): void {
+  const p = findProject(projPath);
   if (!p) return;
-  const next = window.prompt('Project name', p.name || cwdShortName(p.path));
-  if (next === null) return;
-  const trimmed = next.trim();
-  p.name = trimmed || undefined;
-  saveProjects();
-  renderSessionList();
+  // Find the name span in the DOM and replace it with an inline input
+  const rows = document.querySelectorAll('.nav-project-row');
+  for (const row of rows) {
+    const nameSpan = row.querySelector('.nav-project-name') as HTMLElement | null;
+    if (!nameSpan || nameSpan.title !== p.path) continue;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = p.name || cwdShortName(p.path);
+    input.className = 'nav-project-name-input';
+    input.style.cssText = 'flex:1;min-width:0;font-size:13px;font-weight:500;background:var(--input-bg);color:var(--text-primary);border:1px solid var(--accent);border-radius:4px;padding:0 4px;outline:none;';
+    nameSpan.replaceWith(input);
+    input.focus();
+    input.select();
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('mousedown', (e) => e.stopPropagation());
+    const commit = () => {
+      const trimmed = input.value.trim();
+      p.name = trimmed || undefined;
+      saveProjects();
+      renderSessionList();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      if (e.key === 'Escape') { e.preventDefault(); renderSessionList(); }
+    });
+    input.addEventListener('blur', commit);
+    break;
+  }
 }
 
 function projectDisplayName(p: ProjectEntry): string {
@@ -1898,6 +1927,9 @@ function normalizeCwd(cwd: string): string {
   if (!cwd) return '';
   let p = cwd.trim();
   if (p.startsWith('/private/')) p = p.slice('/private'.length);
+  // Windows: normalize backslashes and lowercase drive letter for consistent comparison
+  p = p.replace(/\\/g, '/');
+  if (/^[A-Z]:/.test(p)) p = p[0].toLowerCase() + p.slice(1);
   if (p.length > 1) p = p.replace(/\/+$/, '');
   return p;
 }
