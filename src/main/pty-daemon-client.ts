@@ -189,16 +189,30 @@ export class PtyDaemonClient implements PtyBackend {
     if (!fs.existsSync(daemonScript)) {
       throw new Error(`PTY daemon script not found: ${daemonScript}`);
     }
-    const child = spawn(process.execPath, [daemonScript], {
-      detached: true,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: '1',
-        POSSE_PTY_DAEMON_CONFIG: getPtyDaemonConfigPath(),
-      },
-    });
-    child.unref();
+    const env = {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      POSSE_PTY_DAEMON_CONFIG: getPtyDaemonConfigPath(),
+    };
+    if (process.platform === 'win32') {
+      // On Windows, Electron's Job Object kills detached children when the app quits.
+      // Use `cmd /c start` to spawn a truly independent process outside the job.
+      const child = spawn('cmd.exe', ['/c', 'start', '/b', '', process.execPath, daemonScript], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env,
+      });
+      child.unref();
+    } else {
+      const child = spawn(process.execPath, [daemonScript], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env,
+      });
+      child.unref();
+    }
   }
 
   private connectEvents(): void {

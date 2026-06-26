@@ -12,8 +12,7 @@ import { loadSubscriptionToken, saveSubscriptionToken, clearSubscriptionToken, s
 import { AIConfigManager } from './ai-config';
 import { startRemoteServer, setAppVersionProvider, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, getTailscaleInfo, type RemoteConnectionStatus } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
-import { ChatSessionManager } from './chat-session-manager';
-import { WindsurfProxyManager } from './windsurf-proxy-manager';
+
 import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
 import { autoUpdater } from 'electron-updater';
 import buildStamp from './build-stamp.json';
@@ -126,45 +125,7 @@ function addClosedSession(session: { title: string; cwd: string; presetCommand: 
   safeSend('closed-sessions:update', saved);
 }
 
-// ========== Closed chat session persistence ==========
-interface ClosedChatSession {
-  id: string;
-  title: string;
-  model: string;
-  workspace: string;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp: number }>;
-  closedAt: number;
-}
-const CLOSED_CHAT_SESSIONS_FILE = path.join(app.getPath('userData'), 'closed-chat-sessions.json');
-const MAX_CLOSED_CHAT_SESSIONS = 20;
 
-function loadClosedChatSessions(): ClosedChatSession[] {
-  try {
-    const raw = fs.readFileSync(CLOSED_CHAT_SESSIONS_FILE, 'utf-8');
-    return JSON.parse(raw);
-  } catch { return []; }
-}
-
-function saveClosedChatSessions(sessions: ClosedChatSession[]): ClosedChatSession[] {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const filtered = sessions.filter(s => s.closedAt > cutoff).slice(-MAX_CLOSED_CHAT_SESSIONS);
-  fs.writeFileSync(CLOSED_CHAT_SESSIONS_FILE, JSON.stringify(filtered, null, 2));
-  return filtered;
-}
-
-function addClosedChatSession(session: { title: string; model: string; workspace: string; messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp: number }> }): void {
-  const list = loadClosedChatSessions();
-  list.push({
-    id: `closed-chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    title: session.title,
-    model: session.model,
-    workspace: session.workspace,
-    messages: session.messages,
-    closedAt: Date.now(),
-  });
-  const saved = saveClosedChatSessions(list);
-  safeSend('closed-chat-sessions:update', saved);
-}
 
 // ========== Archived session persistence (Posse-internal soft-hide) ==========
 // Archive is independent of agent data: it only records session ids we hide from the
@@ -482,7 +443,7 @@ function listSshHosts(): SshHostEntry[] {
 
 function spawnEditorCommand(command: string, args: string[]): Promise<OpenEditorResult> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: 'ignore', detached: true });
+    const child = spawn(command, args, { stdio: 'ignore', detached: true, windowsHide: true });
     let settled = false;
     const settle = (result: OpenEditorResult): void => {
       if (settled) return;
@@ -727,8 +688,6 @@ function activeBackend(): PtyBackend {
 }
 const aiConfigManager = new AIConfigManager();
 let cloudflaredManager: CloudflaredManager | null = null;
-let chatSessionManager: ChatSessionManager | null = null;
-let windsurfProxyManager: WindsurfProxyManager | null = null;
 let cachedRemoteServerInfo: RemoteServerInfoWithTunnel | null = null;
 let tray: Tray | null = null;
 let currentAppIcon: Electron.NativeImage | undefined;
@@ -2000,29 +1959,6 @@ function registerIPC(): void {
     return sessions;
   });
 
-  // ========== Closed chat session IPC ==========
-  ipcMain.handle('closed-chat:list', () => loadClosedChatSessions());
-  ipcMain.handle('closed-chat:remove', (_e, id: string) => {
-    const sessions = loadClosedChatSessions().filter(s => s.id !== id);
-    const saved = saveClosedChatSessions(sessions);
-    return saved;
-  });
-  ipcMain.handle('closed-chat:clear', () => {
-    saveClosedChatSessions([]);
-    return [];
-  });
-  ipcMain.handle('chat:restore', (_e, closedId: string) => {
-    if (!chatSessionManager) return null;
-    const list = loadClosedChatSessions();
-    const closed = list.find(s => s.id === closedId);
-    if (!closed) return null;
-    const session = chatSessionManager.restore(closed.workspace, closed.model, closed.messages, closed.title);
-    // Remove from the closed list
-    const remaining = list.filter(s => s.id !== closedId);
-    saveClosedChatSessions(remaining);
-    return { id: session.id, title: session.title, model: session.model, workspace: session.workspace, createdAt: session.createdAt };
-  });
-
   // Select working directory
   ipcMain.handle('dialog:select-folder', async (_e, currentPath?: string) => {
     const defaultPath = currentPath && fs.existsSync(currentPath) ? currentPath : os.homedir();
@@ -2390,14 +2326,17 @@ function registerIPC(): void {
       const id = String(sessionId || '').trim();
       if (!id) return { exists: true };
       const a = String(agent || '').trim().toLowerCase();
+      console.log(`[verify-resumable] agent=${a} cwd=${cwd} id=${id}`);
 
       if (a === 'claude') {
         const abs = path.resolve(String(cwd || ''));
         const encoded = abs.replace(/[^a-zA-Z0-9]/g, '-');
         const dir = path.join(os.homedir(), '.claude', 'projects', encoded);
+        // If the projects dir for this cwd doesn't exist at all, fail-open:
+        // the session may have been discovered via a different path (e.g. kiro).
+        if (!fs.existsSync(path.join(os.homedir(), '.claude', 'projects'))) return { exists: true };
         const direct = path.join(dir, `${id}.jsonl`);
         if (fs.existsSync(direct)) return { exists: true };
-        // Also accept if a file containing the uuid is found by scanning the dir.
         if (fs.existsSync(dir)) {
           const found = fs.readdirSync(dir).some((name) => name.includes(id) && name.endsWith('.jsonl'));
           return { exists: found };
@@ -2406,10 +2345,8 @@ function registerIPC(): void {
       }
 
       if (a === 'codex') {
-        // Codex is date-bucketed (not cwd-bucketed): verify the uuid file exists
-        // anywhere under ~/.codex/sessions. cwd match is informational only.
         const sessionsRoot = path.join(os.homedir(), '.codex', 'sessions');
-        if (!fs.existsSync(sessionsRoot)) return { exists: false };
+        if (!fs.existsSync(sessionsRoot)) return { exists: true };
         const found = (function scan(dir: string, depth: number): boolean {
           if (depth > 5) return false;
           let entries: fs.Dirent[];
@@ -2429,7 +2366,10 @@ function registerIPC(): void {
 
       if (a === 'kiro') {
         const file = path.join(os.homedir(), '.kiro', 'sessions', 'cli', `${id}.json`);
-        return { exists: fs.existsSync(file) };
+        const dir = path.join(os.homedir(), '.kiro', 'sessions', 'cli', id);
+        const exists = fs.existsSync(file) || fs.existsSync(dir);
+        console.log(`[verify-resumable] kiro: file=${file} fileExists=${fs.existsSync(file)} dir=${dir} dirExists=${fs.existsSync(dir)} → ${exists}`);
+        return { exists };
       }
 
       // copilot / unknown: can't reliably verify — don't block.
@@ -3179,80 +3119,6 @@ function registerIPC(): void {
     (global as any).__sessionStatuses = statuses;
   });
 
-  // ========== Chat Session IPC ==========
-
-  ipcMain.handle('chat:create', (_e, opts: { workspace: string; model?: string }) => {
-    if (!chatSessionManager) return null;
-    const session = chatSessionManager.create(opts.workspace, opts.model);
-    return { id: session.id, title: session.title, model: session.model, workspace: session.workspace, createdAt: session.createdAt };
-  });
-
-  ipcMain.handle('chat:send', (_e, sessionId: string, content: string) => {
-    if (!chatSessionManager) return;
-    chatSessionManager.sendMessage(sessionId, content).catch(() => {});
-  });
-
-  ipcMain.handle('chat:list', () => {
-    if (!chatSessionManager) return [];
-    return chatSessionManager.getAllSessions().map(s => ({
-      id: s.id,
-      title: s.title,
-      model: s.model,
-      workspace: s.workspace,
-      createdAt: s.createdAt,
-      messageCount: s.messages.length,
-    }));
-  });
-
-  ipcMain.handle('chat:messages', (_e, sessionId: string) => {
-    if (!chatSessionManager) return [];
-    return chatSessionManager.getSession(sessionId)?.messages || [];
-  });
-
-  ipcMain.handle('chat:destroy', (_e, sessionId: string) => {
-    // Save to the closed list before destroying
-    const session = chatSessionManager?.getSession(sessionId);
-    if (session && session.messages.length > 0) {
-      addClosedChatSession({
-        title: session.title,
-        model: session.model,
-        workspace: session.workspace,
-        messages: session.messages,
-      });
-    }
-    chatSessionManager?.destroy(sessionId);
-    return true;
-  });
-
-  ipcMain.handle('chat:abort', (_e, sessionId: string) => {
-    chatSessionManager?.abortStream(sessionId);
-    return true;
-  });
-
-  ipcMain.handle('chat:rename', (_e, sessionId: string, title: string) => {
-    chatSessionManager?.rename(sessionId, title);
-    return true;
-  });
-
-  ipcMain.handle('chat:health', async () => {
-    if (!chatSessionManager) return { ok: false, error: 'Chat manager not ready' };
-    const health = await chatSessionManager.healthCheck();
-    return {
-      ...health,
-      autoManaged: windsurfProxyManager?.isAvailable() ?? false,
-      proxyDir: windsurfProxyManager?.getProxyDir() ?? null,
-    };
-  });
-
-  ipcMain.handle('chat:proxy-start', async () => {
-    if (!windsurfProxyManager) return { ok: false, error: 'Proxy manager not available' };
-    return windsurfProxyManager.start();
-  });
-
-  ipcMain.handle('chat:models', async () => {
-    if (!chatSessionManager) return [];
-    return chatSessionManager.listModels();
-  });
 }
 
 // Auto-update via electron-updater. Reads the GitHub Releases channel files
@@ -3301,45 +3167,6 @@ app.whenReady().then(async () => {
     }
   }
   createTray();
-
-  // Auto-start the Windsurf proxy
-  windsurfProxyManager = new WindsurfProxyManager((running, error) => {
-    if (running) {
-      console.log('[Main] Windsurf proxy is ready');
-    } else {
-      console.log('[Main] Windsurf proxy down:', error || 'unknown');
-    }
-  });
-  if (windsurfProxyManager.isAvailable()) {
-    console.log('[Main] Auto-starting Windsurf proxy...');
-    windsurfProxyManager.start().then((result) => {
-      console.log('[Main] Windsurf proxy start result:', result.ok ? 'OK' : result.error);
-    });
-  } else {
-    console.log('[Main] Windsurf proxy directory not found, chat features will be unavailable');
-  }
-
-  // Attach to global for use by remote-server and chat-session-manager
-  (global as any).__windsurfProxyManager = windsurfProxyManager;
-
-  // Initialize the Chat Session Manager
-  chatSessionManager = new ChatSessionManager({
-    onDelta: (sessionId, text) => {
-      safeSend('chat:delta', sessionId, text);
-    },
-    onDone: (sessionId, content) => {
-      safeSend('chat:done', sessionId, content);
-    },
-    onError: (sessionId, error) => {
-      safeSend('chat:error', sessionId, error);
-    },
-    onTitleUpdate: (sessionId, title) => {
-      safeSend('chat:title-update', sessionId, title);
-    },
-  }, () => loadAiPreferenceData().manualConfig || null);
-
-  // Attach to global for use by remote-server
-  (global as any).__chatSessionManager = chatSessionManager;
 
   registerIPC();
   cloudflaredManager = new CloudflaredManager(path.join(__dirname, '../..'));
@@ -3410,7 +3237,6 @@ app.on('activate', () => {
 app.on('before-quit', async () => {
   globalShortcut.unregisterAll();
   cloudflaredManager?.stopOwnedProcess();
-  windsurfProxyManager?.destroy();
   tray?.destroy();
   tray = null;
 });

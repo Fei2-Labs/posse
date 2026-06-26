@@ -25,7 +25,6 @@ import {
   type RemoteServerInfo,
   type RemoteConnectionStatus,
 } from './remote-server';
-import { ChatSessionManager } from './chat-session-manager';
 import { listResumableSessions } from './resumable-sessions';
 
 function readPackageVersion(): string {
@@ -64,20 +63,6 @@ async function main(): Promise<void> {
     },
   });
   console.log('[headless] pty-daemon connected.');
-
-  // Chat session manager: remote-server reads this off global.__chatSessionManager.
-  // Headless has no AI-preference store, so title-AI config is null (chat title generation
-  // is simply skipped) — chat endpoints still respond.
-  const chatSessionManager = new ChatSessionManager(
-    {
-      onDelta: () => {},
-      onDone: () => {},
-      onError: () => {},
-      onTitleUpdate: () => {},
-    },
-    () => null,
-  );
-  (global as any).__chatSessionManager = chatSessionManager;
 
   // Start the token-auth remote server. Same wiring as the Electron main, minus all
   // BrowserWindow / tray / cloudflared callbacks (no-ops here).

@@ -26,6 +26,10 @@ asar: true
 asarUnpack:
   - "node_modules/sharp/**/*"
   - "node_modules/@img/**/*"
+  - "dist/main/pty-daemon.js"
+  - "dist/main/pty-daemon.js.map"
+  - "dist/main/pty-daemon-config.js"
+  - "dist/main/pty-manager.js"
 
 extraResources:
   - from: node_modules/@xterm/xterm/css/xterm.css

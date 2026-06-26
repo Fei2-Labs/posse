@@ -1,0 +1,6 @@
+allowBuilds:
+  electron: false
+  esbuild: false
+  lzma-native: false
+  node-pty: false
+  sharp: false

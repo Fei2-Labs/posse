@@ -178,32 +178,6 @@ contextBridge.exposeInMainWorld('posse', {
   onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) =>
     ipcRenderer.on('auto-continue:set', (_e, sessionId, config) => cb(sessionId, config)),
 
-  // ========== Chat API ==========
-  chatCreate: (opts: { workspace: string; model?: string }) =>
-    ipcRenderer.invoke('chat:create', opts),
-  chatSend: (sessionId: string, content: string) =>
-    ipcRenderer.invoke('chat:send', sessionId, content),
-  chatList: () => ipcRenderer.invoke('chat:list'),
-  chatMessages: (sessionId: string) =>
-    ipcRenderer.invoke('chat:messages', sessionId),
-  chatDestroy: (sessionId: string) =>
-    ipcRenderer.invoke('chat:destroy', sessionId),
-  chatAbort: (sessionId: string) =>
-    ipcRenderer.invoke('chat:abort', sessionId),
-  chatRename: (sessionId: string, title: string) =>
-    ipcRenderer.invoke('chat:rename', sessionId, title),
-  chatHealth: () => ipcRenderer.invoke('chat:health'),
-  chatProxyStart: () => ipcRenderer.invoke('chat:proxy-start'),
-  chatModels: () => ipcRenderer.invoke('chat:models'),
-  onChatDelta: (cb: (sessionId: string, text: string) => void) =>
-    ipcRenderer.on('chat:delta', (_e, sessionId, text) => cb(sessionId, text)),
-  onChatDone: (cb: (sessionId: string, content: string) => void) =>
-    ipcRenderer.on('chat:done', (_e, sessionId, content) => cb(sessionId, content)),
-  onChatError: (cb: (sessionId: string, error: string) => void) =>
-    ipcRenderer.on('chat:error', (_e, sessionId, error) => cb(sessionId, error)),
-  onChatTitleUpdate: (cb: (sessionId: string, title: string) => void) =>
-    ipcRenderer.on('chat:title-update', (_e, sessionId, title) => cb(sessionId, title)),
-
   // ========== Closed sessions ==========
   closedSessionsList: () => ipcRenderer.invoke('closed-sessions:list'),
   closedSessionsRemove: (id: string) => ipcRenderer.invoke('closed-sessions:remove', id),
@@ -212,13 +186,26 @@ contextBridge.exposeInMainWorld('posse', {
   onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>) => void) =>
     ipcRenderer.on('closed-sessions:update', (_e, sessions) => cb(sessions)),
 
-  // ========== Closed chat sessions ==========
-  closedChatList: () => ipcRenderer.invoke('closed-chat:list'),
-  closedChatRemove: (id: string) => ipcRenderer.invoke('closed-chat:remove', id),
-  closedChatClear: () => ipcRenderer.invoke('closed-chat:clear'),
-  chatRestore: (closedId: string) => ipcRenderer.invoke('chat:restore', closedId),
-  onClosedChatUpdate: (cb: (sessions: Array<{ id: string; title: string; model: string; workspace: string; messages: Array<{ role: string; content: string; timestamp: number }>; closedAt: number }>) => void) =>
-    ipcRenderer.on('closed-chat-sessions:update', (_e, sessions) => cb(sessions)),
+  // Chat API (removed — stubs to prevent renderer crash)
+  chatCreate: () => Promise.resolve(null),
+  chatSend: () => Promise.resolve(),
+  chatList: () => Promise.resolve([]),
+  chatMessages: () => Promise.resolve([]),
+  chatDestroy: () => Promise.resolve(true),
+  chatAbort: () => Promise.resolve(true),
+  chatRename: () => Promise.resolve(true),
+  chatHealth: () => Promise.resolve({ ok: false, error: 'removed' }),
+  chatProxyStart: () => Promise.resolve({ ok: false, error: 'removed' }),
+  chatModels: () => Promise.resolve([]),
+  onChatDelta: () => {},
+  onChatDone: () => {},
+  onChatError: () => {},
+  onChatTitleUpdate: () => {},
+  closedChatList: () => Promise.resolve([]),
+  closedChatRemove: () => Promise.resolve([]),
+  closedChatClear: () => Promise.resolve([]),
+  chatRestore: () => Promise.resolve(null),
+  onClosedChatUpdate: () => {},
 
   // Auto account-switch status
   onAutoSwitchStatus: (cb: (id: string, status: string, detail?: string) => void) =>

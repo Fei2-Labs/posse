@@ -128,12 +128,23 @@ app.post('/restart', requireAuth, (_req, res) => {
       // Self-target __filename so the running daemon image respawns itself.
       // process.env already carries ELECTRON_RUN_AS_NODE=1 and
       // POSSE_PTY_DAEMON_CONFIG from the original spawn.
-      const child = spawn(process.execPath, [__filename], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env },
-      });
-      child.unref();
+      if (process.platform === 'win32') {
+        const child = spawn('cmd.exe', ['/c', 'start', '/b', '', process.execPath, __filename], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env },
+        });
+        child.unref();
+      } else {
+        const child = spawn(process.execPath, [__filename], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: { ...process.env },
+        });
+        child.unref();
+      }
     } catch (error) {
       console.error('[PtyDaemon] failed to spawn successor:', error);
     }

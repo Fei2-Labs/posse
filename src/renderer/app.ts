@@ -133,32 +133,12 @@ declare global {
       onGetAutoContinueConfig: (cb: (sessionId: string) => void) => void;
       sendAutoContinueConfig: (sessionId: string, config: any) => void;
       onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) => void;
-      // Chat API
-      chatCreate: (opts: { workspace: string; model?: string }) => Promise<{ id: string; title: string; model: string; workspace: string; createdAt: number } | null>;
-      chatSend: (sessionId: string, content: string) => Promise<void>;
-      chatList: () => Promise<Array<{ id: string; title: string; model: string; workspace: string; createdAt: number; messageCount: number }>>;
-      chatMessages: (sessionId: string) => Promise<Array<{ role: string; content: string; timestamp: number }>>;
-      chatDestroy: (sessionId: string) => Promise<boolean>;
-      chatAbort: (sessionId: string) => Promise<boolean>;
-      chatRename: (sessionId: string, title: string) => Promise<boolean>;
-      chatHealth: () => Promise<{ ok: boolean; error?: string }>;
-      chatModels: () => Promise<Array<{ id: string; credits: string }>>;
-      onChatDelta: (cb: (sessionId: string, text: string) => void) => void;
-      onChatDone: (cb: (sessionId: string, content: string) => void) => void;
-      onChatError: (cb: (sessionId: string, error: string) => void) => void;
-      onChatTitleUpdate: (cb: (sessionId: string, title: string) => void) => void;
       // Closed sessions
       closedSessionsList: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsRemove: (id: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsRename: (id: string, title: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsClear: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>) => void) => void;
-      // Closed chat sessions
-      closedChatList: () => Promise<Array<{ id: string; title: string; model: string; workspace: string; messages: Array<{ role: string; content: string; timestamp: number }>; closedAt: number }>>;
-      closedChatRemove: (id: string) => Promise<Array<{ id: string; title: string; model: string; workspace: string; messages: Array<{ role: string; content: string; timestamp: number }>; closedAt: number }>>;
-      closedChatClear: () => Promise<Array<{ id: string; title: string; model: string; workspace: string; messages: Array<{ role: string; content: string; timestamp: number }>; closedAt: number }>>;
-      chatRestore: (closedId: string) => Promise<{ id: string; title: string; model: string; workspace: string; createdAt: number } | null>;
-      onClosedChatUpdate: (cb: (sessions: Array<{ id: string; title: string; model: string; workspace: string; messages: Array<{ role: string; content: string; timestamp: number }>; closedAt: number }>) => void) => void;
       // Auto account-switch status
       onAutoSwitchStatus: (cb: (id: string, status: string, detail?: string) => void) => void;
       onCloseCurrentSession: (cb: () => void) => void;
@@ -4075,7 +4055,7 @@ fileTreeToggle.addEventListener('click', () => {
 
 // Right sidebar collapse/expand
 let sidebarCollapsed = false;
-let sidebarLastWidth = 260;
+let sidebarLastWidth = 300;
 
 sidebarToggle.addEventListener('click', () => {
   sidebarCollapsed = !sidebarCollapsed;
