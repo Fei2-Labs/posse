@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v24';
+const CLIENT_BUILD = 'posse-v25';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -2085,19 +2085,16 @@ function renderQuickCommands() {
     const btn = document.createElement('button');
     btn.className = 'qcmd-btn';
     btn.textContent = cmd;
-    // 点击 → 填入输入框并发送
+    // 点击 → 填入输入框（不自动发送，由用户审阅后点发送）
     btn.onclick = () => {
       if (!currentSessionId) return;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        sendInputWithHexEnter(cmd);
-        wsSendHex('0d');
-      } else {
-        api(`/api/sessions/${currentSessionId}/input`, {
-          method: 'POST',
-          body: JSON.stringify({ input: cmd }),
-        }).catch(() => showCopyToast('发送失败'));
+      const input = $('msg-input');
+      if (input) {
+        const prev = input.value;
+        input.value = prev ? prev + cmd : cmd;
+        pendingText = input.value;
+        input.focus();
       }
-      if (term) term.scrollToBottom();
     };
     // 长按 → 删除
     let longTimer = null;
@@ -2186,17 +2183,57 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+// 危险按键：需要两步确认（先点亮「武装」，2s 内再点才触发）
+const DANGEROUS_KEYS = new Set(['\\r', 'y\\r', '\\x03']);
+let armedKeyBtn = null;
+let armedKeyTimer = null;
+
+function disarmKey() {
+  if (armedKeyTimer) { clearTimeout(armedKeyTimer); armedKeyTimer = null; }
+  if (armedKeyBtn) {
+    armedKeyBtn.classList.remove('armed');
+    if (armedKeyBtn.dataset.origLabel != null) {
+      armedKeyBtn.textContent = armedKeyBtn.dataset.origLabel;
+    }
+    armedKeyBtn = null;
+  }
+}
+
 document.querySelectorAll('.key-btn').forEach(btn => {
   btn.addEventListener('touchstart', (e) => { e.preventDefault(); }, { passive: false });
   btn.addEventListener('touchend', (e) => {
     e.preventDefault();
     if (!currentSessionId) return;
     const key = btn.dataset.key;
-    const parsed = key.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-                      .replace(/\\r/g, '\r')
-                      .replace(/\\t/g, '\t')
-                      .replace(/\\n/g, '\n');
-    sendInputWithHexEnter(parsed);
+
+    const fire = () => {
+      const parsed = key.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+                        .replace(/\\r/g, '\r')
+                        .replace(/\\t/g, '\t')
+                        .replace(/\\n/g, '\n');
+      sendInputWithHexEnter(parsed);
+    };
+
+    if (DANGEROUS_KEYS.has(key)) {
+      if (armedKeyBtn === btn) {
+        // 第二次点击 → 触发
+        disarmKey();
+        fire();
+      } else {
+        // 第一次点击 → 武装
+        disarmKey();
+        armedKeyBtn = btn;
+        btn.dataset.origLabel = btn.textContent;
+        btn.classList.add('armed');
+        btn.textContent = '确认?';
+        armedKeyTimer = setTimeout(disarmKey, 2000);
+      }
+      return;
+    }
+
+    // 非危险按键：立即触发，并解除任何已武装状态
+    disarmKey();
+    fire();
   });
 });
 

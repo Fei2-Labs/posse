@@ -567,6 +567,14 @@ header h2 {
   border-color: var(--accent);
 }
 
+/* 危险按键武装态：等待二次确认 */
+.key-btn.armed {
+  background: #b62324;
+  border-color: #e5534b;
+  color: #fff;
+  font-weight: 600;
+}
+
 /* ========== 输入区域 ========== */
 
 #input-area {
