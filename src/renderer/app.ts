@@ -2049,7 +2049,9 @@ function updateSessionTitleBar(): void {
     const parts = [currentRemoteHostLabel ? `Posse @ ${currentRemoteHostLabel}` : 'Posse'];
     if (displayName) parts.push(displayName);
     // 'New session' / 'New conversation' are default titles produced by the backend (kept for the comparison to work)
-    if (title && title !== 'New session' && title !== 'New conversation') parts.push(title);
+    if (title && title !== 'New session' && title !== 'New conversation') {
+      parts.push(cwdDisplay ? `${cwdDisplay}/${title}` : title);
+    }
     // Append the active session's git branch so parallel sessions on different branches are distinguishable.
     const branch = getCachedBranch(cwd);
     window.posse.setWindowTitle(branch ? `${parts.join('-')} (${branch})` : parts.join('-'));
