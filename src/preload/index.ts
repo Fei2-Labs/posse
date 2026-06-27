@@ -63,6 +63,8 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('remote:download-file', args) as Promise<{ ok: boolean; savedTo?: string; error?: string }>,
   // Resolve the git branch for a cwd (used to annotate the window title). '' when not a git repo.
   gitBranch: (cwd: string) => ipcRenderer.invoke('git:branch', cwd) as Promise<string>,
+  // Whether a cwd's git working tree has uncommitted changes. false when not a git repo.
+  gitDirty: (cwd: string) => ipcRenderer.invoke('git:dirty', cwd) as Promise<boolean>,
   // List a directory's native session history in Claude Code
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke('claude-sessions:list', cwd),
   // Projects-first discovery: every AI-CLI session bucketed by project folder

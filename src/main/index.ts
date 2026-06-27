@@ -2293,6 +2293,29 @@ function registerIPC(): void {
     }
   });
 
+  // Report whether a cwd's git working tree is dirty (has uncommitted changes).
+  // Returns true when `git status --porcelain` prints any line; false for an empty
+  // tree, a non-repo, an empty/non-string cwd, or any error. Never throws across IPC.
+  ipcMain.handle('git:dirty', async (_e, cwd: string) => {
+    if (typeof cwd !== 'string' || cwd.trim() === '') return false;
+    try {
+      const { execFile } = require('child_process') as typeof import('child_process');
+      return await new Promise<boolean>((resolve) => {
+        execFile(
+          'git',
+          ['-C', cwd, 'status', '--porcelain'],
+          { timeout: 2000, windowsHide: true },
+          (err, stdout) => {
+            if (err) return resolve(false);
+            resolve(String(stdout || '').trim().length > 0);
+          }
+        );
+      });
+    } catch {
+      return false;
+    }
+  });
+
   // Read a file as a base64 data URL (for image previews). Never throws.
   ipcMain.handle('fs:read-file-base64', async (_e, filePath: string) => {
     const remote = remoteBackendForEvent(_e);

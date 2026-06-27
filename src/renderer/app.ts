@@ -24,6 +24,7 @@ const ICON: Record<string, string> = {
   chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   sort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 17l3 3 3-3M6 18V4"/></svg>',
+  activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
 };
 
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
@@ -66,6 +67,7 @@ declare global {
       remoteUploadFiles: (args: { destDir: string }) => Promise<{ ok: boolean; uploaded: string[]; skipped?: string[]; error?: string }>;
       remoteDownloadFile: (args: { remotePath: string }) => Promise<{ ok: boolean; savedTo?: string; error?: string }>;
       gitBranch: (cwd: string) => Promise<string>;
+      gitDirty: (cwd: string) => Promise<boolean>;
       claudeSessionsList: (cwd: string) => Promise<Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string }>>;
       projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
         path: string;
@@ -488,6 +490,39 @@ function appendAgentTag(row: HTMLElement, family: string): void {
   tag.style.backgroundColor = bg;
   // Insert right after the status dot (children[0]), before the title.
   row.insertBefore(tag, row.children[1] || null);
+}
+
+// Resolve the owning project's display name for a session cwd (#29). Falls back to the
+// cwd's last path segment when the cwd isn't a registered project.
+function projectNameForCwd(cwd: string): string {
+  if (!cwd) return '';
+  const p = findProject(cwd);
+  if (p) return projectDisplayName(p);
+  return cwdShortName(cwd);
+}
+
+// Resolve the owning project's display name for a live session id (#29).
+function projectNameForSession(id: string): string {
+  return projectNameForCwd(sessionCwds.get(id) || '');
+}
+
+// Prefix a FLATTENED session row (Pinned / Active Sessions / search) with a small chip showing
+// the owning project, so a row detached from its project folder still shows where it lives.
+// NOT used for rows nested under their own expanded project folder (the project is implied there).
+function appendProjectTag(row: HTMLElement, id: string): void {
+  appendProjectTagForCwd(row, sessionCwds.get(id) || '');
+}
+
+function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
+  const name = projectNameForCwd(cwd);
+  if (!name) return;
+  const tag = document.createElement('span');
+  tag.className = 'nav-session-project-tag';
+  tag.textContent = name;
+  tag.title = cwd;
+  // Insert right before the title span so it reads "[dot][agent][project] title".
+  const titleEl = row.querySelector('.nav-session-title');
+  row.insertBefore(tag, titleEl || null);
 }
 
 // Fetch the multi-agent project list from the backend, merging in the user's added folders so they
@@ -1974,6 +2009,54 @@ async function fetchBranch(cwd: string, repaint: boolean): Promise<void> {
   }
 }
 
+// ===== Git dirty-working-tree cache (#31) =====
+// Mirrors branchCache but is NEVER lazily fetched from the render loop: renderSessionList
+// runs on every live heartbeat, so per-project dirty fetches there would spawn a git
+// subprocess per project per heartbeat. Instead getCachedDirty() is a pure sync cache read
+// (safe to call in render) and fetches are driven by explicit triggers (window focus,
+// switchSession/selectProject, and a coarse interval) via refreshDirtyForVisibleProjects().
+// LOCAL connections only: git:dirty runs on the desktop, so a remote cwd won't exist there;
+// skip fetching on remote so we don't paint a misleading "clean" badge.
+const dirtyCache: Map<string, boolean> = new Map();   // normalizeCwd(cwd) -> dirty
+const dirtyFetching: Set<string> = new Set();         // keys with an in-flight fetch
+
+// Sync read of the cached dirty flag. Returns false when unknown (not yet fetched) or remote.
+function getCachedDirty(cwd: string): boolean {
+  if (currentRemoteHostLabel) return false; // remote backend has no local git
+  const key = normalizeCwd(cwd);
+  if (!key) return false;
+  return dirtyCache.get(key) === true;
+}
+
+// Fetch a cwd's dirty state and store it. Repaints (nav + title) when the value changed.
+// Guards against concurrent duplicate fetches and skips entirely on remote connections.
+async function fetchDirty(cwd: string): Promise<void> {
+  if (currentRemoteHostLabel) return;
+  const key = normalizeCwd(cwd);
+  if (!key || dirtyFetching.has(key)) return;
+  dirtyFetching.add(key);
+  try {
+    const dirty = await window.posse.gitDirty(cwd);
+    const prev = dirtyCache.get(key);
+    dirtyCache.set(key, dirty);
+    if (prev !== dirty) { renderSessionList(); updateSessionTitleBar(); }
+  } catch {
+    if (!dirtyCache.has(key)) dirtyCache.set(key, false);
+  } finally {
+    dirtyFetching.delete(key);
+  }
+}
+
+// Refresh dirty state for all known projects + the active session's cwd. Called from explicit
+// triggers only (focus, selection change, coarse interval) — never from the render loop.
+function refreshDirtyForVisibleProjects(): void {
+  if (currentRemoteHostLabel) return;
+  for (const p of projects) void fetchDirty(p.path);
+  const activeId = termManager.getActiveId();
+  const activeCwd = activeId ? sessionCwds.get(activeId) : selectedProjectPath || '';
+  if (activeCwd) void fetchDirty(activeCwd);
+}
+
 // Use the last path segment as the project name
 function cwdShortName(cwd: string): string {
   if (!cwd) return 'Unknown Project';
@@ -2053,8 +2136,10 @@ function updateSessionTitleBar(): void {
       parts.push(cwdDisplay ? `${cwdDisplay}/${title}` : title);
     }
     // Append the active session's git branch so parallel sessions on different branches are distinguishable.
+    // A trailing '*' marks an uncommitted (dirty) working tree → e.g. "(main*)".
     const branch = getCachedBranch(cwd);
-    window.posse.setWindowTitle(branch ? `${parts.join('-')} (${branch})` : parts.join('-'));
+    const dirtyMark = getCachedDirty(cwd) ? '*' : '';
+    window.posse.setWindowTitle(branch ? `${parts.join('-')} (${branch}${dirtyMark})` : parts.join('-'));
   } else if (selectedProjectPath) {
     // No active session but a project is selected: label the file panel with the project folder.
     const cwdDisplay = selectedProjectPath.split('/').filter(Boolean).pop() || '';
@@ -2062,7 +2147,8 @@ function updateSessionTitleBar(): void {
     fileTreePath.title = selectedProjectPath;
     const base = cwdDisplay ? `Posse-${cwdDisplay}` : 'Posse';
     const branch = getCachedBranch(selectedProjectPath);
-    window.posse.setWindowTitle(branch ? `${base} (${branch})` : base);
+    const dirtyMark = getCachedDirty(selectedProjectPath) ? '*' : '';
+    window.posse.setWindowTitle(branch ? `${base} (${branch}${dirtyMark})` : base);
   } else {
     fileTreePath.textContent = 'Directory';
     fileTreePath.title = '';
@@ -2088,6 +2174,7 @@ function selectProject(projPath: string): void {
   if (!projPath) return;
   selectedProjectPath = projPath;
   const key = normalizeCwd(projPath);
+  void fetchDirty(projPath); // refresh this project's dirty badge on selection (#31)
   // Note: selecting a project drives the RIGHT file panel only; it must NOT force-expand the
   // project's session list (default-collapsed per project). Lazily load its multi-agent history
   // so the data is ready when the user does expand it.
@@ -2853,6 +2940,15 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   nameSpan.textContent = projectDisplayName(p);
   nameSpan.title = p.path;
 
+  // Uncommitted-changes badge (#31): a small dot shown only when the project's git working
+  // tree is dirty. Sync cache read — fetches are driven by explicit triggers, never here.
+  let dirtyBadge: HTMLElement | null = null;
+  if (getCachedDirty(p.path)) {
+    dirtyBadge = document.createElement('span');
+    dirtyBadge.className = 'nav-project-dirty';
+    dirtyBadge.title = 'Uncommitted changes';
+  }
+
   const actions = document.createElement('span');
   actions.className = 'nav-project-actions';
 
@@ -2887,6 +2983,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
 
   row.appendChild(icon);
   row.appendChild(nameSpan);
+  if (dirtyBadge) row.appendChild(dirtyBadge);
   row.appendChild(actions);
 
   // Clicking the row (name / non-button area) both SELECTS the project (drives the RIGHT file panel)
@@ -2969,22 +3066,46 @@ function collectPinnedSessionRows(activeId: string | null): Array<{ time: number
         const k = liveSessionPinKey(id);
         if (!isSessionPinned(k) || seen.has(k)) continue;
         seen.add(k);
-        const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family);
+        const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family); appendProjectTag(el, id);
         out.push({ time: sessionUpdateTimes.get(id) || 0, el });
       }
       for (const cs of g.closed) {
         const k = closedSessionPinKey(cs);
         if (!isSessionPinned(k) || seen.has(k)) continue;
         seen.add(k);
-        const el = buildClosedSessionRow(cs); appendAgentTag(el, family);
+        const el = buildClosedSessionRow(cs); appendAgentTag(el, family); appendProjectTagForCwd(el, cs.cwd || '');
         out.push({ time: cs.closedAt || 0, el });
       }
       for (const s of g.history) {
         const k = historySessionPinKey(s);
         if (!isSessionPinned(k) || seen.has(k)) continue;
         seen.add(k);
-        const el = buildHistorySessionRow(s); appendAgentTag(el, family);
+        const el = buildHistorySessionRow(s); appendAgentTag(el, family); appendProjectTagForCwd(el, s.cwd || '');
         out.push({ time: s.mtimeMs || 0, el });
+      }
+    }
+  }
+  out.sort((a, b) => b.time - a.time);
+  return out;
+}
+
+// Gather EVERY live session across all projects into time-desc rows for the top
+// "Active Sessions" section (#28). Like Pinned, it ignores the active agent tab — every live
+// session is shown — each row carrying an agent tag (mixed agents) + a project chip (#29).
+// Deduped by liveSessionPinKey. A pinned live session may also appear in Pinned; that overlap
+// is intentional (not deduped across sections), so this collector does not skip pinned rows.
+function collectActiveSessionRows(activeId: string | null): Array<{ time: number; el: HTMLElement }> {
+  const out: Array<{ time: number; el: HTMLElement }> = [];
+  const seen = new Set<string>();
+  for (const p of projects) {
+    const groups = getProjectSessions(p.path);
+    for (const [family, g] of groups) {
+      for (const id of g.lives) {
+        const k = liveSessionPinKey(id);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family); appendProjectTag(el, id);
+        out.push({ time: sessionUpdateTimes.get(id) || 0, el });
       }
     }
   }
@@ -3026,6 +3147,32 @@ function renderSessionList(): void {
   const rank = projectRank();
   const pinned = orderByRank(projects.filter(p => p.pinned && projectMatchesSearch(p) && tabFilter(p)), rank);
   const rest = orderByRank(projects.filter(p => !p.pinned && projectMatchesSearch(p) && tabFilter(p)), rank);
+
+  // ========== Active Sessions section ==========
+  // Every live session across all projects, flattened to the very top (#28). Mirrors the
+  // Pinned section's header/collapse pattern but keyed 'active'. Only rendered when ≥1 live
+  // session exists. Overlap with Pinned is intentional (a pinned live session shows in both).
+  const activeSessionRows = collectActiveSessionRows(activeId);
+  if (activeSessionRows.length > 0) {
+    const activeCollapsed = collapsedSections.has('active');
+    const header = document.createElement('div');
+    header.className = 'nav-section-header' + (activeCollapsed ? ' collapsed' : '');
+    const label = document.createElement('span');
+    label.className = 'nav-section-label';
+    const actIcon = document.createElement('span');
+    actIcon.className = 'nav-section-icon';
+    actIcon.innerHTML = ICON.activity;
+    const actText = document.createElement('span');
+    actText.textContent = 'Active Sessions';
+    label.appendChild(actIcon);
+    label.appendChild(actText);
+    header.appendChild(label);
+    header.addEventListener('click', () => toggleSectionCollapsed('active'));
+    sessionList.appendChild(header);
+    if (!activeCollapsed) {
+      for (const r of activeSessionRows) sessionList.appendChild(r.el);
+    }
+  }
 
   // ========== Pinned section ==========
   // Pinned SESSIONS float to the very top (above all folders), then pinned project
@@ -3809,7 +3956,7 @@ function switchSession(id: string): void {
   // Follow the session's project: align the selected project so the RIGHT file panel + highlight
   // track the terminal the user just switched to.
   const sessCwd = sessionCwds.get(id);
-  if (sessCwd) selectedProjectPath = sessCwd;
+  if (sessCwd) { selectedProjectPath = sessCwd; void fetchDirty(sessCwd); }
 
   // User switched to this session → clear all status indicators (yellow/green → gray)
   const hadUnread = sessionUnread.delete(id);
@@ -4873,6 +5020,15 @@ setInterval(() => {
   if (cwd) void fetchBranch(cwd, /*repaint*/ true);
 }, 20000);
 
+// The working tree can become dirty/clean as the user works in a terminal (#31). Coarsely
+// re-check all known projects on an interval — NOT in the render loop. fetchDirty repaints
+// only when a value changed and is a no-op on remote connections.
+setInterval(() => { refreshDirtyForVisibleProjects(); }, 20000);
+// Also refresh on window focus (the user likely committed/changed files in another app/terminal).
+window.addEventListener('focus', () => { refreshDirtyForVisibleProjects(); });
+// First pass shortly after load so badges/title populate without waiting a full interval.
+setTimeout(() => { refreshDirtyForVisibleProjects(); }, 1500);
+
 // ========== Sidebar arrow-key session switching ==========
 
 // Switch to the previous/next session relative to the active one (skipping non-navigable items like closed ones)
@@ -4986,12 +5142,19 @@ async function refreshHostSwitcherLabel(): Promise<void> {
     const list = await window.posse.connectionsList();
     const active = list.find((c) => c.active) || list[0];
     if (hostSwitcherLabel) hostSwitcherLabel.textContent = active ? active.label : 'Local';
-    currentRemoteHostLabel = active && active.kind === 'remote' ? active.label : '';
+    const nextRemote = active && active.kind === 'remote' ? active.label : '';
+    if (nextRemote !== currentRemoteHostLabel) {
+      // Connection changed → drop the local-git dirty cache (a remote cwd has no local git,
+      // and switching back to local should re-verify rather than show a stale flag) (#31).
+      dirtyCache.clear();
+    }
+    currentRemoteHostLabel = nextRemote;
   } catch {
     if (hostSwitcherLabel) hostSwitcherLabel.textContent = 'Local';
     currentRemoteHostLabel = '';
   }
   updateSessionTitleBar();
+  refreshDirtyForVisibleProjects();
 }
 
 function closeHostMenu(): void {
