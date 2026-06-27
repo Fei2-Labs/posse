@@ -187,11 +187,21 @@ export function cleanSessionTitle(raw: string): string {
 // Extract the quoted name (tolerate "named"/"renamed", straight or curly quotes). Match against
 // the RAW message text (quotes matter, so do not run on the tag-stripped/cleaned form).
 const RENAME_TITLE_RE = /the user (?:re)?named this session\s*["“”'']([^"“”'']+)["“”'']/i;
+// Claude Code records a real `/rename` as a `<system-reminder>` whose body is exactly
+// "The user named this session "X". This may indicate ...". Require that surrounding context
+// so we don't pick up plain prose that merely quotes the phrase (e.g. a task description that
+// discusses the rename marker). A real session name is a short single line; reject captures that
+// carry newline escapes or are implausibly long — those are quoted-text false positives.
 export function extractRenameTitle(userText: string): string | null {
+  if (!/named this session/i.test(userText)) return null;
+  if (!userText.includes('This may indicate')) return null; // genuine system-reminder body
   const m = RENAME_TITLE_RE.exec(userText);
   if (!m) return null;
   const name = m[1].trim();
-  return name ? name.slice(0, 60) : null;
+  if (!name) return null;
+  if (/\\n|\n/.test(name)) return null; // multi-line capture -> not a real name
+  if (name.length > 60) return null; // names are short; long capture = mis-match
+  return name.slice(0, 60);
 }
 
 // Decide whether a cleaned user-message string is a real prompt usable as a session title.
@@ -362,14 +372,26 @@ export function findClaudeTitleFields(filePath: string, size: number): ClaudeTit
 // renameTitle outranks agentName/aiTitle because an explicit `/rename` is user intent and
 // must not be masked by an auto-generated title (#44). `renameTitle` arg = head-derived
 // fallback; the scan-derived fields.renameTitle (found anywhere in the file) takes priority.
+//
+// #7: a terminal `/rename` writes a `custom-title` record AND a durable `<system-reminder>`
+// rename marker. But when the session is later resumed, Claude Code RE-INJECTS its original
+// auto-generated title back into `custom-title` (reverting it to the `ai-title` value), while
+// the rename marker is never rewritten. So if the LAST `custom-title` equals the auto `ai-title`
+// yet a distinct `/rename` marker exists, the `custom-title` is a stale auto-revert — the user's
+// explicit `/rename` is the most recent intentional signal and must win.
 export function resolveClaudeTitle(
   fields: ClaudeTitleFields,
   firstUserTitle: string,
   renameTitle: string,
   uuid: string
 ): string {
-  if (fields.customTitle.trim()) return fields.customTitle.trim().slice(0, 60);
+  const customTitle = fields.customTitle.trim();
   const rename = (fields.renameTitle || renameTitle).trim();
+  // Auto-revert detection: custom-title was clobbered back to the auto ai-title on resume,
+  // but the user's explicit /rename says otherwise -> trust the rename.
+  const customIsAutoRevert =
+    !!customTitle && customTitle === fields.aiTitle.trim() && !!rename && rename !== customTitle;
+  if (customTitle && !customIsAutoRevert) return customTitle.slice(0, 60);
   if (rename) return rename.slice(0, 60);
   if (fields.agentName.trim()) return fields.agentName.trim().slice(0, 60);
   if (fields.aiTitle.trim()) return fields.aiTitle.trim().slice(0, 60);
