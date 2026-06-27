@@ -1520,11 +1520,41 @@ html, body {
   text-transform: none;
 }
 
+/* Owning-project chip on FLATTENED session rows (Pinned / Active Sessions) (#29).
+   Subtler than the agent tag: outlined + muted so the two chips stay distinguishable. */
+.nav-session-project-tag {
+  flex-shrink: 0;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-secondary, #9aa0a6);
+  background: var(--bg-secondary, #2a2a2a);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
 .nav-session-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+/* Uncommitted-changes badge on a project row (#31). A small amber dot, visually distinct
+   from the round session status dot and the ⚠ waiting glyph. */
+.nav-project-dirty {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px;
+  border-radius: 50%;
+  background: var(--accent-amber, #e2a336);
+  box-shadow: 0 0 0 2px rgba(226, 163, 54, 0.18);
 }
 
 .nav-session-dot-busy {
