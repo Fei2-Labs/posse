@@ -887,6 +887,13 @@ let autoContinueTimer: ReturnType<typeof setInterval> | null = null;
 // Write to the PTY and reset the auto-continue timer
 function writePtyWithAutoReset(id: string, data: string): void {
   termManager.notifyInput(id);
+  // Record recently-sent input (keystrokes, xterm mouse reports, file/paste payloads all
+  // flow through here). The PTY echoes typed visible chars back via onPtyData; we use this
+  // buffer to suppress that echo so user interaction doesn't masquerade as agent activity.
+  const prevInput = sessionRecentInput.get(id);
+  // Reset the buffer if the previous input is stale (>500ms) so we don't accumulate forever.
+  const base = prevInput && Date.now() - prevInput.at < 500 ? prevInput.data : '';
+  sessionRecentInput.set(id, { data: (base + data).slice(-256), at: Date.now() });
   window.posse.writePty(id, data);
   // Reset this session's auto-continue timer
   const config = sessionAutoContinue.get(id);
@@ -1790,6 +1797,10 @@ const sessionWaiting: Set<string> = new Set();
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
 const recentDataBuffer: Map<string, string> = new Map();
+// Recently SENT input per session (keystrokes / mouse reports / pastes). Used to suppress
+// PTY-echoed keystrokes so that user typing/interaction does NOT flip the status dot to
+// busy or re-rank the session. Keeps the last ~256 chars with a send timestamp.
+const sessionRecentInput: Map<string, { data: string; at: number }> = new Map();
 // Sessions with a manually edited title (no longer auto-updated)
 const sessionTitleLocked: Set<string> = new Set();
 // Pinned sessions — stored as canonical conversationKey()s (NOT ephemeral live PTY
@@ -4645,28 +4656,50 @@ async function openSshSession(host: string): Promise<void> {
 
 window.posse.onPtyData((id, data) => {
   termManager.write(id, data);
-  if (sessionTitles.has(id)) {
-    sessionUpdateTimes.set(id, Date.now());
-  }
   // Track status for all sessions (busy/waiting), so the state survives switching away and back
   const activeId = termManager.getActiveId();
   if (sessionTitles.has(id)) {
     // Ignore purely cosmetic output (cursor moves, OSC title sequences, spinner-stop
-    // redraws, stray control bytes). Such chunks must NOT flip a viewed, quiet session
-    // back to busy/unread (green). Strip ANSI/control sequences and check for residual
-    // visible content.
+    // redraws, stray control bytes) AND echoed user keystrokes. Such chunks must NOT flip a
+    // viewed, quiet session back to busy/unread (green), NOR re-rank/promote the row by
+    // bumping its sort timestamp. Strip ANSI/control sequences (including mouse reports,
+    // bracketed-paste markers and focus events) and check for residual VISIBLE content.
     const stripped = data
+      .replace(/\x1b\[<[0-9;]*[Mm]/g, '') // SGR mouse reports (e.g. \x1b[<0;33;15M)
+      .replace(/\x1b\[M[\s\S]{0,3}/g, '') // normal X10/normal mouse reports
+      .replace(/\x1b\[20[01]~/g, '') // bracketed-paste start/end markers
+      .replace(/\x1b\[[IO]/g, '') // focus in / focus out events
       .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC
       .replace(/\x1b[@-_]/g, '') // other escapes
       .replace(/[\x00-\x1f\x7f]/g, ''); // remaining C0 control chars
-    const cosmeticOnly = stripped.trim().length === 0;
+
+    // Echo suppression: the PTY echoes the user's typed visible characters back through
+    // onPtyData. If the residual visible content is a subset of what we recently SENT to this
+    // session (tight 500ms window), treat it as echo — not agent output. Conservative: only
+    // suppress when the residual is fully contained in recent input; if there is extra content
+    // beyond the echo, that's real agent output and must flip busy + bump the sort time.
+    let visible = stripped;
+    const recentInput = sessionRecentInput.get(id);
+    if (visible.trim().length > 0 && recentInput && Date.now() - recentInput.at < 500) {
+      const trimmed = visible.trim();
+      if (recentInput.data.includes(trimmed)) {
+        visible = ''; // echoed keystrokes only — cosmetic
+      }
+    }
+
+    const cosmeticOnly = visible.trim().length === 0;
     if (cosmeticOnly) {
       // Still accumulate recent data so cross-chunk prompt detection keeps working.
+      // Note: deliberately do NOT bump sessionUpdateTimes here — cosmetic/echo traffic must
+      // not promote/re-rank the session row.
       const prev = recentDataBuffer.get(id) || '';
       recentDataBuffer.set(id, (prev + data).slice(-500));
       return; // no busy/unread/waiting mutation, no prompt/timeout logic, no render
     }
+
+    // Real visible agent output → NOW bump the sort timestamp (re-rank the row).
+    sessionUpdateTimes.set(id, Date.now());
 
     // On new output, prefer showing "busy" (yellow dot) and clear the old "pending" (green dot)
     const prevBusy = sessionBusy.has(id);
