@@ -894,6 +894,9 @@ function writePtyWithAutoReset(id: string, data: string): void {
   // Reset the buffer if the previous input is stale (>500ms) so we don't accumulate forever.
   const base = prevInput && Date.now() - prevInput.at < 500 ? prevInput.data : '';
   sessionRecentInput.set(id, { data: (base + data).slice(-256), at: Date.now() });
+  // Flag mouse-report sends (X10 `ESC [ M …`, SGR `ESC [ < …`) so the agent's redraw response
+  // that follows isn't misread as agent activity.
+  if (/\x1b\[(?:M|<[0-9])/.test(data)) sessionLastMouseInputAt.set(id, Date.now());
   window.posse.writePty(id, data);
   // Reset this session's auto-continue timer
   const config = sessionAutoContinue.get(id);
@@ -1801,6 +1804,11 @@ const recentDataBuffer: Map<string, string> = new Map();
 // PTY-echoed keystrokes so that user typing/interaction does NOT flip the status dot to
 // busy or re-rank the session. Keeps the last ~256 chars with a send timestamp.
 const sessionRecentInput: Map<string, { data: string; at: number }> = new Map();
+// When the user moves the mouse over a terminal whose agent enabled mouse-motion tracking
+// (DECSET 1002/1003), xterm sends a mouse report up the PTY and the agent TUI redraws in
+// response — emitting REAL visible bytes that aren't agent work. Record when we last sent a
+// mouse report so onPtyData can treat the redraw that immediately follows as cosmetic.
+const sessionLastMouseInputAt: Map<string, number> = new Map();
 // Sessions with a manually edited title (no longer auto-updated)
 const sessionTitleLocked: Set<string> = new Set();
 // Pinned sessions — stored as canonical conversationKey()s (NOT ephemeral live PTY
@@ -4686,6 +4694,15 @@ window.posse.onPtyData((id, data) => {
       if (recentInput.data.includes(trimmed)) {
         visible = ''; // echoed keystrokes only — cosmetic
       }
+    }
+    // Mouse-redraw suppression: if visible content arrives within 250ms of US sending a mouse
+    // report (the user moved the mouse over a TUI with motion tracking on), it's the agent
+    // redrawing in response to the cursor position — not real work. Treat as cosmetic so idle
+    // mouse movement doesn't pulse the dot. Real agent output keeps flowing after the window,
+    // and any non-mouse-coincident chunk still flips busy.
+    const lastMouseAt = sessionLastMouseInputAt.get(id);
+    if (visible.trim().length > 0 && lastMouseAt !== undefined && Date.now() - lastMouseAt < 250) {
+      visible = '';
     }
 
     const cosmeticOnly = visible.trim().length === 0;
