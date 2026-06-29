@@ -1834,7 +1834,7 @@ const recentDataBuffer: Map<string, string> = new Map();
 //  - the full interrupt phrase "esc to interrupt" / "ctrl+c to cancel"
 //  - elapsed-time counter "· 5m 32s"
 //  - "… (esc" / "… (12s" footer (ellipsis then paren then esc/digit), not an arbitrary "… ("
-const WORKING_RE = /\b\w{3,}ing(?:…|\.\.\.)|(?:[↑·]\s*)?\d+(?:\.\d+)?k\s*tokens\b|esc(?:ape)?\s+to\s+(?:interrupt|cancel|stop)|ctrl\+c\s+to\s+(?:stop|cancel|interrupt)|[·•]\s*\d+m\s*\d+s|…\s*\(\s*(?:esc|\d)/i;
+const WORKING_RE = /\b\w{3,}ing(?:…|\.\.\.)|(?:[↑·]\s*)?\d+(?:\.\d+)?k\s*tokens\b|esc(?:ape)?\s+to\s+(?:interrupt|cancel|stop)|ctrl\+c\s+to\s+(?:stop|cancel|interrupt)|[·•]\s*\d+m\s*\d+s|…\s*\(\s*(?:esc|\d)|waiting for \d+\b[^\n]{0,30}\b(?:agent|task|process|tool|job)s?\b/i;
 // Recently SENT input per session (keystrokes / mouse reports / pastes). Used to suppress
 // PTY-echoed keystrokes so that user typing/interaction does NOT flip the status dot to
 // busy or re-rank the session. Keeps the last ~256 chars with a send timestamp.
