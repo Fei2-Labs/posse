@@ -5035,7 +5035,8 @@ window.posse.onPtyData((id, data) => {
       const wasBusy = sessionBusy.delete(id);
       const hadUnread = sessionUnread.has(id);
       // The active session goes straight to gray (the user is watching it); inactive sessions are marked pending (green dot)
-      if (id !== activeId && !sessionUnread.has(id)) {
+      const currentActiveId = termManager.getActiveId();
+      if (id !== currentActiveId && !sessionUnread.has(id)) {
         statusDbg('unread-set', id, 'cause=prompt');
         sessionUnread.add(id);
       }
@@ -5081,8 +5082,6 @@ window.posse.onTitleUpdate((id, title) => {
   if (sessionTitleLocked.has(id)) return;
   if (sessionTitles.has(id)) {
     sessionTitles.set(id, title);
-    statusDbg('time-bump', id, 'cause=title-update');
-    sessionUpdateTimes.set(id, Date.now());
     renderSessionList();
     updateSessionTitleBar();
   }
