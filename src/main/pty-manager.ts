@@ -843,10 +843,19 @@ export class PtyManager {
     session.title = title;
     session.titleLocked = true;
     this.events.onTitleUpdate(id, title);
-    if (agentKindFromCommand(session.presetCommand) === 'claude' && session.agentSessionId) {
-      writeClaudeSessionTitle(session.agentSessionId, title);
-    } else if (agentKindFromCommand(session.presetCommand) === 'codex' && session.agentSessionId) {
-      writeCodexSessionTitle(session.agentSessionId, title);
+    // Forward the rename into the agent's OWN session file so its resume/history list matches.
+    // RESUMED sessions keep agentSessionId empty by design and carry only resumeId, so fall back
+    // to resumeId — mirroring the closed-sessions:rename path (index.ts) which resolves the same way.
+    // Copilot/Kiro have no writable session-title format, so propagation is intentionally skipped
+    // for them (Posse's own session.title still updates so the sidebar reflects the rename).
+    const writeId = session.agentSessionId || session.resumeId;
+    if (writeId) {
+      const kind = agentKindFromCommand(session.presetCommand);
+      if (kind === 'claude') {
+        writeClaudeSessionTitle(writeId, title);
+      } else if (kind === 'codex') {
+        writeCodexSessionTitle(writeId, title);
+      }
     }
   }
 

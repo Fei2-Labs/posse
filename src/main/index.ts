@@ -2577,6 +2577,30 @@ function registerIPC(): void {
     }
   });
 
+  // Forward-propagate a sidebar rename of a native history session into the agent's OWN session
+  // file, mirroring closed-sessions:rename. Resolves the agent kind from the history row's
+  // storeAgent/agent and writes via the shared title writers using the on-disk session id
+  // (uuid for Claude / thread id for Codex). Best-effort: never throws across IPC.
+  // Copilot/Kiro have no writable session-title format, so propagation is a deliberate no-op for
+  // them (the renderer still updates Posse's own displayed title so the sidebar reflects the rename).
+  ipcMain.handle('history-sessions:rename', (_e, meta: { id: string; agent: string; title: string }) => {
+    try {
+      const id = String(meta?.id || '').trim();
+      const agent = String(meta?.agent || '').trim().toLowerCase();
+      const title = String(meta?.title || '').slice(0, 200);
+      if (!id || !title) return { ok: false, error: 'missing id or title' };
+      if (agent === 'claude') {
+        writeClaudeSessionTitle(id, title);
+      } else if (agent === 'codex') {
+        writeCodexSessionTitle(id, title);
+      }
+      // else: copilot/kiro/unknown — no writable title format, skip (no-op, not an error).
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
   ipcMain.handle('remote:add-recent-cwd', (_e, cwd: string) => {
     try { addRemoteRecentCwd(cwd); } catch { /* ignore */ }
     return true;

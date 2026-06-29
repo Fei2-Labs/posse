@@ -81,6 +81,7 @@ declare global {
       sessionSetArchived: (id: string, archived: boolean) => Promise<{ ok: boolean; error?: string }>;
       sessionListArchived: () => Promise<string[]>;
       sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) => Promise<{ ok: boolean; error?: string }>;
+      historySessionsRename: (meta: { id: string; agent: string; title: string }) => Promise<{ ok: boolean; error?: string }>;
       projectRemap: (oldPath: string, newPath: string) => Promise<{ ok: boolean; error?: string }>;
       projectRemapsList: () => Promise<Record<string, string>>;
       projectRemapRemove: (oldPath: string) => Promise<{ ok: boolean; error?: string }>;
@@ -2620,6 +2621,42 @@ function startTitleEdit(id: string, titleSpan: HTMLElement): void {
   });
 }
 
+// Generic inline title editor for rows NOT backed by the live `sessionTitles` map
+// (closed + native history rows). Mirrors startTitleEdit's UX (in-place input, Enter commits,
+// Escape cancels, blur commits) but routes the committed value through a caller-supplied handler
+// instead of renamePty.
+function startInlineTitleEdit(
+  titleSpan: HTMLElement,
+  current: string,
+  onCommit: (value: string) => void,
+): void {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'session-title-input';
+  input.value = current;
+  titleSpan.replaceWith(input);
+  input.focus();
+  input.select();
+  let committed = false;
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    const val = input.value.trim();
+    if (val && val !== current) {
+      onCommit(val);
+    } else {
+      renderSessionList();
+    }
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { committed = true; renderSessionList(); }
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
 function showSessionContextMenu(e: MouseEvent, targetId: string): void {
   document.querySelectorAll('.term-context-menu').forEach(m => m.remove());
 
@@ -2785,6 +2822,23 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   resumeBtn.title = 'Resume session';
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void restoreClosedSession(cs); });
 
+  // Rename: routes through the EXISTING closed-sessions:rename IPC, which already forward-propagates
+  // the title into the agent's own session file (claude/codex via resumeId). Copilot/Kiro are a
+  // server-side no-op there, so only Posse's stored title updates for them.
+  const editBtn = document.createElement('button');
+  editBtn.className = 'nav-session-action';
+  editBtn.innerHTML = ICON.pencil;
+  editBtn.title = 'Rename';
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    startInlineTitleEdit(titleSpan, cs.title || '', (val) => {
+      void (async () => {
+        closedSessions = await window.posse.closedSessionsRename(cs.id, val);
+        renderSessionList();
+      })();
+    });
+  });
+
   const delBtn = document.createElement('button');
   delBtn.className = 'nav-session-action';
   delBtn.textContent = '×';
@@ -2799,6 +2853,7 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
   item.appendChild(makeSessionPinButton(pinKey));
+  item.appendChild(editBtn);
   item.appendChild(resumeBtn);
   item.appendChild(delBtn);
   item.addEventListener('click', () => { void restoreClosedSession(cs); });
@@ -2830,6 +2885,29 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   resumeBtn.title = 'Resume history session';
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void resumeAgentSession(s); });
 
+  // Rename: forward-propagate into the agent's own session file via history-sessions:rename.
+  // Claude/Codex get the title marker written; Copilot/Kiro are a server-side no-op (no writable
+  // title format) but the displayed title still updates locally so the sidebar reflects the rename.
+  const editBtn = document.createElement('button');
+  editBtn.className = 'nav-session-action';
+  editBtn.innerHTML = ICON.pencil;
+  editBtn.title = 'Rename';
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    startInlineTitleEdit(titleSpan, s.title || '', (val) => {
+      void (async () => {
+        try {
+          await window.posse.historySessionsRename({ id: s.id, agent: s.storeAgent || s.agent, title: val });
+        } catch (err) {
+          console.error('history rename failed', err);
+        }
+        s.title = val; // reflect immediately
+        renderSessionList();
+        await refreshProjectsData();
+      })();
+    });
+  });
+
   // Archive toggle (Posse-internal soft-hide, reversible, no confirm).
   const archiveBtn = document.createElement('button');
   archiveBtn.className = 'nav-session-action';
@@ -2848,6 +2926,7 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
   item.appendChild(makeSessionPinButton(pinKey));
+  item.appendChild(editBtn);
   item.appendChild(resumeBtn);
   item.appendChild(archiveBtn);
   item.appendChild(deleteBtn);

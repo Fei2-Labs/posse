@@ -83,6 +83,10 @@ contextBridge.exposeInMainWorld('posse', {
   // Delete: PERMANENT, removes the session from the agent's own backing store.
   sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) =>
     ipcRenderer.invoke('session:delete', meta) as Promise<{ ok: boolean; error?: string }>,
+  // Rename: forward-propagate a native history session's new title into the agent's own session
+  // file (claude/codex). Copilot/Kiro are a no-op server-side.
+  historySessionsRename: (meta: { id: string; agent: string; title: string }) =>
+    ipcRenderer.invoke('history-sessions:rename', meta) as Promise<{ ok: boolean; error?: string }>,
 
   // ========== Project path remap (renamed/moved folder → re-attach historical sessions) ==========
   // Map an old recorded cwd → a new folder path so historical sessions re-bucket under the new
