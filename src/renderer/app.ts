@@ -1808,12 +1808,16 @@ const recentDataBuffer: Map<string, string> = new Map();
 // `press esc to interrupt`, `ctrl+c to cancel`. Idle prompts (`│ > │  ? for shortcuts`,
 // `(! to manage · ctrl+o to expand)`, shell prompts) deliberately do NOT match.
 // A session is "working" when its recent output shows an agent CLI's progress indicator.
-// Covers all 4 CLIs (Claude / Codex / Kiro / Copilot): the gerund spinner word + ellipsis
-// (Claude's whimsical "Capitulating…/Recombobulating…/Thinking…", also "Generating…/Running…"),
-// the "Nk tokens · Mm Ss" counter, and esc/ctrl+c interrupt hints. The `\w{3,}ing(?:…|...)`
-// alt requires the ellipsis right after the gerund, so plain prose ("testing the parser",
-// "parsing(x)") does NOT match — only an animated spinner does.
-const WORKING_RE = /\bthinking\b|\brunning\b|\b\w{3,}ing(?:…|\.\.\.)|\besc(?:ape)?\b[^\n]{0,18}\b(?:interrupt|cancel|stop)\b|\b\d+(?:\.\d+)?k?\s*tokens\b|…\s*\(|[·•]\s*\d+m\s*\d+s|ctrl\+c\b[^\n]{0,18}\b(?:stop|cancel|interrupt)/i;
+// MUST match the SPINNER/FOOTER format, not bare words — the buffer also contains the agent's
+// conversation text, and bare \bthinking\b/\brunning\b/\btokens\b matched ordinary prose
+// ("I'm thinking about…", "running the tests", "used 5000 tokens") → false busy → false green
+// on idle sessions. So every alternative is anchored to an animated/footer shape:
+//  - gerund + ellipsis: Claude's "Capitulating…/Recombobulating…/Thinking…", "Generating…/Running…"
+//  - token counter WITH the k suffix: "1.2k tokens" (prose "5000 tokens" has no k → ignored)
+//  - the full interrupt phrase "esc to interrupt" / "ctrl+c to cancel"
+//  - elapsed-time counter "· 5m 32s"
+//  - "… (esc" / "… (12s" footer (ellipsis then paren then esc/digit), not an arbitrary "… ("
+const WORKING_RE = /\b\w{3,}ing(?:…|\.\.\.)|(?:[↑·]\s*)?\d+(?:\.\d+)?k\s*tokens\b|esc(?:ape)?\s+to\s+(?:interrupt|cancel|stop)|ctrl\+c\s+to\s+(?:stop|cancel|interrupt)|[·•]\s*\d+m\s*\d+s|…\s*\(\s*(?:esc|\d)/i;
 // Recently SENT input per session (keystrokes / mouse reports / pastes). Used to suppress
 // PTY-echoed keystrokes so that user typing/interaction does NOT flip the status dot to
 // busy or re-rank the session. Keeps the last ~256 chars with a send timestamp.
