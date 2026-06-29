@@ -1807,7 +1807,13 @@ const recentDataBuffer: Map<string, string> = new Map();
 // Kiro, GitHub Copilot CLI): `thinking`, `Running …`, `<word>… (`, `… 89.5k tokens · 5m 32s)`,
 // `press esc to interrupt`, `ctrl+c to cancel`. Idle prompts (`│ > │  ? for shortcuts`,
 // `(! to manage · ctrl+o to expand)`, shell prompts) deliberately do NOT match.
-const WORKING_RE = /\bthinking\b|\brunning\b|\besc(?:ape)?\b[^\n]{0,18}\b(?:interrupt|cancel|stop)\b|\b\d+(?:\.\d+)?k?\s*tokens\b|…\s*\(|[·•]\s*\d+m\s*\d+s|ctrl\+c\b[^\n]{0,18}\b(?:stop|cancel|interrupt)/i;
+// A session is "working" when its recent output shows an agent CLI's progress indicator.
+// Covers all 4 CLIs (Claude / Codex / Kiro / Copilot): the gerund spinner word + ellipsis
+// (Claude's whimsical "Capitulating…/Recombobulating…/Thinking…", also "Generating…/Running…"),
+// the "Nk tokens · Mm Ss" counter, and esc/ctrl+c interrupt hints. The `\w{3,}ing(?:…|...)`
+// alt requires the ellipsis right after the gerund, so plain prose ("testing the parser",
+// "parsing(x)") does NOT match — only an animated spinner does.
+const WORKING_RE = /\bthinking\b|\brunning\b|\b\w{3,}ing(?:…|\.\.\.)|\besc(?:ape)?\b[^\n]{0,18}\b(?:interrupt|cancel|stop)\b|\b\d+(?:\.\d+)?k?\s*tokens\b|…\s*\(|[·•]\s*\d+m\s*\d+s|ctrl\+c\b[^\n]{0,18}\b(?:stop|cancel|interrupt)/i;
 // Recently SENT input per session (keystrokes / mouse reports / pastes). Used to suppress
 // PTY-echoed keystrokes so that user typing/interaction does NOT flip the status dot to
 // busy or re-rank the session. Keeps the last ~256 chars with a send timestamp.
