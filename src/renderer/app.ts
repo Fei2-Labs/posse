@@ -1818,6 +1818,16 @@ function statusDbg(event: string, id: string, detail?: string): void {
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
 const recentDataBuffer: Map<string, string> = new Map();
+// Tiny rolling carry used ONLY for the WORKING test. Holds the last ~64 chars of raw output so a
+// spinner split across two pty chunks still matches — but small enough that a finished agent's
+// result/prompt text pushes any old spinner word OUT of the window within one or two chunks. This
+// is deliberately NOT recentDataBuffer (500 chars), whose long tail kept re-matching a stale
+// spinner on later idle repaints and pinned the dot orange after a task finished (#34 follow-up).
+const workCheckCarry: Map<string, string> = new Map();
+// Timestamp of the last REAL working signal (last chunk that matched WORKING_RE). The busy idle-
+// timeout decays off this instead of re-testing a stale buffer: if no working chunk has arrived
+// for ~3.5s the spinner has stopped being repainted → resolve the dot (grey/green).
+const sessionLastWorkingAt: Map<string, number> = new Map();
 // Real "agent is WORKING" indicator. Drives the orange/busy dot from a genuine working signal
 // instead of "any visible byte = busy" — idle agent TUIs continuously repaint a status line/
 // spinner, so raw-byte busy pulsed orange on idle sessions. These strings are the ground-truth
@@ -4180,6 +4190,8 @@ function clearSessionState(id: string): void {
   clearTimeout(unreadTimers.get(id));
   unreadTimers.delete(id);
   recentDataBuffer.delete(id);
+  workCheckCarry.delete(id);
+  sessionLastWorkingAt.delete(id);
   sessionLastAttachAt.delete(id);
   sessionTitleLocked.delete(id);
   // NOTE: don't unpin here — pins are keyed by conversationKey (not the ephemeral
@@ -4907,17 +4919,24 @@ window.posse.onPtyData((id, data) => {
     // ROOT-CAUSE busy gate: drive "busy" (orange dot) from a real WORKING indicator, not from
     // raw visible bytes. Idle agent TUIs continuously repaint a status line/spinner, so "any
     // visible output = busy" pulsed orange on idle sessions (and 3s later, via the busy idle-
-    // timeout, flipped them green). Compute the recent buffer locally (2000-char tail — longer
-    // than the prompt buffer's -500 because the working line may be a line or two back) and test
-    // for a WORKING indicator. This does NOT clobber recentDataBuffer; that is still accumulated
-    // below for prompt/waiting detection.
-    const buf = ((recentDataBuffer.get(id) || '') + data).slice(-2000);
-    const plainBuf = buf
+    // timeout, flipped them green).
+    //
+    // CRITICAL (#34 follow-up): test WORKING against the CURRENT chunk plus only a tiny carryover,
+    // NOT the 500-char recentDataBuffer history. A working agent re-emits its spinner in essentially
+    // every chunk, so the current chunk (or the 64-char carry bridging a spinner split across two
+    // chunks) matches while it's working. A FINISHED agent emits result/prompt text that fills the
+    // carry and pushes the old spinner word out of the 64-char window — so a later idle repaint no
+    // longer re-matches stale spinner text and the dot can resolve. (The old 2000-char window kept
+    // a just-finished "Architecting…" alive and re-matched it forever.)
+    const carry = workCheckCarry.get(id) || '';
+    const rawWin = carry + data;
+    const plainWin = rawWin
       .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, ''); // OSC (terminated or dangling)
-    const working = WORKING_RE.test(plainBuf);
+    workCheckCarry.set(id, rawWin.slice(-64)); // keep only ~64 chars to bridge a spinner split across chunks
+    const working = WORKING_RE.test(plainWin);
     if (STATUS_DBG) {
-      statusDbg('work-check', id, `working=${working} tail=${JSON.stringify(plainBuf.slice(-60))}`);
+      statusDbg('work-check', id, `working=${working} tail=${JSON.stringify(plainWin.slice(-60))}`);
     }
 
     if (working) {
@@ -4925,6 +4944,8 @@ window.posse.onPtyData((id, data) => {
       // and clear the old "pending" (green dot).
       statusDbg('time-bump', id, 'cause=ptydata');
       sessionUpdateTimes.set(id, Date.now());
+      // Record the last REAL working signal — the busy idle-timeout decays off this timestamp.
+      sessionLastWorkingAt.set(id, Date.now());
       const prevBusy = sessionBusy.has(id);
       const prevUnread = sessionUnread.has(id);
       statusDbg('busy-set', id, 'cause=ptydata');
@@ -5024,18 +5045,17 @@ window.posse.onPtyData((id, data) => {
           if (!sessionBusy.has(id)) return;
           // Before greening: is the session STILL working? During a work gap (a tool running, or
           // "Waiting for N background agent to finish") there's no NEW output for 3s, but the
-          // working indicator (spinner / waiting line) is still on screen. Re-test the recent
-          // buffer — if it still shows a working indicator, the agent is working, just quiet:
-          // keep the orange dot and re-check later instead of false-greening mid-work.
-          const plainRecent = (recentDataBuffer.get(id) || '')
-            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '');
-          if (WORKING_RE.test(plainRecent)) {
+          // spinner keeps being repainted. Decay off the LAST REAL working signal instead of re-
+          // testing a buffer: if a working chunk arrived within the last ~3.5s the agent is still
+          // working (just quiet between repaints) → keep orange and re-check. Once the spinner
+          // stops being repainted, no fresh working chunk arrives, the timestamp ages out, and the
+          // dot resolves — even though stale spinner text may still sit in some buffer (#34).
+          if (Date.now() - (sessionLastWorkingAt.get(id) ?? 0) < 3500) {
             statusDbg('busy-timeout-stillworking', id, 'cause=busy-timeout');
             unreadTimers.set(id, recheckBusy());
             return;
           }
-          // Working indicator gone → the agent finished. Resolve the dot.
+          // No fresh working signal → the agent finished. Resolve the dot.
           recentDataBuffer.delete(id);
           statusDbg('busy-timeout-clear', id, 'cause=busy-timeout');
           sessionBusy.delete(id);
