@@ -455,12 +455,14 @@ export class TerminalManager {
     terminal.open(container);
     terminal.onData((data) => onData(data));
 
-    // Shift+Enter inserts a literal newline (LF) instead of submitting. Plain Enter keeps the
-    // default behavior (xterm sends CR `\r`, which submits). Returning false suppresses xterm's
-    // own handling of this key event so it does NOT also send the default `\r`.
+    // Shift+Enter inserts a newline instead of submitting. We send the meta-Enter sequence
+    // ESC+CR (`\x1b\r`, what Option/Alt+Enter emits), which Claude Code / Codex and other
+    // readline/Ink CLIs interpret as "insert newline, don't submit". A raw `\n` does NOT work:
+    // those CLIs treat both `\r` and `\n` as submit, so it behaves like plain Enter. Plain Enter
+    // keeps xterm's default (`\r`, submit). Returning false suppresses xterm's own `\r`.
     terminal.attachCustomKeyEventHandler((event: KeyboardEvent): boolean => {
       if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
-        onData('\n');
+        onData('\x1b\r');
         return false;
       }
       return true;
