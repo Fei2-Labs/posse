@@ -154,6 +154,9 @@ declare global {
       connectionsBindWindow: (id: string) => Promise<{ ok: boolean; error?: string }>;
       windowOpenWithConnection: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onConnectionChanged: (cb: (id: string) => void) => void;
+      // Status-dot debug logger (permanent, default-OFF, zero-cost when off)
+      debugStatusEnabled: () => Promise<boolean>;
+      debugStatusLog: (line: string) => void;
     };
   }
 }
@@ -1797,6 +1800,19 @@ const sessionUnread: Set<string> = new Set();
 const sessionBusy: Set<string> = new Set();
 // Waiting state (red warning triangle: AI paused, waiting for the user's decision)
 const sessionWaiting: Set<string> = new Set();
+
+// ========== Status-dot debug logger (permanent, default-OFF, zero-cost when off) ==========
+// STATUS_DBG is fetched ONCE at startup (see bottom of file). When false, statusDbg() returns
+// immediately — no IPC, no string building — so the hot onPtyData path pays nothing.
+// Enable WITHOUT a rebuild: `touch ~/.posse-debug/ON` then REOPEN Posse (the renderer re-fetches
+// the flag on load). Logs append to ~/.posse-debug/status.log.
+let STATUS_DBG = false;
+function statusDbg(event: string, id: string, detail?: string): void {
+  if (!STATUS_DBG) return;
+  const active = termManager.getActiveId();
+  const line = `${new Date().toISOString()} ${event} ${String(id).slice(0, 6)} active=${active?.slice(0, 6) || '-'} busy=${sessionBusy.has(id)} unread=${sessionUnread.has(id)} t=${sessionUpdateTimes.get(id) || 0} ${detail || ''}`;
+  window.posse.debugStatusLog(line);
+}
 // Unread delay timer (idle-timeout detection)
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
@@ -1890,6 +1906,7 @@ const termManager = new TerminalManager(terminalContent, (id, cols, rows) => {
   // here. Mark the resize so the SIGWINCH full-screen repaint that follows is suppressed in
   // onPtyData (see sessionLastResizeAt).
   sessionLastResizeAt.set(id, Date.now());
+  statusDbg('resize', id, `cols=${cols} rows=${rows}`);
   window.posse.resizePty(id, cols, rows);
 });
 
@@ -3240,6 +3257,7 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
 
 function renderSessionList(): void {
   const activeId = termManager.getActiveId();
+  statusDbg('render', activeId || '', `liveCount=${sessionTitles.size}`);
 
   // Sync session status to the main process (read by the mobile client)
   syncSessionStatusToMain();
@@ -3790,6 +3808,7 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
 function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuffer = false): void {
   sessionTitles.set(info.id, info.title);
   sessionThemes.set(info.id, info.themeId);
+  statusDbg('time-bump', info.id, 'cause=attach');
   sessionUpdateTimes.set(info.id, createdAt);
   sessionCreateTimes.set(info.id, createdAt);
   sessionCwds.set(info.id, info.cwd);
@@ -4072,6 +4091,7 @@ async function createSession(): Promise<boolean> {
 }
 
 function switchSession(id: string): void {
+  statusDbg('switchSession', id, `from=${termManager.getActiveId()?.slice(0, 6) || '-'}`);
   // Ensure we switch back from the chat view to the terminal view
   switchToTerminal();
 
@@ -4089,7 +4109,9 @@ function switchSession(id: string): void {
   if (sessCwd) { selectedProjectPath = sessCwd; void fetchDirty(sessCwd); }
 
   // User switched to this session → clear all status indicators (yellow/green → gray)
+  statusDbg('unread-clear', id, 'cause=switchSession');
   const hadUnread = sessionUnread.delete(id);
+  statusDbg('busy-clear', id, 'cause=switchSession');
   const hadBusy = sessionBusy.delete(id);
   const hadWaiting = sessionWaiting.delete(id);
   // Only re-render the list when switching to a different session, to avoid rebuilding the DOM and breaking dblclick
@@ -4134,7 +4156,9 @@ function clearSessionState(id: string): void {
   sessionThemes.delete(id);
   sessionUpdateTimes.delete(id);
   sessionCreateTimes.delete(id);
+  statusDbg('unread-clear', id, 'cause=clearSessionState');
   sessionUnread.delete(id);
+  statusDbg('busy-clear', id, 'cause=clearSessionState');
   sessionBusy.delete(id);
   sessionWaiting.delete(id);
   clearTimeout(unreadTimers.get(id));
@@ -4775,6 +4799,10 @@ async function openSshSession(host: string): Promise<void> {
 
 window.posse.onPtyData((id, data) => {
   termManager.write(id, data);
+  if (STATUS_DBG) {
+    const hex = Array.from(data.slice(0, 40)).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+    statusDbg('onPtyData', id, `len=${data.length} hex=${hex}`);
+  }
   // Track status for all sessions (busy/waiting), so the state survives switching away and back
   const activeId = termManager.getActiveId();
   if (sessionTitles.has(id)) {
@@ -4800,11 +4828,14 @@ window.posse.onPtyData((id, data) => {
     // suppress when the residual is fully contained in recent input; if there is extra content
     // beyond the echo, that's real agent output and must flip busy + bump the sort time.
     let visible = stripped;
+    // Debug-only: track WHICH suppressor zeroed the chunk (echo|mouse|resize|strip).
+    let zeroedBy = 'strip';
     const recentInput = sessionRecentInput.get(id);
     if (visible.trim().length > 0 && recentInput && Date.now() - recentInput.at < 500) {
       const trimmed = visible.trim();
       if (recentInput.data.includes(trimmed)) {
         visible = ''; // echoed keystrokes only — cosmetic
+        zeroedBy = 'echo';
       }
     }
     // Mouse-redraw suppression: if visible content arrives within 250ms of US sending a mouse
@@ -4815,6 +4846,7 @@ window.posse.onPtyData((id, data) => {
     const lastMouseAt = sessionLastMouseInputAt.get(id);
     if (visible.trim().length > 0 && lastMouseAt !== undefined && Date.now() - lastMouseAt < 250) {
       visible = '';
+      zeroedBy = 'mouse';
     }
     // Resize-repaint suppression: if visible content arrives within 1000ms of US resizing/
     // refitting this session (ResizeObserver, focus, periodic fit, or switching to it), it's
@@ -4827,10 +4859,14 @@ window.posse.onPtyData((id, data) => {
     const lastResizeAt = sessionLastResizeAt.get(id);
     if (visible.trim().length > 0 && lastResizeAt !== undefined && Date.now() - lastResizeAt < 1000) {
       visible = '';
+      zeroedBy = 'resize';
     }
 
     const cosmeticOnly = visible.trim().length === 0;
     if (cosmeticOnly) {
+      // zeroedBy = the suppressor that emptied the chunk: echo|mouse|resize, or 'strip' when it
+      // was purely ANSI/control bytes (no explicit suppressor fired).
+      statusDbg('cosmetic', id, `which=${zeroedBy}`);
       // Still accumulate recent data so cross-chunk prompt detection keeps working.
       // Note: deliberately do NOT bump sessionUpdateTimes here — cosmetic/echo traffic must
       // not promote/re-rank the session row.
@@ -4851,14 +4887,20 @@ window.posse.onPtyData((id, data) => {
       .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, ''); // OSC (terminated or dangling)
     const working = WORKING_RE.test(plainBuf);
+    if (STATUS_DBG) {
+      statusDbg('work-check', id, `working=${working} tail=${JSON.stringify(plainBuf.slice(-60))}`);
+    }
 
     if (working) {
       // Real agent work → bump the sort timestamp (re-rank the row), show "busy" (orange dot)
       // and clear the old "pending" (green dot).
+      statusDbg('time-bump', id, 'cause=ptydata');
       sessionUpdateTimes.set(id, Date.now());
       const prevBusy = sessionBusy.has(id);
       const prevUnread = sessionUnread.has(id);
+      statusDbg('busy-set', id, 'cause=ptydata');
       sessionBusy.add(id);
+      statusDbg('unread-clear', id, 'cause=ptydata-working');
       sessionUnread.delete(id);
       if (!prevBusy || prevUnread) renderSessionList();
     }
@@ -4912,7 +4954,9 @@ window.posse.onPtyData((id, data) => {
       unreadTimers.delete(id);
       const wasWaiting = sessionWaiting.has(id);
       sessionWaiting.add(id);
+      statusDbg('busy-clear', id, 'cause=decision-prompt');
       const wasBusy = sessionBusy.delete(id);
+      statusDbg('unread-clear', id, 'cause=decision-prompt');
       const wasUnread = sessionUnread.delete(id);
       if (!wasWaiting || wasBusy || wasUnread) renderSessionList();
       return;
@@ -4931,10 +4975,12 @@ window.posse.onPtyData((id, data) => {
       clearTimeout(unreadTimers.get(id));
       unreadTimers.delete(id);
       recentDataBuffer.delete(id);
+      statusDbg('busy-clear', id, 'cause=prompt');
       const wasBusy = sessionBusy.delete(id);
       const hadUnread = sessionUnread.has(id);
       // The active session goes straight to gray (the user is watching it); inactive sessions are marked pending (green dot)
       if (id !== activeId && !sessionUnread.has(id)) {
+        statusDbg('unread-set', id, 'cause=prompt');
         sessionUnread.add(id);
       }
       const nowUnread = sessionUnread.has(id);
@@ -4948,9 +4994,11 @@ window.posse.onPtyData((id, data) => {
         recentDataBuffer.delete(id);
         // Timeout fallback: if still on the yellow dot, switch to green or gray
         if (sessionBusy.has(id)) {
+          statusDbg('busy-timeout-clear', id, 'cause=busy-timeout');
           sessionBusy.delete(id);
           const currentActiveId = termManager.getActiveId();
           if (id !== currentActiveId) {
+            statusDbg('unread-set', id, 'cause=busy-timeout');
             sessionUnread.add(id);
           }
           renderSessionList();
@@ -4964,6 +5012,7 @@ window.posse.onTitleUpdate((id, title) => {
   if (sessionTitleLocked.has(id)) return;
   if (sessionTitles.has(id)) {
     sessionTitles.set(id, title);
+    statusDbg('time-bump', id, 'cause=title-update');
     sessionUpdateTimes.set(id, Date.now());
     renderSessionList();
     updateSessionTitleBar();
@@ -5217,9 +5266,15 @@ setInterval(() => {
 // only when a value changed and is a no-op on remote connections.
 setInterval(() => { refreshDirtyForVisibleProjects(); }, 20000);
 // Also refresh on window focus (the user likely committed/changed files in another app/terminal).
-window.addEventListener('focus', () => { refreshDirtyForVisibleProjects(); });
+window.addEventListener('focus', () => { statusDbg('focus', termManager.getActiveId() || ''); refreshDirtyForVisibleProjects(); });
 // First pass shortly after load so badges/title populate without waiting a full interval.
 setTimeout(() => { refreshDirtyForVisibleProjects(); }, 1500);
+
+// ========== Status-dot debug logger: fetch enabled state ONCE at startup ==========
+// When the flag is on (POSSE_STATUS_DEBUG=1 or ~/.posse-debug/ON exists), statusDbg() starts
+// writing to ~/.posse-debug/status.log. Toggling ON at runtime requires reopening Posse so the
+// renderer re-fetches this value.
+window.posse.debugStatusEnabled().then((v) => { STATUS_DBG = v; }).catch(() => { /* default OFF */ });
 
 // ========== Sidebar arrow-key session switching ==========
 

@@ -240,4 +240,10 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('subscription-token:clear') as Promise<{ ok: boolean; error?: string; status?: { set: boolean; maskedSuffix?: string } }>,
   onConnectionChanged: (cb: (id: string) => void) =>
     ipcRenderer.on('connection:changed', (_e, id) => cb(id)),
+
+  // ========== Status-dot debug logger (permanent, default-OFF, zero-cost when off) ==========
+  // Renderer fetches the enabled state ONCE at startup; when false, statusDbg() is a no-op.
+  // Enable without rebuild: `touch ~/.posse-debug/ON` then reopen Posse. Log: ~/.posse-debug/status.log
+  debugStatusEnabled: () => ipcRenderer.invoke('debug:status-enabled') as Promise<boolean>,
+  debugStatusLog: (line: string) => ipcRenderer.send('debug:status-log', line),
 });

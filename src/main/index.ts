@@ -64,6 +64,31 @@ let watchingCwd: string | null = null;
 
 import * as os from 'os';
 
+// ========== Status-dot debug logger (permanent, default-OFF, zero-cost when off) ==========
+// Enable WITHOUT a rebuild: `touch ~/.posse-debug/ON` then reopen Posse.
+// Or set env POSSE_STATUS_DEBUG=1. Logs append to ~/.posse-debug/status.log.
+// The flag file is re-stat'd at most once per 2s (cached) so toggling doesn't need a
+// restart but it's not a syscall per event.
+const POSSE_DEBUG_DIR = path.join(os.homedir(), '.posse-debug');
+const POSSE_DEBUG_FLAG = path.join(POSSE_DEBUG_DIR, 'ON');
+const POSSE_DEBUG_LOG = path.join(POSSE_DEBUG_DIR, 'status.log');
+const STATUS_DEBUG_ENV = process.env.POSSE_STATUS_DEBUG === '1';
+let statusDebugCached = false;
+let statusDebugCheckedAt = 0;
+function statusDebugEnabled(): boolean {
+  if (STATUS_DEBUG_ENV) return true;
+  const now = Date.now();
+  if (now - statusDebugCheckedAt > 2000) {
+    statusDebugCheckedAt = now;
+    try {
+      statusDebugCached = fs.existsSync(POSSE_DEBUG_FLAG);
+    } catch {
+      statusDebugCached = false;
+    }
+  }
+  return statusDebugCached;
+}
+
 const PASTE_IMAGE_DIR = path.join(os.tmpdir(), 'posse-paste');
 
 // Session notification state
@@ -1776,6 +1801,21 @@ function registerIPC(): void {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win) win.setTitle(title);
     else if (mainWindow) mainWindow.setTitle(title);
+  });
+
+  // ========== Status-dot debug logger IPC (permanent, default-OFF) ==========
+  // Renderer reads this ONCE at startup → its module-level STATUS_DBG boolean.
+  // (Toggling ON requires reopening the window so the renderer re-fetches.)
+  ipcMain.handle('debug:status-enabled', () => statusDebugEnabled());
+  // Fire-and-forget write path: never throws, no-op when disabled.
+  ipcMain.on('debug:status-log', (_e, line: string) => {
+    try {
+      if (!statusDebugEnabled()) return;
+      fs.mkdirSync(POSSE_DEBUG_DIR, { recursive: true });
+      fs.appendFileSync(POSSE_DEBUG_LOG, String(line) + '\n');
+    } catch {
+      // never throw — debug logging must not affect app behavior
+    }
   });
 
   // Create terminal
