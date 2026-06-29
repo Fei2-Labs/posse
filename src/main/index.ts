@@ -1756,7 +1756,7 @@ async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<Pro
       addSession(live.cwd, {
         id: live.id,
         title: live.title || live.presetCommand || 'Session',
-        mtimeMs: live.createdAt || Date.now(),
+        mtimeMs: live.lastActivityMs || live.createdAt || Date.now(),
         resumeCommand: live.resumeCommand || '',
         agent: normAgent(live.provider || 'claude'),
         sourcePath: '',
