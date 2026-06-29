@@ -1800,6 +1800,14 @@ const sessionWaiting: Set<string> = new Set();
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
 const recentDataBuffer: Map<string, string> = new Map();
+// Real "agent is WORKING" indicator. Drives the orange/busy dot from a genuine working signal
+// instead of "any visible byte = busy" — idle agent TUIs continuously repaint a status line/
+// spinner, so raw-byte busy pulsed orange on idle sessions. These strings are the ground-truth
+// working indicators captured across the 4 supported agent CLIs (Claude Code, OpenAI Codex,
+// Kiro, GitHub Copilot CLI): `thinking`, `Running …`, `<word>… (`, `… 89.5k tokens · 5m 32s)`,
+// `press esc to interrupt`, `ctrl+c to cancel`. Idle prompts (`│ > │  ? for shortcuts`,
+// `(! to manage · ctrl+o to expand)`, shell prompts) deliberately do NOT match.
+const WORKING_RE = /\bthinking\b|\brunning\b|\besc(?:ape)?\b[^\n]{0,18}\b(?:interrupt|cancel|stop)\b|\b\d+(?:\.\d+)?k?\s*tokens\b|…\s*\(|[·•]\s*\d+m\s*\d+s|ctrl\+c\b[^\n]{0,18}\b(?:stop|cancel|interrupt)/i;
 // Recently SENT input per session (keystrokes / mouse reports / pastes). Used to suppress
 // PTY-echoed keystrokes so that user typing/interaction does NOT flip the status dot to
 // busy or re-rank the session. Keeps the last ~256 chars with a send timestamp.
@@ -4742,15 +4750,33 @@ window.posse.onPtyData((id, data) => {
       return; // no busy/unread/waiting mutation, no prompt/timeout logic, no render
     }
 
-    // Real visible agent output → NOW bump the sort timestamp (re-rank the row).
-    sessionUpdateTimes.set(id, Date.now());
+    // ROOT-CAUSE busy gate: drive "busy" (orange dot) from a real WORKING indicator, not from
+    // raw visible bytes. Idle agent TUIs continuously repaint a status line/spinner, so "any
+    // visible output = busy" pulsed orange on idle sessions (and 3s later, via the busy idle-
+    // timeout, flipped them green). Compute the recent buffer locally (2000-char tail — longer
+    // than the prompt buffer's -500 because the working line may be a line or two back) and test
+    // for a WORKING indicator. This does NOT clobber recentDataBuffer; that is still accumulated
+    // below for prompt/waiting detection.
+    const buf = ((recentDataBuffer.get(id) || '') + data).slice(-2000);
+    const plainBuf = buf
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, ''); // OSC (terminated or dangling)
+    const working = WORKING_RE.test(plainBuf);
 
-    // On new output, prefer showing "busy" (yellow dot) and clear the old "pending" (green dot)
-    const prevBusy = sessionBusy.has(id);
-    const prevUnread = sessionUnread.has(id);
-    sessionBusy.add(id);
-    sessionUnread.delete(id);
-    if (!prevBusy || prevUnread) renderSessionList();
+    if (working) {
+      // Real agent work → bump the sort timestamp (re-rank the row), show "busy" (orange dot)
+      // and clear the old "pending" (green dot).
+      sessionUpdateTimes.set(id, Date.now());
+      const prevBusy = sessionBusy.has(id);
+      const prevUnread = sessionUnread.has(id);
+      sessionBusy.add(id);
+      sessionUnread.delete(id);
+      if (!prevBusy || prevUnread) renderSessionList();
+    }
+    // If NOT working: non-work output (idle status repaint, a final result line, an OSC, etc.).
+    // Do NOT add busy and do NOT bump the sort timestamp. Still accumulate recentDataBuffer and
+    // run the prompt/waiting detection below (so "waiting for input"/prompt → red and the
+    // inactive→unread-on-prompt path keep working).
 
     // Accumulate recent data for prompt detection (keep the last 500 chars)
     const prev = recentDataBuffer.get(id) || '';
