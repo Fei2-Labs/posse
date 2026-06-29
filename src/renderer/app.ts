@@ -4108,14 +4108,17 @@ function switchSession(id: string): void {
   const sessCwd = sessionCwds.get(id);
   if (sessCwd) { selectedProjectPath = sessCwd; void fetchDirty(sessCwd); }
 
-  // User switched to this session → clear all status indicators (yellow/green → gray)
+  // User switched to this session → clear the "unread" (green) + "waiting" (red) indicators
+  // (you're now looking at it). Do NOT clear "busy" (orange): a session you switch to may still
+  // be actively working — orange must persist while the agent works; viewing it doesn't stop the
+  // work. Clearing busy here made clicking a working session flash grey, then re-orange a second
+  // later once the next spinner frame arrived. Busy clears on its own when the agent finishes
+  // (prompt detected) or via the idle-timeout once the working indicator is gone.
   statusDbg('unread-clear', id, 'cause=switchSession');
   const hadUnread = sessionUnread.delete(id);
-  statusDbg('busy-clear', id, 'cause=switchSession');
-  const hadBusy = sessionBusy.delete(id);
   const hadWaiting = sessionWaiting.delete(id);
   // Only re-render the list when switching to a different session, to avoid rebuilding the DOM and breaking dblclick
-  if (prev !== id || hadUnread || hadBusy || hadWaiting) renderSessionList();
+  if (prev !== id || hadUnread || hadWaiting) renderSessionList();
   updateSessionTitleBar();
   void renderFileTree();
   renderFileStatusbar();
@@ -4989,11 +4992,25 @@ window.posse.onPtyData((id, data) => {
       // No prompt detected: fall back to an idle timeout (no new output for 15s → yellow → green/gray)
       // Avoids being stuck on the yellow dot forever when the prompt isn't matched
       clearTimeout(unreadTimers.get(id));
-      unreadTimers.set(id, setTimeout(() => {
-        unreadTimers.delete(id);
-        recentDataBuffer.delete(id);
-        // Timeout fallback: if still on the yellow dot, switch to green or gray
-        if (sessionBusy.has(id)) {
+      unreadTimers.set(id, function recheckBusy() {
+        return setTimeout(() => {
+          unreadTimers.delete(id);
+          if (!sessionBusy.has(id)) return;
+          // Before greening: is the session STILL working? During a work gap (a tool running, or
+          // "Waiting for N background agent to finish") there's no NEW output for 3s, but the
+          // working indicator (spinner / waiting line) is still on screen. Re-test the recent
+          // buffer — if it still shows a working indicator, the agent is working, just quiet:
+          // keep the orange dot and re-check later instead of false-greening mid-work.
+          const plainRecent = (recentDataBuffer.get(id) || '')
+            .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '');
+          if (WORKING_RE.test(plainRecent)) {
+            statusDbg('busy-timeout-stillworking', id, 'cause=busy-timeout');
+            unreadTimers.set(id, recheckBusy());
+            return;
+          }
+          // Working indicator gone → the agent finished. Resolve the dot.
+          recentDataBuffer.delete(id);
           statusDbg('busy-timeout-clear', id, 'cause=busy-timeout');
           sessionBusy.delete(id);
           const currentActiveId = termManager.getActiveId();
@@ -5002,8 +5019,8 @@ window.posse.onPtyData((id, data) => {
             sessionUnread.add(id);
           }
           renderSessionList();
-        }
-      }, 3000));
+        }, 3000);
+      }());
     }
   }
 });
