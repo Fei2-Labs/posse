@@ -4929,12 +4929,18 @@ window.posse.onPtyData((id, data) => {
     // longer re-matches stale spinner text and the dot can resolve. (The old 2000-char window kept
     // a just-finished "Architecting…" alive and re-matched it forever.)
     const carry = workCheckCarry.get(id) || '';
-    const rawWin = carry + data;
-    const plainWin = rawWin
+    const plainChunk = data
       .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, ''); // OSC (terminated or dangling)
-    workCheckCarry.set(id, rawWin.slice(-64)); // keep only ~64 chars to bridge a spinner split across chunks
-    const working = WORKING_RE.test(plainWin);
+    const plainWin = carry + plainChunk;
+    // Carry only the last readable tail (not raw ANSI bytes), else tiny cursor/color fragments from
+    // multiple chunks can accidentally concatenate into a fake working word (seen with a silent
+    // session whose carry assembled a bogus 'thinking…'). 32 visible chars is enough to bridge a
+    // spinner split across chunks (e.g. 'Capitulating…') while making accidental cross-chunk word
+    // formation much harder.
+    workCheckCarry.set(id, plainWin.slice(-32));
+    const visibleForWork = plainWin.trim();
+    const working = visibleForWork.length >= 6 && WORKING_RE.test(visibleForWork);
     if (STATUS_DBG) {
       statusDbg('work-check', id, `working=${working} tail=${JSON.stringify(plainWin.slice(-60))}`);
     }
