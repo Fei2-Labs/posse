@@ -1927,6 +1927,7 @@ function registerIPC(): void {
       provider: s.provider,
       rawBuffer: s.rawBuffer,
       agentSessionId: s.agentSessionId,
+      lastActivityMs: s.lastActivityMs,
     }));
   });
 

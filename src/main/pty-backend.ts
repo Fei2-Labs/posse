@@ -10,6 +10,7 @@ export interface PtySessionSnapshot {
   themeId: string;
   provider: string | null;
   createdAt: number;
+  lastActivityMs: number;     // Timestamp of the last PTY output chunk (real last-activity).
   resumeId: string | null;
   resumeCommand: string | null;
   agentSessionId: string | null;

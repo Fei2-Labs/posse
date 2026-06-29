@@ -39,6 +39,7 @@ type PtySessionInfo = {
   rawBuffer?: string;
   agentSessionId?: string | null;
   resumeId?: string | null;
+  lastActivityMs?: number;
 };
 
 declare global {
@@ -1849,6 +1850,12 @@ const sessionLastMouseInputAt: Map<string, number> = new Map();
 // repaint (clear + redraw). That repaint is real visible bytes but NOT agent work. Record
 // when we last resized a session so onPtyData can treat the repaint that follows as cosmetic.
 const sessionLastResizeAt: Map<string, number> = new Map();
+// When a session is (re)attached after an app restart, the backend replays its full rawBuffer
+// scrollback back through onPtyData. That historical scrollback contains the agent's PAST spinner
+// text ("Embellishing…", "Waiting for N background agent…") so WORKING_RE matches the replay and an
+// idle restored session pulses orange. Record the attach time so onPtyData can treat the replay burst
+// as cosmetic for a short window (genuine LIVE output after the window still flips busy normally).
+const sessionLastAttachAt: Map<string, number> = new Map();
 // Sessions with a manually edited title (no longer auto-updated)
 const sessionTitleLocked: Set<string> = new Set();
 // Pinned sessions — stored as canonical conversationKey()s (NOT ephemeral live PTY
@@ -3809,7 +3816,10 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   sessionTitles.set(info.id, info.title);
   sessionThemes.set(info.id, info.themeId);
   statusDbg('time-bump', info.id, 'cause=attach');
-  sessionUpdateTimes.set(info.id, createdAt);
+  // Sort time = real last-activity when the backend reports it (restored sessions), else createdAt.
+  // Without this, restoreDaemonSessions passes createdAt=now() for ALL restored sessions, so every
+  // Active row sorted to the top showing "now". sessionCreateTimes stays createdAt (true create order).
+  sessionUpdateTimes.set(info.id, info.lastActivityMs ?? createdAt);
   sessionCreateTimes.set(info.id, createdAt);
   sessionCwds.set(info.id, info.cwd);
   sessionDisplayNames.set(info.id, info.displayName);
@@ -3819,6 +3829,9 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
     sessionAgentId.set(info.id, attachUuid);
     sessionResumeId.set(info.id, attachUuid);
   }
+  // Record when this session was (re)attached so onPtyData can treat the immediate rawBuffer replay
+  // burst as cosmetic (historical scrollback must not flip busy/unread or bump the sort time).
+  sessionLastAttachAt.set(info.id, Date.now());
   termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithAutoReset(info.id, data); });
   if (replayRawBuffer && info.rawBuffer) {
     termManager.write(info.id, info.rawBuffer);
@@ -4167,6 +4180,7 @@ function clearSessionState(id: string): void {
   clearTimeout(unreadTimers.get(id));
   unreadTimers.delete(id);
   recentDataBuffer.delete(id);
+  sessionLastAttachAt.delete(id);
   sessionTitleLocked.delete(id);
   // NOTE: don't unpin here — pins are keyed by conversationKey (not the ephemeral
   // pty id) so a pinned session stays pinned after it closes / is resumed (#38).
@@ -4863,6 +4877,18 @@ window.posse.onPtyData((id, data) => {
     if (visible.trim().length > 0 && lastResizeAt !== undefined && Date.now() - lastResizeAt < 1000) {
       visible = '';
       zeroedBy = 'resize';
+    }
+    // Replay-burst suppression: right after an app restart the backend replays the session's full
+    // rawBuffer scrollback through onPtyData. That historical text includes the agent's PAST spinner
+    // lines ("Embellishing…", "Waiting for N background agent…"), which WORKING_RE would match and flip
+    // an idle restored session to busy/orange. Treat any visible content within 4000ms of (re)attach as
+    // cosmetic so the replayed scrollback can't flip busy/unread or bump the sort time. The window is
+    // wide (4s) because replay can arrive as several large chunks over a second or two. A session that is
+    // genuinely WORKING at restart re-flips busy on its next live spinner frame after the replay settles.
+    const lastAttachAt = sessionLastAttachAt.get(id);
+    if (visible.trim().length > 0 && lastAttachAt !== undefined && Date.now() - lastAttachAt < 4000) {
+      visible = '';
+      zeroedBy = 'replay';
     }
 
     const cosmeticOnly = visible.trim().length === 0;

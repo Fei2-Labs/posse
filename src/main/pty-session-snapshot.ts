@@ -14,6 +14,7 @@ export function toPtySessionSnapshot(session: PtySession): PtySessionSnapshot {
     themeId: session.themeId,
     provider: session.provider,
     createdAt: session.createdAt,
+    lastActivityMs: session.lastActivityMs,
     resumeId: session.resumeId,
     resumeCommand: session.resumeCommand,
     agentSessionId: session.agentSessionId,
