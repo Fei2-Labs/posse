@@ -1809,6 +1809,11 @@ const sessionRecentInput: Map<string, { data: string; at: number }> = new Map();
 // response — emitting REAL visible bytes that aren't agent work. Record when we last sent a
 // mouse report so onPtyData can treat the redraw that immediately follows as cosmetic.
 const sessionLastMouseInputAt: Map<string, number> = new Map();
+// When a session's terminal is resized/refit (ResizeObserver, window focus, periodic fit
+// check, or switching TO the session), the agent receives SIGWINCH and emits a FULL-SCREEN
+// repaint (clear + redraw). That repaint is real visible bytes but NOT agent work. Record
+// when we last resized a session so onPtyData can treat the repaint that follows as cosmetic.
+const sessionLastResizeAt: Map<string, number> = new Map();
 // Sessions with a manually edited title (no longer auto-updated)
 const sessionTitleLocked: Set<string> = new Set();
 // Pinned sessions — stored as canonical conversationKey()s (NOT ephemeral live PTY
@@ -1862,6 +1867,10 @@ function syncSessionStatusToMain(): void {
 
 // Terminal manager
 const termManager = new TerminalManager(terminalContent, (id, cols, rows) => {
+  // Central resize choke: every refit (ResizeObserver / focus / periodic / create) flows
+  // here. Mark the resize so the SIGWINCH full-screen repaint that follows is suppressed in
+  // onPtyData (see sessionLastResizeAt).
+  sessionLastResizeAt.set(id, Date.now());
   window.posse.resizePty(id, cols, rows);
 });
 
@@ -3969,6 +3978,11 @@ function switchSession(id: string): void {
   // Ensure we switch back from the chat view to the terminal view
   switchToTerminal();
 
+  // Switching TO a session activates + refits its terminal, which makes the agent emit a
+  // full-screen SIGWINCH repaint even when cols/rows are unchanged. Mark the resize up front
+  // so that repaint is treated as cosmetic in onPtyData (no busy/unread/timestamp bump).
+  sessionLastResizeAt.set(id, Date.now());
+
   const prev = termManager.getActiveId();
   termManager.switchTo(id);
 
@@ -4678,7 +4692,8 @@ window.posse.onPtyData((id, data) => {
       .replace(/\x1b\[20[01]~/g, '') // bracketed-paste start/end markers
       .replace(/\x1b\[[IO]/g, '') // focus in / focus out events
       .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI
-      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (terminated)
+      .replace(/\x1b\][^\x07\x1b]*$/g, '') // OSC dangling: terminator split into next chunk
       .replace(/\x1b[@-_]/g, '') // other escapes
       .replace(/[\x00-\x1f\x7f]/g, ''); // remaining C0 control chars
 
@@ -4702,6 +4717,18 @@ window.posse.onPtyData((id, data) => {
     // and any non-mouse-coincident chunk still flips busy.
     const lastMouseAt = sessionLastMouseInputAt.get(id);
     if (visible.trim().length > 0 && lastMouseAt !== undefined && Date.now() - lastMouseAt < 250) {
+      visible = '';
+    }
+    // Resize-repaint suppression: if visible content arrives within 1000ms of US resizing/
+    // refitting this session (ResizeObserver, focus, periodic fit, or switching to it), it's
+    // the agent's SIGWINCH-driven full-screen clear+redraw — not real work. Treat as cosmetic
+    // so clicking a session doesn't pulse the dot orange. Window is wider than the mouse one
+    // (250ms) because the repaint can lag the SIGWINCH. Genuine agent output >1s after a
+    // resize still flips busy normally — the agent isn't full-screen repainting except right
+    // after a resize. A session truly WORKING when switched to is suppressed for 1s only, then
+    // re-flips busy on its next real chunk.
+    const lastResizeAt = sessionLastResizeAt.get(id);
+    if (visible.trim().length > 0 && lastResizeAt !== undefined && Date.now() - lastResizeAt < 1000) {
       visible = '';
     }
 
