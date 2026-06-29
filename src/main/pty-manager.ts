@@ -30,6 +30,9 @@ export interface PtySession {
   themeId: string;
   provider: string | null;    // Model provider actually used (e.g. MiniMax, GLM)
   createdAt: number;          // Creation timestamp
+  lastActivityMs: number;     // Timestamp of the last PTY output chunk (real last-activity). Survives app
+                              // restart because the daemon outlives the app and holds this in memory; used so
+                              // restored sessions keep their real sort time instead of all showing "now".
   resumeId: string | null;    // Captured resume session ID (UUID)
   resumeCommand: string | null; // Full resume command (e.g. "claude --resume xxx")
   agentSessionId: string | null; // On-disk agent session id (uuid) this live PTY corresponds to (for dedup vs history)
@@ -509,6 +512,7 @@ export class PtyManager {
       themeId,
       provider: null,
       createdAt: Date.now(),
+      lastActivityMs: Date.now(),
       resumeId: null,
       resumeCommand: null,
       agentSessionId: null,
@@ -537,6 +541,9 @@ export class PtyManager {
       // The daemon therefore retains a large cap (desktop scrollback), and the mobile path slices a tail at send time.
       // Memory cost is ~RAW_BUFFER_MAX_BYTES per live session, negligible on desktop.
       session.rawBuffer += data;
+      // Track real last-activity time from live output. Survives app restart (held in the detached
+      // daemon's memory) so a reconnecting app can sort restored sessions by their true last activity.
+      session.lastActivityMs = Date.now();
       if (session.rawBuffer.length > RAW_BUFFER_MAX_BYTES) {
         // A direct slice may cut an ANSI escape sequence in half (a truncated ESC),
         // and on replay xterm would treat following visible chars as parameters of the broken sequence -> spinner torn across lines.

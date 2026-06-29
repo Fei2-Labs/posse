@@ -20,6 +20,7 @@ interface RemoteSessionApi {
   provider?: string | null;
   status?: string;
   createdAt?: number;
+  lastActivityMs?: number;
   themeId?: string;
 }
 
@@ -347,6 +348,7 @@ export class RemoteServerBackend implements PtyBackend {
       themeId: api.themeId ?? base?.themeId ?? 'default',
       provider: api.provider ?? base?.provider ?? null,
       createdAt: api.createdAt ?? base?.createdAt ?? Date.now(),
+      lastActivityMs: api.lastActivityMs ?? base?.lastActivityMs ?? api.createdAt ?? base?.createdAt ?? Date.now(),
       resumeId: base?.resumeId ?? null,
       resumeCommand: base?.resumeCommand ?? null,
       agentSessionId: base?.agentSessionId ?? null,

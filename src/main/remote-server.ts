@@ -659,6 +659,7 @@ export function startRemoteServer(
       provider: s.provider || getCliProvider(s.presetCommand),
       status: getSessionStatus(s.id, s.exitState),
       createdAt: s.createdAt || Date.now(),
+      lastActivityMs: s.lastActivityMs || s.createdAt || Date.now(),
     };
   }
 
