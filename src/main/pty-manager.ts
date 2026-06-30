@@ -122,16 +122,12 @@ function agentKindFromCommand(command: string): 'claude' | 'codex' | 'kiro' | 'c
 
 // If the launch command is itself a resume command, extract the uuid directly (most reliable path).
 function extractSessionIdFromLaunch(command: string): string | null {
-  const patterns: RegExp[] = [
-    /\bclaude\s+--resume\s+([\w-]+)/i,
-    /\bcodex\s+resume\s+([\w-]+)/i,
-    /\bkiro[\w-]*\s+(?:chat\s+)?--resume-id\s+([\w-]+)/i,
-    /\bcopilot\s+--resume(?:=|\s+)([\w-]+)/i,
-  ];
-  for (const re of patterns) {
-    const m = command.match(re);
-    if (m) return m[1];
-  }
+  const c = (command || '').trim();
+  let m: RegExpMatchArray | null;
+  if ((m = c.match(/\bclaude\b[\s\S]*?--resume\s+([\w-]+)/i))) return m[1];
+  if ((m = c.match(/\bcodex\b\s+resume\s+([\w-]+)/i))) return m[1];
+  if ((m = c.match(/\bkiro[\w-]*\b[\s\S]*?--resume-id\s+([\w-]+)/i))) return m[1];
+  if ((m = c.match(/\bcopilot\b[\s\S]*?--resume(?:=|\s+)([\w-]+)/i))) return m[1];
   return null;
 }
 
@@ -733,6 +729,9 @@ export class PtyManager {
     const launchedId = extractSessionIdFromLaunch(presetCommand);
     if (launchedId) {
       session.agentSessionId = launchedId;
+      session.resumeId = launchedId;
+      const launchedResume = parseResumeCommand(presetCommand);
+      session.resumeCommand = launchedResume?.command || session.resumeCommand;
     } else {
       // 2) Best-effort: a fresh agent run writes a new session file shortly after spawn.
       //    Re-scan a few times after create; never block creation, never throw.

@@ -1862,6 +1862,8 @@ function registerIPC(): void {
       displayName: getDisplayName(session.presetCommand),
       provider,
       agentSessionId: session.agentSessionId,
+      resumeId: session.resumeId,
+      lastActivityMs: session.lastActivityMs,
     };
   });
 
@@ -1927,6 +1929,7 @@ function registerIPC(): void {
       provider: s.provider,
       rawBuffer: s.rawBuffer,
       agentSessionId: s.agentSessionId,
+      resumeId: s.resumeId,
       lastActivityMs: s.lastActivityMs,
     }));
   });
