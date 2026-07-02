@@ -462,6 +462,56 @@ function Button({ isLoading, children, ...props }: ButtonProps) {
 
 ---
 
+## Full-Rebuild List Renderers: Patch-in-Place for Skipped Rebuilds (posse-specific)
+
+**Problem**: `src/renderer/app.ts`'s sidebar (`renderSessionList()`) is a full teardown/rebuild
+renderer (`sessionList.innerHTML = ''` then rebuild every row from live state). Some call paths
+intentionally SKIP the full rebuild to protect transient DOM state — e.g. the title-edit guard
+(an in-progress `<input>` mid-edit must not be torn down or it loses focus/cursor position). A
+naive skip (`if (editingSomething) return;`) silently drops ALL pending visual updates for the
+rest of the list until the edit ends or an unrelated timer forces a repaint — including
+time-sensitive indicators like a busy/status dot that should flip live.
+
+**Fix pattern**: when a full-rebuild is skipped to protect one specific element, still patch the
+OTHER elements' live-derived attributes in place, reading straight from the same source-of-truth
+state the full rebuild would have used — don't touch the protected element's subtree.
+
+```typescript
+// Reproduces the same dot logic buildLiveSessionRow() would apply on a full rebuild —
+// keep the two in sync if the status-dot logic ever changes.
+function refreshLiveDotInPlace(id: string): void {
+  const row = sessionList.querySelector(`.nav-session[data-session-id="${id}"][data-session-type="pty"]`);
+  const dot = row?.querySelector('.nav-session-dot, .nav-session-dot-warn') as HTMLElement | null;
+  if (!dot) return;
+  // ...rebuild dot.className/style from sessionBusy/sessionUnread/sessionWaiting, same as the
+  // full-rebuild path.
+}
+
+if (editingTitleId) {
+  const existingInput = sessionList.querySelector(`input[data-session-id="${editingTitleId}"]`);
+  if (existingInput && document.activeElement === existingInput) {
+    // Skip the full rebuild, but keep every OTHER row's live indicator current.
+    sessionList.querySelectorAll('.nav-session[data-session-type="pty"]').forEach((row) => {
+      const rowId = (row as HTMLElement).dataset.sessionId;
+      if (rowId && rowId !== editingTitleId) refreshLiveDotInPlace(rowId);
+    });
+    return;
+  }
+}
+```
+
+**Why**: A "skip the whole rebuild" guard is a coarse instrument — it protects the one thing that
+needed protecting (the input) but also silently stalls everything else in the same render pass.
+Any live indicator (status dot, unread badge, elapsed-time label) rendered by the same function
+needs its own light-touch, source-of-truth-reading patch path for the skip branch, or it will lag
+behind reality for the duration of whatever interaction triggered the skip.
+
+**Don't**: duplicate the dot-computation logic by hand in two places without a comment linking
+them — `buildLiveSessionRow()`'s dot branch and `refreshLiveDotInPlace()` must stay identical or
+the two paths will visibly diverge (e.g. one adds a new status color the other doesn't).
+
+---
+
 ## Quick Reference
 
 | Pattern                    | When to Use                 |

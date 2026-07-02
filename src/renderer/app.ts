@@ -2767,6 +2767,29 @@ function makeSessionPinButton(convKey: string): HTMLButtonElement {
   return btn;
 }
 
+// Apply the current busy/unread/waiting status to an existing live-session row's dot IN PLACE,
+// without touching the rest of the row. Used to keep other rows' dots live while renderSessionList()
+// is skipping the full rebuild because a title elsewhere is being edited (app.ts ~3283) — a busy
+// transition landing during that window must not wait for the edit to end (or the 60s relative-time
+// timer) before the dot goes orange.
+function refreshLiveDotInPlace(id: string): void {
+  const row = sessionList.querySelector(`.nav-session[data-session-id="${id}"][data-session-type="pty"]`);
+  const dot = row?.querySelector('.nav-session-dot, .nav-session-dot-warn') as HTMLElement | null;
+  if (!dot) return;
+  dot.className = 'nav-session-dot';
+  dot.textContent = '';
+  dot.style.color = '';
+  if (sessionWaiting.has(id)) {
+    dot.textContent = '⚠';
+    dot.classList.add('nav-session-dot-warn');
+    dot.style.color = '#ff5c4d';
+    dot.style.backgroundColor = 'transparent';
+  } else {
+    dot.style.backgroundColor = sessionStatusColor(id);
+    if (sessionBusy.has(id)) dot.classList.add('nav-session-dot-busy');
+  }
+}
+
 // Build a session row for a LIVE PTY session inside a project (compact: title + relative time)
 function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   const title = sessionTitles.get(id) || '';
@@ -3283,7 +3306,13 @@ function renderSessionList(): void {
   if (editingTitleId) {
     const existingInput = sessionList.querySelector(`input[data-session-id="${editingTitleId}"]`) as HTMLInputElement | null;
     if (existingInput && document.activeElement === existingInput) {
-      // Currently editing; skip rendering to preserve the edit state
+      // Currently editing; skip the full rebuild to preserve the edit state, but a busy/unread/
+      // waiting transition on a DIFFERENT session must still show up immediately — patch that
+      // row's dot in place instead of waiting for the edit to end or the 60s relative-time timer.
+      sessionList.querySelectorAll('.nav-session[data-session-type="pty"]').forEach((row) => {
+        const rowId = (row as HTMLElement).dataset.sessionId;
+        if (rowId && rowId !== editingTitleId) refreshLiveDotInPlace(rowId);
+      });
       return;
     }
     editingTitleId = null;
