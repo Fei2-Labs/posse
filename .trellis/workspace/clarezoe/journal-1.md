@@ -244,3 +244,36 @@ Diagnosed via live STATUS_DBG log that busy detection was correct but renderSess
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Active Sessions: sort by Project/Recent (closes #53)
+
+**Date**: 2026-07-02
+**Task**: Active Sessions: sort by Project/Recent (closes #53)
+**Branch**: `main`
+
+### Summary
+
+Added section-local sort toggle to Active Sessions header, mirroring the existing Projects-section sort pattern: Recent (time-desc, unchanged) vs Project (grouped by normalized cwd, groups ordered by most-recent activity, rows within group by recency). Persists via its own localStorage key.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a887075` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

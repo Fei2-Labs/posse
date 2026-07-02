@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
+- **Total Sessions**: 7
 - **Last Active**: 2026-07-02
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~246 | Active |
+| `journal-1.md` | ~279 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-07-02 | Active Sessions: sort by Project/Recent (closes #53) | `a887075` | `main` |
 | 6 | 2026-07-02 | Fix status-dot render skip during title-edit | `5354c2e` | `main` |
 | 5 | 2026-06-20 | Show added folder's agent sessions past global 300 cap | `ff777e5` | `main` |
 | 4 | 2026-06-19 | Fix viewed session dot staying green on cosmetic redraws (#32) | `ab3134e` | `main` |
