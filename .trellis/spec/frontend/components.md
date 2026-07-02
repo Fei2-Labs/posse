@@ -512,6 +512,23 @@ the two paths will visibly diverge (e.g. one adds a new status color the other d
 
 ---
 
+## New Header/Toolbar Buttons Need Matching CSS, Not Just a Class Name (posse-specific)
+
+**Symptom**: a JS-built button mirroring an existing control (e.g. the Active Sessions sort
+toggle mirroring `#project-sort`) gets a plausible-looking class name (`nav-section-sort-btn`)
+but no corresponding rule exists in `src/renderer/styles.css` — it renders as an unstyled native
+`<button>`, breaking sizing/alignment inside a compact row like `.nav-section-header` (28px tall).
+
+**Cause**: `app.ts` builds most sidebar DOM dynamically in JS; styling still lives entirely in
+`styles.css` keyed by class name. Adding a JS element with a new class does not create styling —
+easy to miss when the element "looks right" in the diff but was never actually run in a browser.
+
+**Fix**: whenever a new dynamically-built control mirrors an existing one, grep `styles.css` for
+the existing control's class/id first and add a matching (scaled as needed) rule for the new one
+in the same commit — don't defer it. Verify by actually running the app, not just `tsc`/build.
+
+---
+
 ## Quick Reference
 
 | Pattern                    | When to Use                 |

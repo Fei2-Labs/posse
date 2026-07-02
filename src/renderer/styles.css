@@ -3309,6 +3309,42 @@ select.ai-form-input {
   border-color: var(--accent-green);
 }
 
+/* Active Sessions section-local sort toggle (#53). Smaller footprint than #project-sort
+   since it lives inline in a 28px-tall nav-section-header, not the toolbar. */
+.nav-section-sort-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: none;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.nav-section-sort-btn .nav-section-sort-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.nav-section-sort-btn .nav-section-sort-glyph svg { width: 11px; height: 11px; display: block; }
+
+.nav-section-sort-btn:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+  border-color: var(--accent-green);
+}
+
 /* ========== Host switcher (remote host add/switch) ========== */
 .host-switcher-btn {
   display: inline-flex;

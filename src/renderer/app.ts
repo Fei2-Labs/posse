@@ -304,6 +304,17 @@ let projectSortMode: ProjectSortMode = loadProjectSort();
 // Live, lower-cased search query. Empty => no filtering, persisted collapse state is honored.
 let projectSearchQuery = '';
 
+// ========== Active Sessions section-local sort (#53) ==========
+// Independent from projectSortMode above: this only controls the ordering of the flattened
+// "Active Sessions" rows, not the Projects-section folder list.
+type ActiveSessionSortMode = 'recent' | 'project';
+const ACTIVE_SESSION_SORT_STORAGE_KEY = 'posse_active_session_sort';
+function loadActiveSessionSort(): ActiveSessionSortMode {
+  const raw = localStorage.getItem(ACTIVE_SESSION_SORT_STORAGE_KEY);
+  return raw === 'project' ? 'project' : 'recent';
+}
+let activeSessionSortMode: ActiveSessionSortMode = loadActiveSessionSort();
+
 // UI expand/collapse state (persisted to localStorage). DEFAULT for a never-touched project or
 // agent group is COLLAPSED: a project/group is only open if its key is present in the matching
 // "expanded" set. expandedProjects key = normalized project path; expandedAgentGroups key =
@@ -3277,7 +3288,7 @@ function collectPinnedSessionRows(activeId: string | null): Array<{ time: number
 // Deduped by liveSessionPinKey. A pinned live session may also appear in Pinned; that overlap
 // is intentional (not deduped across sections), so this collector does not skip pinned rows.
 function collectActiveSessionRows(activeId: string | null): Array<{ time: number; el: HTMLElement }> {
-  const out: Array<{ time: number; el: HTMLElement }> = [];
+  const out: Array<{ time: number; projectKey: string; el: HTMLElement }> = [];
   const seen = new Set<string>();
   for (const p of projects) {
     const groups = getProjectSessions(p.path);
@@ -3287,12 +3298,35 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
         if (seen.has(k)) continue;
         seen.add(k);
         const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family); appendProjectTag(el, id);
-        out.push({ time: sessionUpdateTimes.get(id) || 0, el });
+        out.push({
+          time: sessionUpdateTimes.get(id) || 0,
+          projectKey: normalizeCwd(sessionCwds.get(id) || ''),
+          el,
+        });
       }
     }
   }
-  out.sort((a, b) => b.time - a.time);
-  return out;
+
+  if (activeSessionSortMode === 'project') {
+    // Group by owning project; each group ordered by latest activity desc, and groups
+    // themselves ordered by their own most-recent activity desc (mirrors sortProjects's
+    // "Recent" semantics so the two sort controls stay conceptually consistent).
+    const groupMax = new Map<string, number>();
+    for (const row of out) {
+      const cur = groupMax.get(row.projectKey) ?? -Infinity;
+      if (row.time > cur) groupMax.set(row.projectKey, row.time);
+    }
+    out.sort((a, b) => {
+      const gDiff = (groupMax.get(b.projectKey) ?? 0) - (groupMax.get(a.projectKey) ?? 0);
+      if (gDiff !== 0) return gDiff;
+      if (a.projectKey !== b.projectKey) return a.projectKey < b.projectKey ? -1 : 1;
+      return b.time - a.time;
+    });
+  } else {
+    out.sort((a, b) => b.time - a.time);
+  }
+
+  return out.map((row) => ({ time: row.time, el: row.el }));
 }
 
 function renderSessionList(): void {
@@ -3356,6 +3390,20 @@ function renderSessionList(): void {
     label.appendChild(actIcon);
     label.appendChild(actText);
     header.appendChild(label);
+    const sortBtn = document.createElement('button');
+    sortBtn.type = 'button';
+    sortBtn.id = 'active-session-sort';
+    sortBtn.className = 'nav-section-sort-btn';
+    const sortLabel = activeSessionSortMode === 'project' ? 'Project' : 'Recent';
+    sortBtn.innerHTML = `<span class="nav-section-sort-glyph">${ICON.sort}</span><span class="nav-section-sort-label">${sortLabel}</span>`;
+    sortBtn.title = `Sort Active Sessions (current: ${sortLabel}) — click to switch`;
+    sortBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      activeSessionSortMode = activeSessionSortMode === 'recent' ? 'project' : 'recent';
+      try { localStorage.setItem(ACTIVE_SESSION_SORT_STORAGE_KEY, activeSessionSortMode); } catch { /* ignore */ }
+      renderSessionList();
+    });
+    header.appendChild(sortBtn);
     header.addEventListener('click', () => toggleSectionCollapsed('active'));
     sessionList.appendChild(header);
     if (!activeCollapsed) {
