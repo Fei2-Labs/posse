@@ -211,3 +211,36 @@ discoverClaude/CodexSessions cap at newest 300 globally, so a newly added folder
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Fix status-dot render skip during title-edit
+
+**Date**: 2026-07-02
+**Task**: Fix status-dot render skip during title-edit
+**Branch**: `main`
+
+### Summary
+
+Diagnosed via live STATUS_DBG log that busy detection was correct but renderSessionList()'s title-edit guard silently dropped all other rows' dot repaints; added refreshLiveDotInPlace() to patch other rows' dots live while the edit is in progress, plus a components.md spec entry documenting the full-rebuild-skip patch-in-place pattern.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5354c2e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

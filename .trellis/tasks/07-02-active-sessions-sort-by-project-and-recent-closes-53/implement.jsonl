@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "adding new module-level ActiveSessionSortMode state + localStorage persistence, mirroring existing ProjectSortMode; confirm repo convention"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "modifying collectActiveSessionRows + Active Sessions header render block; confirm sidebar rendering conventions"}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "new sort toggle button in Active Sessions header must match existing header/icon/button styling conventions"}

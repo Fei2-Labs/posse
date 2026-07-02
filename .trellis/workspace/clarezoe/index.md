@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
-- **Last Active**: 2026-06-20
+- **Total Sessions**: 6
+- **Last Active**: 2026-07-02
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~213 | Active |
+| `journal-1.md` | ~246 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-07-02 | Fix status-dot render skip during title-edit | `5354c2e` | `main` |
 | 5 | 2026-06-20 | Show added folder's agent sessions past global 300 cap | `ff777e5` | `main` |
 | 4 | 2026-06-19 | Fix viewed session dot staying green on cosmetic redraws (#32) | `ab3134e` | `main` |
 | 3 | 2026-06-18 | Clean stale saddism/DuoCLI refs to Fei2-Labs/posse | `3f5185c` | `main` |
