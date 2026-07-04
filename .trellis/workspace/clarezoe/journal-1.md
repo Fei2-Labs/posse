@@ -310,3 +310,36 @@ Devin sessions were invisible: backend had no discoverDevinSessions and Projects
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Active Sessions: stable per-project accent color
+
+**Date**: 2026-07-04
+**Task**: Active Sessions: stable per-project accent color
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+Flattened project chips were all gray and indistinguishable. Added projectColorForCwd (FNV-1a hash of normalized cwd into an 8-color dark-tuned palette) applied in appendProjectTagForCwd so each project gets a stable bg/border/fg accent across renders/restarts. Implemented directly (prior implement-agent had crashed producing no color code). Hunk-staged color-only; intermixed warp/filepreview WIP left unstaged on the parallel branch.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a0bcdd42` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

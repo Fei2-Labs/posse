@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
+- **Total Sessions**: 9
 - **Last Active**: 2026-07-04
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~312 | Active |
+| `journal-1.md` | ~345 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-07-04 | Active Sessions: stable per-project accent color | `a0bcdd42` | `chore/align-posse-warp-architecture` |
 | 8 | 2026-07-04 | Devin CLI: discover + resume history sessions | `cab1a0c2` | `chore/align-posse-warp-architecture` |
 | 7 | 2026-07-02 | Active Sessions: sort by Project/Recent (closes #53) | `a887075` | `main` |
 | 6 | 2026-07-02 | Fix status-dot render skip during title-edit | `5354c2e` | `main` |
