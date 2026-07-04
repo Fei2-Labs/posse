@@ -343,3 +343,36 @@ Flattened project chips were all gray and indistinguishable. Added projectColorF
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: Active Sessions: dedupe project colors
+
+**Date**: 2026-07-05
+**Task**: Active Sessions: dedupe project colors
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+Pure-hash project colors collided (8-color palette, two projects could share a slot). Added per-render buildProjectColorAssignment: each visible project gets hash-preferred color, walks forward to next free slot — distinct colors while capacity allows, sorted keys for cross-render stability, graceful exhaustion. Wired into renderSessionList via try/finally-scoped projectColorAssignment map; appendProjectTagForCwd consults it (falls back to hash outside a pass).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `84d54130` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
