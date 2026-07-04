@@ -74,8 +74,8 @@ declare global {
         path: string;
         name: string;
         agents: Array<{
-          agent: 'claude' | 'codex' | 'kiro' | 'copilot';
-          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot'; sourcePath: string; archived?: boolean }>;
+          agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
+          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin'; sourcePath: string; archived?: boolean }>;
         }>;
         lastActiveMs: number;
       }>>;
@@ -397,7 +397,7 @@ let selectedProjectPath: string | null = null;
 // ========== Multi-agent project history (backend projects:list) ==========
 // Backend-discovered, multi-agent (Claude/Codex/Kiro/Copilot) session history keyed by normalized
 // project path. Loaded via window.posse.projectsList({ extraFolders }) — see refreshProjectsData().
-type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
+type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
 interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId; sourcePath?: string; archived?: boolean }
 interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
 interface BackendProject { path: string; name: string; agents: BackendProjectAgent[]; lastActiveMs: number }
@@ -412,6 +412,7 @@ const AGENT_ID_LABEL: Record<ProjectsAgentId, string> = {
   codex: 'Codex',
   kiro: 'Kiro',
   copilot: 'Copilot',
+  devin: 'Devin',
 };
 
 // ========== Agent filter tabs ==========
@@ -3934,6 +3935,8 @@ function parseResumeCommand(cmd: string): { agent: string; id: string } | null {
   if ((m = c.match(/\bcodex\b\s+resume\s+(\S+)/))) return { agent: 'codex', id: m[1] };
   if ((m = c.match(/\bcopilot\b.*?--resume\s+(\S+)/))) return { agent: 'copilot', id: m[1] };
   if ((m = c.match(/\bkiro-cli\b.*?--resume-id\s+(\S+)/))) return { agent: 'kiro', id: m[1] };
+  // Devin: "devin -r <id>" / "devin --resume <id>"
+  if ((m = c.match(/\bdevin\b(?:\s+(?:-r|--resume))\s+([\w-]+)/))) return { agent: 'devin', id: m[1] };
   return null;
 }
 
@@ -4095,7 +4098,10 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
 
   // Validate the on-disk session exists in this cwd before resuming, else warn
   // instead of silently launching a fresh empty session.
-  if (!(await verifyResumableSession(s.agent, s.cwd, s.id))) {
+  // Prefer the true backend agent (storeAgent) when available — ClaudeHistorySession.agent
+  // is narrowed to claude/codex, but kiro/copilot/devin flow through storeAgent.
+  const verifyAgent = s.storeAgent || s.agent;
+  if (!(await verifyResumableSession(verifyAgent, s.cwd, s.id))) {
     // Definitive not-found: drop this id from the history cache so the dead row
     // disappears instead of being clickable into a failing resume.
     console.warn(`[posse] History session ${s.id} no longer exists in ${s.cwd}; removing row.`);

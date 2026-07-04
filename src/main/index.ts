@@ -329,6 +329,45 @@ function deleteSessionFromStore(
       return { ok: true };
     }
 
+    if (a === 'devin') {
+      // sqlite-backed: DELETE the row by id from BOTH cli and cli-next DBs (best-effort).
+      const cliDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli');
+      const cliNextDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next');
+      const dbPaths = [path.join(cliDir, 'sessions.db'), path.join(cliNextDir, 'sessions.db')];
+      for (const dbPath of dbPaths) {
+        if (!fs.existsSync(dbPath)) continue;
+        let done = false;
+        try {
+          const sqlite = require('node:sqlite') as {
+            DatabaseSync?: new (p: string) => {
+              prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+              close: () => void;
+            };
+          };
+          if (sqlite?.DatabaseSync) {
+            const db = new sqlite.DatabaseSync(dbPath);
+            try {
+              db.prepare('DELETE FROM sessions WHERE id = ?').run(sid);
+              done = true;
+            } finally {
+              db.close();
+            }
+          }
+        } catch { /* node:sqlite unavailable -> fall through to binary */ }
+        if (!done) {
+          try {
+            const { execFileSync } = require('child_process') as typeof import('child_process');
+            const escaped = sid.replace(/'/g, "''");
+            execFileSync('sqlite3', [dbPath, `DELETE FROM sessions WHERE id = '${escaped}';`], {
+              encoding: 'utf-8',
+              timeout: 5000,
+            });
+          } catch { /* sqlite3 binary missing / query failed -> best-effort skip this DB */ }
+        }
+      }
+      return { ok: true };
+    }
+
     return { ok: false, error: `unknown agent: ${a}` };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -1171,7 +1210,7 @@ function openWindowWithConnection(connectionId: string): BrowserWindow {
 // Every scanner is wrapped so one bad agent never breaks the list.
 // ============================================================
 
-type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
+type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
 
 type ProjectSession = {
   id: string;
@@ -1565,6 +1604,99 @@ function discoverCopilotSessions(): DiscoveredSession[] {
   return out;
 }
 
+// --- Devin: ~/.local/share/devin/cli/sessions.db (+ cli-next/sessions.db). Best-effort, sqlite. ---
+// Schema (verified on-disk):
+//   sessions(id TEXT PRIMARY KEY, working_directory TEXT NOT NULL, backend_type TEXT NOT NULL,
+//            model TEXT, agent_mode TEXT, created_at INTEGER NOT NULL,
+//            last_activity_at INTEGER NOT NULL, title TEXT, ..., hidden INTEGER NOT NULL DEFAULT 0, ...)
+// Resume CLI: `devin -r <id>` (alias `--resume`). `last_activity_at` is a unix timestamp; older
+// Devins stored seconds, newer ones may store ms — coerce so sort times are ms-comparable.
+function discoverDevinSessions(): DiscoveredSession[] {
+  const out: DiscoveredSession[] = [];
+  try {
+    const cliDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli');
+    const cliNextDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next');
+    const dbPaths = [path.join(cliDir, 'sessions.db'), path.join(cliNextDir, 'sessions.db')];
+
+    type Row = { id?: string; working_directory?: string; title?: string; last_activity_at?: number | string };
+    const seenIds = new Set<string>();
+
+    for (const dbPath of dbPaths) {
+      try {
+        if (!fs.existsSync(dbPath)) continue;
+
+        let rows: Row[] = [];
+        let usedNode = false;
+
+        // Try node:sqlite first (Node >= 22.5 with --experimental-sqlite).
+        try {
+          const sqlite = require('node:sqlite') as {
+            DatabaseSync?: new (p: string, opts?: { readOnly?: boolean }) => {
+              prepare: (sql: string) => { all: () => unknown[] };
+              close: () => void;
+            };
+          };
+          if (sqlite?.DatabaseSync) {
+            const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+            try {
+              rows = db.prepare(
+                'SELECT id, working_directory, title, last_activity_at, hidden FROM sessions WHERE hidden=0 ORDER BY last_activity_at DESC LIMIT 100'
+              ).all() as Row[];
+              usedNode = true;
+            } finally {
+              db.close();
+            }
+          }
+        } catch { /* node:sqlite unavailable -> fall through to binary */ }
+
+        if (!usedNode) {
+          try {
+            const { execFileSync } = require('child_process') as typeof import('child_process');
+            const raw = execFileSync(
+              'sqlite3',
+              ['-json', dbPath, 'SELECT id, working_directory, title, last_activity_at, hidden FROM sessions WHERE hidden=0 ORDER BY last_activity_at DESC LIMIT 100;'],
+              { encoding: 'utf-8', timeout: 5000 }
+            );
+            const parsed = JSON.parse(raw || '[]') as Row[];
+            if (Array.isArray(parsed)) rows = parsed;
+          } catch { /* sqlite3 binary missing / query failed -> degrade to empty */ }
+        }
+
+        for (const r of rows) {
+          const id = String(r.id || '');
+          if (!id || seenIds.has(id)) continue;
+          seenIds.add(id);
+
+          const cwdRaw = String(r.working_directory || '');
+          // Skip empty / synthetic cwds (Devin sometimes reports '/' or a internal path).
+          const isRealFolder = cwdRaw && cwdRaw !== '/' && !cwdRaw.startsWith(path.join(os.homedir(), '.local', 'share', 'devin'));
+          const cwd = isRealFolder ? path.resolve(cwdRaw) : '';
+
+          // ms-coerce: if value > 1e12 treat as ms, else seconds -> ms.
+          const rawTs = typeof r.last_activity_at === 'number' ? r.last_activity_at : Number(r.last_activity_at);
+          const mtimeMs = Number.isFinite(rawTs) && rawTs > 0
+            ? (rawTs > 1e12 ? rawTs : rawTs * 1000)
+            : 0;
+
+          const titleRaw = typeof r.title === 'string' ? r.title.trim() : '';
+          const title = titleRaw ? titleRaw.slice(0, 60) : id;
+
+          out.push({
+            agent: 'devin',
+            cwd,
+            id,
+            title,
+            mtimeMs,
+            resumeCommand: `devin -r ${id}`,
+            sourcePath: '', // sqlite-backed: delete routes by id, not a file path
+          });
+        }
+      } catch { /* per-DB best-effort: never throw */ }
+    }
+  } catch { /* never throw - Devin is best-effort */ }
+  return out;
+}
+
 // Bucket all discovered sessions by project cwd. Sessions with no usable folder
 // are grouped under a synthetic project (e.g. Copilot without a real cwd).
 function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
@@ -1573,6 +1705,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     ...discoverCodexSessions(),
     ...discoverKiroSessions(),
     ...discoverCopilotSessions(),
+    ...discoverDevinSessions(),
   ];
 
   const archivedIds = loadArchivedSessionIds();
@@ -1737,7 +1870,7 @@ async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<Pro
   };
   const normAgent = (a: string): ProjectsAgentId => {
     const v = (a || '').toLowerCase();
-    return v === 'codex' || v === 'kiro' || v === 'copilot' ? (v as ProjectsAgentId) : 'claude';
+    return v === 'codex' || v === 'kiro' || v === 'copilot' || v === 'devin' ? (v as ProjectsAgentId) : 'claude';
   };
   const addSession = (cwd: string, s: ProjectSession) => {
     let key: string; let displayPath: string; let name: string;

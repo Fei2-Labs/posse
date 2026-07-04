@@ -111,12 +111,13 @@ function parseResumeCommand(text: string): { command: string; sessionId: string 
 }
 
 // Determine which agent family a launch command belongs to (for on-disk session correlation)
-function agentKindFromCommand(command: string): 'claude' | 'codex' | 'kiro' | 'copilot' | null {
+function agentKindFromCommand(command: string): 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin' | null {
   const c = (command || '').trim().toLowerCase();
   if (/^claude\b/.test(c)) return 'claude';
   if (/^codex\b/.test(c)) return 'codex';
   if (/^kiro/.test(c)) return 'kiro';
   if (/^copilot\b/.test(c)) return 'copilot';
+  if (/^devin\b/.test(c)) return 'devin';
   return null;
 }
 
