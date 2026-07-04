@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality.md", "reason": "verify diff against repo quality bar before completion"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "verify per-render assignment map follows render-scoped state conventions, no leaks across passes"}
