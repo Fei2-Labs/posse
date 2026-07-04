@@ -49,9 +49,10 @@ contextBridge.exposeInMainWorld('posse', {
   fileTreeTrash: (p: string) => ipcRenderer.invoke('file-tree:trash', p),
   // Read file contents (for the right-side read-only preview panel)
   readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
-  // Write file contents (for the in-app editable preview)
-  writeFile: (filePath: string, content: string) =>
-    ipcRenderer.invoke('fs:write-file', filePath, content),
+  // Write file contents (for the in-app editable preview). `expectedMtimeMs` enables
+  // optimistic-concurrency conflict detection (server returns { ok:false, error:'conflict', mtimeMs }).
+  writeFile: (filePath: string, content: string, expectedMtimeMs?: number) =>
+    ipcRenderer.invoke('fs:write-file', filePath, content, expectedMtimeMs),
   // Read a (binary) file as a base64 data URL — used for image previews
   readFileBase64: (filePath: string) => ipcRenderer.invoke('fs:read-file-base64', filePath),
   // Desktop -> remote upload: native multi-select dialog, then write the picked file(s)

@@ -401,10 +401,15 @@ export class RemoteServerBackend implements PtyBackend {
     }
   }
 
-  /** Write a remote text file (POST /api/fs/write). Mirrors `fs:write-file`. */
-  async fsWrite(filePath: string, content: string): Promise<{ ok: boolean; error?: string }> {
+  /** Write a remote text file (POST /api/fs/write). Mirrors `fs:write-file`.
+   *  `expectedMtimeMs` (optional) enables optimistic-concurrency: the server rejects with
+   *  `{ ok:false, error:'conflict', mtimeMs }` if the file's mtime changed since the caller last
+   *  read it. On success the new mtimeMs is returned so the caller can update its baseline. */
+  async fsWrite(filePath: string, content: string, expectedMtimeMs?: number): Promise<{ ok: boolean; error?: string; mtimeMs?: number }> {
     try {
-      return await this.request<{ ok: boolean; error?: string }>('POST', '/api/fs/write', { path: filePath, content });
+      const body: Record<string, string | number> = { path: filePath, content };
+      if (typeof expectedMtimeMs === 'number') body.expectedMtimeMs = expectedMtimeMs;
+      return await this.request<{ ok: boolean; error?: string; mtimeMs?: number }>('POST', '/api/fs/write', body);
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }

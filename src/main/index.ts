@@ -2304,6 +2304,7 @@ function registerIPC(): void {
         content: buf.toString('utf-8'),
         size: st.size,
         ext: path.extname(abs).slice(1).toLowerCase(),
+        mtimeMs: st.mtimeMs,
       };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -2311,12 +2312,12 @@ function registerIPC(): void {
   });
 
   // Write a text file (utf8) for the in-app editable preview. Never throws across IPC.
-  ipcMain.handle('fs:write-file', async (_e, filePath: string, content: string) => {
+  ipcMain.handle('fs:write-file', async (_e, filePath: string, content: string, expectedMtimeMs?: number) => {
     const remote = remoteBackendForEvent(_e);
     if (remote) {
       if (typeof filePath !== 'string' || filePath.trim() === '') return { ok: false, error: 'invalid-path' };
       if (typeof content !== 'string') return { ok: false, error: 'invalid-content' };
-      return remote.fsWrite(filePath, content);
+      return remote.fsWrite(filePath, content, expectedMtimeMs);
     }
     try {
       if (typeof filePath !== 'string' || filePath.trim() === '') {
@@ -2326,8 +2327,14 @@ function registerIPC(): void {
         return { ok: false, error: 'invalid-content' };
       }
       const abs = path.resolve(filePath);
+      const before = fs.statSync(abs);
+      if (!before.isFile()) return { ok: false, error: 'not-a-file' };
+      if (typeof expectedMtimeMs === 'number' && Math.abs(before.mtimeMs - expectedMtimeMs) > 1) {
+        return { ok: false, error: 'conflict', mtimeMs: before.mtimeMs };
+      }
       fs.writeFileSync(abs, content, 'utf-8');
-      return { ok: true };
+      const after = fs.statSync(abs);
+      return { ok: true, mtimeMs: after.mtimeMs };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
