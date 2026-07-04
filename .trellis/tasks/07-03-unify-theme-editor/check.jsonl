@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Verify renderer UI, state, and IPC changes against frontend rules."}
+{"file":".trellis/spec/frontend/css-design.md","reason":"Verify unified theme CSS tokens and editor styling."}
+{"file":".trellis/spec/frontend/ipc-electron.md","reason":"Verify IPC/preload/main wiring for file metadata and save operations."}
+{"file":".trellis/spec/backend/index.md","reason":"Verify filesystem handler changes in main and remote server."}
+{"file":".trellis/spec/backend/type-safety.md","reason":"Verify TypeScript safety for backend-facing return shapes."}
+{"file":".trellis/spec/shared/code-quality.md","reason":"Verify global code quality requirements."}

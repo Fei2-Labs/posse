@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality.md", "reason": "verify color/style change against repo quality bar after implementation"}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "verify project-chip color treatment keeps readable contrast and row fit"}

@@ -1,0 +1,3 @@
+{"file":".trellis/spec/shared/index.md","reason":"Verify English docs, repository hygiene, and shared quality expectations."}
+{"file":".trellis/spec/guides/index.md","reason":"Check architecture-alignment decision against cross-layer and pre-implementation guidance."}
+{"file":".trellis/tasks/07-03-align-posse-warp-architecture/research/warp-reference-alignment.md","reason":"Ensure final changes preserve the no-merge, reference-only Warp strategy."}

@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
-- **Last Active**: 2026-07-02
+- **Total Sessions**: 8
+- **Last Active**: 2026-07-04
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~279 | Active |
+| `journal-1.md` | ~312 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-07-04 | Devin CLI: discover + resume history sessions | `cab1a0c2` | `chore/align-posse-warp-architecture` |
 | 7 | 2026-07-02 | Active Sessions: sort by Project/Recent (closes #53) | `a887075` | `main` |
 | 6 | 2026-07-02 | Fix status-dot render skip during title-edit | `5354c2e` | `main` |
 | 5 | 2026-06-20 | Show added folder's agent sessions past global 300 cap | `ff777e5` | `main` |

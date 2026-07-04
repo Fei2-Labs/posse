@@ -277,3 +277,36 @@ Added section-local sort toggle to Active Sessions header, mirroring the existin
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: Devin CLI: discover + resume history sessions
+
+**Date**: 2026-07-04
+**Task**: Devin CLI: discover + resume history sessions
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+Devin sessions were invisible: backend had no discoverDevinSessions and ProjectsAgentId omitted devin (live Devin mislabeled Claude). Added sqlite discovery of ~/.local/share/devin/cli(+cli-next)/sessions.db mirroring Copilot, widened ProjectsAgentId main+renderer, threaded devin through normAgent/agentKindFromCommand/AGENT_ID_LABEL/resume parser/delete-from-store. Could not validate against real data (both local DBs empty) — verified by schema + graceful empty path + tsc baseline unchanged. Committed Devin-only hunks; unrelated warp/filepreview WIP from a crashed earlier agent was left unstaged on the parallel branch.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cab1a0c2` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
