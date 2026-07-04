@@ -555,6 +555,40 @@ function projectColorForCwd(cwd: string): { bg: string; border: string; fg: stri
   return PROJECT_TAG_PALETTE[h % PROJECT_TAG_PALETTE.length];
 }
 
+// Per-render project→color assignment (#07-05). A pure hash collides: two different projects can
+// land in the same palette bucket and render identically. To keep visible projects distinguishable,
+// build a deduped assignment each renderSessionList() pass: each project gets its hash-preferred
+// color if free, else the next free slot walking forward (wrapping). Same key-set → same mapping
+// every render (sorted keys + deterministic hash preference), so no flicker. Null outside a render
+// pass → callers fall back to the pure hash (still colored, just not deduped).
+let projectColorAssignment: Map<string, { bg: string; border: string; fg: string }> | null = null;
+function buildProjectColorAssignment(projectKeys: string[]): Map<string, { bg: string; border: string; fg: string }> {
+  const map = new Map<string, { bg: string; border: string; fg: string }>();
+  const used = new Set<number>();
+  // Sort for determinism: identical visible sets produce identical assignments regardless of
+  // iteration order, so a project keeps its color across renders as long as the set is unchanged.
+  const sorted = [...new Set(projectKeys.filter(Boolean))].sort();
+  for (const key of sorted) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < key.length; i++) {
+      h ^= key.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    const start = h % PROJECT_TAG_PALETTE.length;
+    let idx = start;
+    // Walk forward to the nearest free slot; wrap around the palette.
+    for (let step = 0; step < PROJECT_TAG_PALETTE.length; step++) {
+      if (!used.has(idx)) break;
+      idx = (idx + 1) % PROJECT_TAG_PALETTE.length;
+    }
+    // If every slot is taken (more projects than palette entries), idx === start and we tolerate
+    // the collision — better to show a color than none.
+    used.add(idx);
+    map.set(key, PROJECT_TAG_PALETTE[idx]);
+  }
+  return map;
+}
+
 function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
   const name = projectNameForCwd(cwd);
   if (!name) return;
@@ -562,7 +596,8 @@ function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
   tag.className = 'nav-session-project-tag';
   tag.textContent = name;
   tag.title = cwd;
-  const c = projectColorForCwd(cwd);
+  const key = normalizeCwd(cwd || '');
+  const c = (projectColorAssignment?.get(key)) ?? projectColorForCwd(cwd);
   tag.style.backgroundColor = c.bg;
   tag.style.borderColor = c.border;
   tag.style.color = c.fg;
@@ -3387,6 +3422,14 @@ function renderSessionList(): void {
   const prevScroll = sessionList.scrollTop;
   sessionList.innerHTML = '';
 
+  // Per-render deduped project→color assignment (#07-05): build from every project key that may
+  // render a chip this pass (all projects + all live session cwds), so no two visible projects
+  // share a color. Cleared in the `finally` below so it never leaks across passes.
+  const _colorKeys = new Set<string>();
+  for (const p of projects) _colorKeys.add(normalizeCwd(p.path));
+  for (const id of sessionTitles.keys()) _colorKeys.add(normalizeCwd(sessionCwds.get(id) || ''));
+  projectColorAssignment = buildProjectColorAssignment([..._colorKeys]);
+  try {
   // Fresh per-render session memo, then (re)build the agent tab strip.
   projectSessionsCache = new Map();
   renderAgentTabs();
@@ -3652,6 +3695,11 @@ function renderSessionList(): void {
 
   // Restore the pre-render scroll position (#45). Clamp happens automatically.
   sessionList.scrollTop = prevScroll;
+  } finally {
+    // Per-render color assignment is scope-bound to this pass (#07-05); clear so a stale map
+    // never leaks into another render path (e.g. a standalone appendProjectTag call).
+    projectColorAssignment = null;
+  }
 }
 
 // ========== Project / agent-picker menus ==========
