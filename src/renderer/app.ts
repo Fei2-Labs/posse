@@ -530,6 +530,31 @@ function appendProjectTag(row: HTMLElement, id: string): void {
   appendProjectTagForCwd(row, sessionCwds.get(id) || '');
 }
 
+// Stable per-project accent palette for flattened session project chips (#07-02). Each project
+// gets a deterministic color derived from its normalized cwd hash, so the same project always
+// renders the same color across renders/restarts and different projects are easy to tell apart.
+// Palette tuned for dark sidebar backgrounds: muted bg, readable fg, slightly stronger border.
+const PROJECT_TAG_PALETTE: Array<{ bg: string; border: string; fg: string }> = [
+  { bg: 'rgba(99, 179, 237, 0.18)',  border: 'rgba(99, 179, 237, 0.45)',  fg: '#9cc8f0' }, // blue
+  { bg: 'rgba(159, 230, 145, 0.18)', border: 'rgba(159, 230, 145, 0.45)', fg: '#a7e39a' }, // green
+  { bg: 'rgba(237, 168, 99, 0.18)',  border: 'rgba(237, 168, 99, 0.45)',  fg: '#e8b274' }, // amber
+  { bg: 'rgba(217, 130, 217, 0.18)', border: 'rgba(217, 130, 217, 0.45)', fg: '#d396d3' }, // magenta
+  { bg: 'rgba(99, 217, 199, 0.18)',  border: 'rgba(99, 217, 199, 0.45)',  fg: '#7fd9c6' }, // teal
+  { bg: 'rgba(237, 130, 130, 0.18)', border: 'rgba(237, 130, 130, 0.45)', fg: '#e89494' }, // red
+  { bg: 'rgba(200, 175, 237, 0.18)', border: 'rgba(200, 175, 237, 0.45)', fg: '#c4b1ec' }, // violet
+  { bg: 'rgba(237, 215, 99, 0.18)',  border: 'rgba(237, 215, 99, 0.45)',  fg: '#dccc6e' }, // yellow
+];
+function projectColorForCwd(cwd: string): { bg: string; border: string; fg: string } {
+  const key = normalizeCwd(cwd || '');
+  // FNV-1a 32-bit: stable, cheap, no Date/Math.random (would break determinism across renders).
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return PROJECT_TAG_PALETTE[h % PROJECT_TAG_PALETTE.length];
+}
+
 function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
   const name = projectNameForCwd(cwd);
   if (!name) return;
@@ -537,6 +562,10 @@ function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
   tag.className = 'nav-session-project-tag';
   tag.textContent = name;
   tag.title = cwd;
+  const c = projectColorForCwd(cwd);
+  tag.style.backgroundColor = c.bg;
+  tag.style.borderColor = c.border;
+  tag.style.color = c.fg;
   // Insert right before the title span so it reads "[dot][agent][project] title".
   const titleEl = row.querySelector('.nav-session-title');
   row.insertBefore(tag, titleEl || null);
