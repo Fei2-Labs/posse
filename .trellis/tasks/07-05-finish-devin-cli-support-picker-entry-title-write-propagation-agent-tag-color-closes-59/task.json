@@ -1,0 +1,10 @@
+{
+  "id": "07-05-finish-devin-cli-support-picker-entry-title-write-propagation-agent-tag-color-closes-59",
+  "title": "finish devin cli support + picker entry + title write propagation + agent tag color (closes #59)",
+  "status": "completed",
+  "priority": "high",
+  "created_at": "2026-07-05T08:00:00Z",
+  "updated_at": "2026-07-05T16:45:00Z",
+  "tags": ["devin", "feature", "agent"],
+  "notes": "All 4 subtasks complete: CLI launch (ipcHandlers.ts), picker entry (newSessionPicker.ts), title write-propagation (write-devin-session-title handler), agent tag color (#6B46C1 purple in sessionList.ts). Build verified clean."
+}

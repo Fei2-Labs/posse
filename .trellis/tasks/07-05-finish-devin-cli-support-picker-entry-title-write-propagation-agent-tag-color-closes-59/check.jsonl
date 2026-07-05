@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "verify writeDevinSessionTitle sqlite write correctness and best-effort/never-throw contract"}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "verify diff against repo quality bar before completion"}
