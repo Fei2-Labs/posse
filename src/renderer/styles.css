@@ -1516,7 +1516,8 @@ html, body {
 }
 
 /* "All" tab: posse mini logo button (no text) */
-.agent-tab-logo {
+.agent-tab-logo,
+.agent-tab-icon {
   padding: 0;
   width: 22px;
   height: 22px;
@@ -1524,17 +1525,27 @@ html, body {
   color: var(--text-secondary, #9aa);
 }
 
-.agent-tab-logo svg {
+.agent-tab-logo svg,
+.agent-tab-icon svg {
   width: 16px;
   height: 16px;
   display: block;
 }
 
-.agent-tab-logo:hover {
+.agent-tab-icon img {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+}
+
+.agent-tab-logo:hover,
+.agent-tab-icon:hover {
   color: var(--accent-green, #73c991);
 }
 
-.agent-tab-logo.active {
+.agent-tab-logo.active,
+.agent-tab-icon.active {
   color: var(--accent-green, #73c991);
 }
 

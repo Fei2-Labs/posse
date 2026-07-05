@@ -1,6 +1,7 @@
 import { TerminalManager } from './terminal-manager';
 import { ChatView } from './chat-view';
 import { createFilePreview, isPreviewableExt, type FilePreview } from './file-preview';
+import { getAgentLogo } from './agent-logos';
 
 // Image extensions handled by the inline preview.
 function isImageExt(ext: string): boolean {
@@ -493,21 +494,31 @@ function renderAgentTabs(): void {
   for (const t of ['all', ...families]) {
     const btn = document.createElement('button');
     const isAll = t === 'all';
-    btn.className = 'agent-tab' + (isAll ? ' agent-tab-logo' : '') + (t === activeAgentTab ? ' active' : '');
+    btn.className = 'agent-tab' + (isAll ? ' agent-tab-logo' : ' agent-tab-icon') + (t === activeAgentTab ? ' active' : '');
     btn.title = isAll ? 'All agents' : t;
     btn.setAttribute('aria-label', isAll ? 'All agents' : t);
     if (isAll) {
       btn.innerHTML = POSSE_MINI_LOGO_SVG;
     } else {
-      const [fg] = getCliTagColors(t);
-      const dotc = document.createElement('span');
-      dotc.className = 'agent-tab-dot';
-      dotc.style.backgroundColor = fg;
-      btn.appendChild(dotc);
-      const label = document.createElement('span');
-      label.className = 'agent-tab-label';
-      label.textContent = t;
-      btn.appendChild(label);
+      // Agent logo: prefer the official SVG (currentColor), fall back to the
+      // brand-color dot if no logo asset exists for this agent.
+      const logo = getAgentLogo(t);
+      if (logo) {
+        if (logo.kind === 'svg') {
+          btn.innerHTML = logo.markup;
+        } else {
+          const img = document.createElement('img');
+          img.src = logo.dataUrl;
+          img.alt = '';
+          btn.appendChild(img);
+        }
+      } else {
+        const [fg] = getCliTagColors(t);
+        const dotc = document.createElement('span');
+        dotc.className = 'agent-tab-dot';
+        dotc.style.backgroundColor = fg;
+        btn.appendChild(dotc);
+      }
     }
     btn.addEventListener('click', () => {
       if (activeAgentTab !== t) { setActiveAgentTab(t); renderSessionList(); }
