@@ -1472,8 +1472,8 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
-  padding: 6px 8px 2px;
+  gap: 8px;
+  padding: 8px 10px 4px;
 }
 
 .agent-tab {
@@ -1549,15 +1549,29 @@ html, body {
   color: var(--accent-green, #73c991);
 }
 
-/* Inline agent tag on a session row (shown only in the "All" tab) */
+/* Inline agent tag on a session row (shown only in the "All" tab): a small
+   monochrome logo icon, same visual language as the agent filter strip. */
 .nav-session-agent-tag {
   flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 1.4;
-  text-transform: none;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, #9aa);
+  line-height: 1;
+}
+
+.nav-session-agent-tag svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.nav-session-agent-tag .agent-tab-dot {
+  width: 6px;
+  height: 6px;
+}
 }
 
 /* Owning-project chip on FLATTENED session rows (Pinned / Active Sessions) (#29).

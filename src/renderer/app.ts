@@ -527,15 +527,23 @@ function renderAgentTabs(): void {
   }
 }
 
-// In the "All" tab, prefix a session row with a small colored agent tag so mixed
+// In the "All" tab, prefix a session row with a small agent logo so mixed
 // agents stay distinguishable without a group header.
 function appendAgentTag(row: HTMLElement, family: string): void {
   const tag = document.createElement('span');
   tag.className = 'nav-session-agent-tag';
-  const [fg, bg] = getCliTagColors(family);
-  tag.textContent = family;
-  tag.style.color = fg;
-  tag.style.backgroundColor = bg;
+  const logo = getAgentLogo(family);
+  if (logo) {
+    tag.innerHTML = logo.markup;
+  } else {
+    // No logo asset: fall back to the brand-color dot.
+    const [fg] = getCliTagColors(family);
+    const dot = document.createElement('span');
+    dot.className = 'agent-tab-dot';
+    dot.style.backgroundColor = fg;
+    tag.appendChild(dot);
+  }
+  tag.title = family;
   // Insert right after the status dot (children[0]), before the title.
   row.insertBefore(tag, row.children[1] || null);
 }
