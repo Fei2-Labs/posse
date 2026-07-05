@@ -1370,7 +1370,7 @@ const BUILTIN_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'claude --dangerously-skip-permissions', label: 'Claude (auto)' },
   { value: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"', label: 'Codex (auto)' },
   { value: 'copilot --allow-all --autopilot', label: 'Copilot (auto)' },
-  { value: 'devin --permission-mode bypass', label: 'Devin (auto)' },
+  { value: 'devin --permission-mode dangerous', label: 'Devin (auto)' },
   { value: 'opencode', label: 'OpenCode' },
   { value: 'kiro-cli chat --trust-all-tools', label: 'Kiro (auto)' },
 ];
@@ -3911,7 +3911,7 @@ function getAgentPickerOptions(): Array<{ label: string; command: string }> {
     { label: 'Claude Code', command: 'claude --dangerously-skip-permissions' },
     { label: 'Codex', command: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"' },
     { label: 'Copilot', command: 'copilot --allow-all --autopilot' },
-    { label: 'Devin', command: 'devin --permission-mode bypass' },
+    { label: 'Devin', command: 'devin --permission-mode dangerous' },
     { label: 'Kiro', command: 'kiro-cli chat --trust-all-tools' },
   ];
   for (const cp of getCustomPresets()) {

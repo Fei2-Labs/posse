@@ -63,7 +63,7 @@ const PRESET_DISPLAY_NAMES: Record<string, string> = {
   'codex --full-auto': 'Codex (auto)',
   'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"': 'Codex (auto)',
   'copilot --allow-all --autopilot': 'Copilot (auto)',
-  'devin --permission-mode bypass': 'Devin (auto)',
+  'devin --permission-mode dangerous': 'Devin (auto)',
   'opencode': 'OpenCode',
   'kiro-cli chat --trust-all-tools': 'Kiro (auto)',
 };
