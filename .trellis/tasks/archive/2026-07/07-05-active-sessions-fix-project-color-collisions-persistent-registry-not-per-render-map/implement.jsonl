@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "replacing per-render map with a persistent module-level registry; confirm conventions for long-lived renderer state"}
