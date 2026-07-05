@@ -376,3 +376,36 @@ Pure-hash project colors collided (8-color palette, two projects could share a s
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: Fix project colors still colliding (persistent registry)
+
+**Date**: 2026-07-05
+**Task**: Fix project colors still colliding (persistent registry)
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+v1 fix (84d54130) built a per-render assignment map but fell back to the raw collision-prone hash whenever a key was missing from it — with 8 buckets that fallback collides often, exactly what user saw after rebuild+relaunch (confirmed fix WAS in installed bundle, so this was a logic gap not stale build). Replaced with persistent incremental registry in projectColorForCwd itself: no separate map, no fallback path, single source of truth. Verified dedupe logic against 4 realistic project paths -> 4 distinct slots.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f96cb1a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
