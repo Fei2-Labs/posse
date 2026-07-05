@@ -5975,6 +5975,10 @@ if (hostSwitcherBtn) {
 // When the active connection changes (switch / add / remove), refetch the navigator + file
 // tree so the sidebar reflects the new host's sessions and the file panel reroots.
 window.posse.onConnectionChanged(() => {
+  // Clear the local project selection — the new connection's sessions/projects are
+  // independent, so the old selectedProjectPath would be sent to the new backend
+  // (e.g. remote fsList) where that path doesn't exist, yielding an empty file tree.
+  selectedProjectPath = null;
   void refreshHostSwitcherLabel();
   void refreshSubscriptionState().then(updateTransferAffordances);
   void refreshProjectsData();
