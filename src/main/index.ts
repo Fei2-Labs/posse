@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, glo
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getDisplayName, rotateDevinInstallationId, writeClaudeSessionTitle, writeCodexSessionTitle } from './pty-manager';
+import { getDisplayName, rotateDevinInstallationId, writeClaudeSessionTitle, writeCodexSessionTitle, writeDevinSessionTitle } from './pty-manager';
 import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
@@ -2133,6 +2133,8 @@ function registerIPC(): void {
         writeClaudeSessionTitle(target.resumeId, newTitle);
       } else if (/^codex\b/i.test(cmd)) {
         writeCodexSessionTitle(target.resumeId, newTitle);
+      } else if (/^devin\b/i.test(cmd)) {
+        writeDevinSessionTitle(target.resumeId, newTitle);
       }
     }
     return sessions;
@@ -2777,6 +2779,8 @@ function registerIPC(): void {
         writeClaudeSessionTitle(id, title);
       } else if (agent === 'codex') {
         writeCodexSessionTitle(id, title);
+      } else if (agent === 'devin') {
+        writeDevinSessionTitle(id, title);
       }
       // else: copilot/kiro/unknown — no writable title format, skip (no-op, not an error).
       return { ok: true };

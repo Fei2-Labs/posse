@@ -235,6 +235,56 @@ export function writeCodexSessionTitle(uuid: string, title: string): void {
   }
 }
 
+// Best-effort: propagate a user rename into Devin's own sqlite session store so Devin's own
+// session list shows the same title. Devin stores sessions in sqlite (BOTH `cli` and `cli-next`
+// DBs, see discoverDevinSessions/deleteSessionFromStore in index.ts for the read/delete mirrors
+// of this exact access pattern): node:sqlite first, `sqlite3` binary as a fallback. Each DB is
+// attempted independently so a failure on one never blocks the other.
+export function writeDevinSessionTitle(id: string, title: string): void {
+  const trimmed = (title || '').trim();
+  const sid = (id || '').trim();
+  if (!trimmed || !sid) return;
+  try {
+    const cliDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli');
+    const cliNextDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next');
+    const dbPaths = [path.join(cliDir, 'sessions.db'), path.join(cliNextDir, 'sessions.db')];
+    for (const dbPath of dbPaths) {
+      if (!fs.existsSync(dbPath)) continue;
+      let done = false;
+      try {
+        const sqlite = require('node:sqlite') as {
+          DatabaseSync?: new (p: string) => {
+            prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+            close: () => void;
+          };
+        };
+        if (sqlite?.DatabaseSync) {
+          const db = new sqlite.DatabaseSync(dbPath);
+          try {
+            db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(trimmed, sid);
+            done = true;
+          } finally {
+            db.close();
+          }
+        }
+      } catch { /* node:sqlite unavailable -> fall through to binary */ }
+      if (!done) {
+        try {
+          const { execFileSync } = require('child_process') as typeof import('child_process');
+          const escapedTitle = trimmed.replace(/'/g, "''");
+          const escapedId = sid.replace(/'/g, "''");
+          execFileSync('sqlite3', [dbPath, `UPDATE sessions SET title = '${escapedTitle}' WHERE id = '${escapedId}';`], {
+            encoding: 'utf-8',
+            timeout: 5000,
+          });
+        } catch { /* sqlite3 binary missing / query failed -> best-effort skip this DB */ }
+      }
+    }
+  } catch {
+    // Best-effort; never throw or block the rename.
+  }
+}
+
 // Best-effort: find the on-disk agent session id for a session whose PTY was spawned at `spawnedAt`.
 // Returns the newest matching session file's uuid for that agent in that cwd, created/updated after spawn.
 function findAgentSessionIdOnDisk(
