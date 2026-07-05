@@ -498,6 +498,19 @@ export class PtyManager {
       }
     }
 
+    // Ensure ~/.local/bin (where devin, session-sync, and other user-installed
+    // CLIs live) is on PATH. When Posse is launched from Finder/Dock, the app
+    // (and the detached pty-daemon it spawns) inherits macOS's minimal PATH
+    // (/usr/bin:/bin:/usr/sbin:/sbin) — user shell rc files (~/.zshrc) that
+    // normally extend PATH are never sourced. Without this, `devin` (installed
+    // at ~/.local/bin/devin) is "command not found" in the spawned shell, the
+    // process exits immediately, and the session vanishes.
+    const localBin = path.join(os.homedir(), '.local', 'bin');
+    const currentPath = env.PATH || '';
+    if (!currentPath.split(':').includes(localBin)) {
+      env.PATH = currentPath ? `${localBin}:${currentPath}` : localBin;
+    }
+
     // Force a UTF-8 locale for the pty.
     //
     // When Posse is launched from Finder/Dock (not from a terminal), it inherits NO LANG/LC_*.
