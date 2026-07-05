@@ -470,6 +470,18 @@ function projectVisibleUnderTab(p: ProjectEntry): boolean {
   return !!g && (g.lives.length + g.closed.length + g.history.length) > 0;
 }
 
+// Posse mini logo (simplified from build/icon.svg: terminal chevron + 3 agent dots).
+// Inlined as a string so esbuild bundles it and the renderer's CSP (script-src 'self')
+// doesn't need an extra svg file asset.
+const POSSE_MINI_LOGO_SVG = `
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <path d="M300 332 L520 512 L300 692" fill="none" stroke="currentColor" stroke-width="78"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="616" cy="512" r="46" fill="currentColor"/>
+  <circle cx="742" cy="512" r="46" fill="currentColor" opacity="0.85"/>
+  <circle cx="660" cy="640" r="38" fill="currentColor" opacity="0.7"/>
+</svg>`;
+
 // Render the agent tab strip into its static host above the search toolbar.
 function renderAgentTabs(): void {
   const host = document.getElementById('agent-tabs');
@@ -480,14 +492,22 @@ function renderAgentTabs(): void {
   if (activeAgentTab !== 'all' && !families.includes(activeAgentTab)) setActiveAgentTab('all');
   for (const t of ['all', ...families]) {
     const btn = document.createElement('button');
-    btn.className = 'agent-tab' + (t === activeAgentTab ? ' active' : '');
-    btn.textContent = t === 'all' ? 'All' : t;
-    if (t !== 'all') {
+    const isAll = t === 'all';
+    btn.className = 'agent-tab' + (isAll ? ' agent-tab-logo' : '') + (t === activeAgentTab ? ' active' : '');
+    btn.title = isAll ? 'All agents' : t;
+    btn.setAttribute('aria-label', isAll ? 'All agents' : t);
+    if (isAll) {
+      btn.innerHTML = POSSE_MINI_LOGO_SVG;
+    } else {
       const [fg] = getCliTagColors(t);
       const dotc = document.createElement('span');
       dotc.className = 'agent-tab-dot';
       dotc.style.backgroundColor = fg;
-      btn.prepend(dotc);
+      btn.appendChild(dotc);
+      const label = document.createElement('span');
+      label.className = 'agent-tab-label';
+      label.textContent = t;
+      btn.appendChild(label);
     }
     btn.addEventListener('click', () => {
       if (activeAgentTab !== t) { setActiveAgentTab(t); renderSessionList(); }

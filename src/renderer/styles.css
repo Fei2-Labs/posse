@@ -1471,21 +1471,22 @@ html, body {
 #agent-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px 10px 4px;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px 2px;
 }
 
 .agent-tab {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 10px;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
   border: 1px solid transparent;
-  border-radius: 999px;
-  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  border-radius: 4px;
+  background: transparent;
   color: var(--text-secondary, #9aa);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
@@ -1494,19 +1495,47 @@ html, body {
 
 .agent-tab:hover {
   color: var(--text-primary);
+  background: var(--hover-bg);
 }
 
 .agent-tab.active {
-  background: var(--row-selected, color-mix(in srgb, var(--accent-green, #73c991) 16%, transparent));
-  border-color: color-mix(in srgb, var(--accent-green, #73c991) 50%, transparent);
+  background: var(--row-selected, color-mix(in srgb, var(--accent-green, #73c991) 14%, transparent));
+  border-color: color-mix(in srgb, var(--accent-green, #73c991) 45%, transparent);
   color: var(--accent-green, #73c991);
 }
 
 .agent-tab-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+.agent-tab-label {
+  line-height: 1;
+}
+
+/* "All" tab: posse mini logo button (no text) */
+.agent-tab-logo {
+  padding: 0;
+  width: 22px;
+  height: 22px;
+  justify-content: center;
+  color: var(--text-secondary, #9aa);
+}
+
+.agent-tab-logo svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.agent-tab-logo:hover {
+  color: var(--accent-green, #73c991);
+}
+
+.agent-tab-logo.active {
+  color: var(--accent-green, #73c991);
 }
 
 /* Inline agent tag on a session row (shown only in the "All" tab) */
