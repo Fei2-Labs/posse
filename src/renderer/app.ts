@@ -323,6 +323,11 @@ let activeSessionSortMode: ActiveSessionSortMode = loadActiveSessionSort();
 const EXPAND_STATE_STORAGE_KEY = 'posse_expand_state';
 const expandedProjects: Set<string> = new Set();
 const expandedAgentGroups: Set<string> = new Set();
+// Projects the user EXPLICITLY collapsed while a search query was active. During search, matching
+// projects are force-expanded to reveal hits; this set records the ones the user manually collapsed
+// anyway so their collapse wins across re-renders. It is cleared whenever the query clears, so the
+// user's persisted `expandedProjects` state is restored exactly (no leakage into persistence).
+const searchCollapsedProjects: Set<string> = new Set();
 let projectsSectionCollapsed = false;
 
 function loadExpandState(): void {
@@ -865,6 +870,19 @@ function agentGroupMatchesSearch(g: ProjectAgentGroup): boolean {
   for (const id of g.lives) if ((sessionTitles.get(id) || '').toLowerCase().includes(q)) return true;
   for (const cs of g.closed) if ((cs.title || cs.displayName || '').toLowerCase().includes(q)) return true;
   for (const s of g.history) if ((s.title || '').toLowerCase().includes(q)) return true;
+  return false;
+}
+
+// During search, does this project have at least one matching CHILD (a session title hit)?
+// Name-only matches are excluded — a project that only matches by name is NOT force-expanded by
+// the search and respects its normal `expandedProjects` state, so it doesn't dump all its
+// non-matching children into the list.
+function projectHasMatchingChild(p: ProjectEntry): boolean {
+  const q = projectSearchQuery;
+  if (!q) return false;
+  for (const g of collectProjectSessions(p.path).values()) {
+    if (agentGroupMatchesSearch(g)) return true;
+  }
   return false;
 }
 
@@ -1858,7 +1876,11 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
       toggleSearchClear();
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
+        const prev = projectSearchQuery;
         projectSearchQuery = searchInput.value.trim().toLowerCase();
+        // Transitioning to an empty query ends the search: drop the temporary collapse records
+        // so the user's persisted expand/collapse state is restored exactly.
+        if (prev && !projectSearchQuery) searchCollapsedProjects.clear();
         renderSessionList();
       }, 120);
     });
@@ -1868,6 +1890,7 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
     if (!searchInput) return;
     searchInput.value = '';
     projectSearchQuery = '';
+    searchCollapsedProjects.clear();
     searchClear.setAttribute('hidden', '');
     renderSessionList();
     searchInput.focus();
@@ -3209,9 +3232,15 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
 function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   const key = normalizeCwd(p.path);
   // While searching, force-expand matching projects to reveal hits (without mutating persisted
-  // collapse state). Clearing the query restores the user's saved expand/collapse state.
+  // collapse state). Two refinements (#60): (1) only force-expand projects that have a matching
+  // CHILD — name-only matches respect the user's persisted expand state instead of dumping all
+  // their non-matching children into the list; (2) honor an explicit manual collapse during
+  // search via `searchCollapsedProjects` so the user can hide a noisy expanded project without
+  // clearing the query. Clearing the query restores the user's saved expand/collapse state.
   const searching = projectSearchQuery.length > 0;
-  const isExpanded = searching ? true : expandedProjects.has(key);
+  const isExpanded = searching
+    ? projectHasMatchingChild(p) && !searchCollapsedProjects.has(key)
+    : expandedProjects.has(key);
 
   const isSelected = selectedProjectPath != null && normalizeCwd(selectedProjectPath) === key;
   const row = document.createElement('div');
@@ -3275,11 +3304,19 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // Clicking the row (name / non-button area) both SELECTS the project (drives the RIGHT file panel)
   // and toggles its expand/collapse state. Action buttons stopPropagation so they don't toggle.
   row.addEventListener('click', () => {
+    const willExpand = !expandedProjects.has(key);
     if (expandedProjects.has(key)) {
       setProjectExpanded(key, false);
     } else {
       setProjectExpanded(key, true);
       if (!backendProjects.has(key) && !projectsDataLoading) void refreshProjectsData();
+    }
+    // During search, record an explicit collapse so it survives the next render (which would
+    // otherwise re-force-expand matching projects). Expanding again drops the record so the
+    // project re-opens. These records are cleared with the query — they never persist.
+    if (projectSearchQuery.length > 0) {
+      if (willExpand) searchCollapsedProjects.delete(key);
+      else searchCollapsedProjects.add(key);
     }
     // selectProject sets the selection + re-renders the nav (reflecting the new expand state).
     selectProject(p.path);
@@ -3558,6 +3595,7 @@ function renderSessionList(): void {
     e.stopPropagation();
     expandedProjects.clear();
     expandedAgentGroups.clear();
+    searchCollapsedProjects.clear();
     saveExpandState();
     renderSessionList();
   });
