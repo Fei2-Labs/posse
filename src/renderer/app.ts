@@ -4006,6 +4006,17 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
     sessionDisplayNames.set(result.id, isAuto ? customPreset.name + ' auto' : customPreset.name);
   }
 
+  // The user just picked an agent — switch the sidebar's agent tab to that family so the new
+  // session is visible. Without this, a non-matching active tab (e.g. 'Claude' when picking
+  // Devin) filters the whole project out via projectVisibleUnderTab and the new session never
+  // appears (#61). Fall back to 'all' if the family can't be derived or is a bare 'Terminal'.
+  const newFamily = agentFamilyFromDisplayName(sessionDisplayNames.get(result.id) || '');
+  if (newFamily && newFamily !== 'Terminal' && newFamily !== activeAgentTab) {
+    setActiveAgentTab(newFamily);
+  } else if ((!newFamily || newFamily === 'Terminal') && activeAgentTab !== 'all') {
+    setActiveAgentTab('all');
+  }
+
   // Ensure the project is registered, selected & expanded so the new session is visible
   if (!findProject(cwd)) {
     projects.push({ path: cwd, pinned: false, addedAt: now });
