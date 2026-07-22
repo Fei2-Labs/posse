@@ -134,10 +134,6 @@ declare global {
       readDirectory: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean; isFile: boolean }>>;
       // Session status sync
       syncSessionStatus: (statuses: Record<string, string>) => void;
-      // Auto-continue config relay
-      onGetAutoContinueConfig: (cb: (sessionId: string) => void) => void;
-      sendAutoContinueConfig: (sessionId: string, config: any) => void;
-      onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) => void;
       // Closed sessions
       closedSessionsList: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsRemove: (id: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
@@ -167,6 +163,8 @@ declare global {
 const savedCwd = localStorage.getItem('posse_cwd') || '';
 let currentCwd = savedCwd;
 let lastPreset = localStorage.getItem('posse_preset') || '';
+// One-time cleanup: remove stale auto-continue configs from previous versions
+try { localStorage.removeItem('posse_auto_continue'); } catch { /* ignore */ }
 const sessionTitles: Map<string, string> = new Map();
 const sessionThemes: Map<string, string> = new Map();
 const sessionUpdateTimes: Map<string, number> = new Map();
@@ -928,16 +926,6 @@ let closedChatSessions: ClosedChatSessionInfo[] = [];
 // Auto account-switch status: sessionId → { status, detail }
 const sessionAutoSwitchStatus: Map<string, { status: string; detail?: string }> = new Map();
 
-// Auto-continue config
-const sessionAutoContinue: Map<string, { enabled: boolean; messages: string[]; intervalMs: number; commandIntervalMs: number; lastSendTime: number; autoAgree: boolean; autoAgreeDelaySec: number; sendDelaySec: number; maxDurationMs: number; enabledAt: number }> = new Map();
-const AUTO_CONTINUE_DEFAULT_MESSAGES = ['continue'];
-const AUTO_CONTINUE_DEFAULT_INTERVAL = 10 * 60 * 1000; // 10 minutes
-const AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL = 2000; // 2-second command interval
-const AUTO_AGREE_DEFAULT_DELAY_SEC = 5; // auto-approve default delay: 5 seconds
-const AUTO_CONTINUE_SEND_DELAY_SEC = 2; // default delay before sending Enter: 2 seconds
-const AUTO_CONTINUE_DEFAULT_MAX_DURATION = 0; // 0 means no limit
-const AUTO_CONTINUE_STORAGE_KEY = 'posse_auto_continue';
-
 function hasSessionInUI(sessionId: string): boolean {
   return sessionTitles.has(sessionId);
 }
@@ -950,66 +938,7 @@ function getSessionCreateTime(id: string): number {
   return fallback;
 }
 
-// Persist auto-continue config to localStorage
-function saveAutoContinueToStorage(): void {
-  const data: Record<string, any> = {};
-  sessionAutoContinue.forEach((config, sessionId) => {
-    // lastSendTime / enabledAt are runtime state, not persisted
-    data[sessionId] = {
-      enabled: config.enabled,
-      messages: config.messages,
-      intervalMs: config.intervalMs,
-      commandIntervalMs: config.commandIntervalMs,
-      autoAgree: config.autoAgree,
-      autoAgreeDelaySec: config.autoAgreeDelaySec,
-      sendDelaySec: config.sendDelaySec,
-      maxDurationMs: config.maxDurationMs,
-    };
-  });
-  localStorage.setItem(AUTO_CONTINUE_STORAGE_KEY, JSON.stringify(data));
-}
-
-// Restore auto-continue config from localStorage
-function loadAutoContinueFromStorage(): void {
-  try {
-    const raw = localStorage.getItem(AUTO_CONTINUE_STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw) as Record<string, any>;
-    for (const [sessionId, config] of Object.entries(data)) {
-      // Migrate legacy message → messages
-      const msgs = Array.isArray(config.messages)
-        ? config.messages
-        : (config.message ? [config.message] : [...AUTO_CONTINUE_DEFAULT_MESSAGES]);
-      sessionAutoContinue.set(sessionId, {
-        enabled: config.enabled ?? false,
-        messages: msgs,
-        intervalMs: config.intervalMs ?? AUTO_CONTINUE_DEFAULT_INTERVAL,
-        commandIntervalMs: config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-        lastSendTime: Date.now(),
-        autoAgree: config.autoAgree ?? true,
-        autoAgreeDelaySec: config.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC,
-        sendDelaySec: config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC,
-        maxDurationMs: config.maxDurationMs ?? AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-        enabledAt: Date.now(),
-      });
-    }
-  } catch {}
-}
-
-// Restore auto-continue config and start the timer on launch
-loadAutoContinueFromStorage();
-// The old logic unconditionally wiped the on-disk config, permanently losing the user's auto-continue settings.
-// Current behavior: on cold start sessionTitles is empty → the old session-id configs written by
-// loadAutoContinueFromStorage match no current session, so the timer is a no-op. When onRemoteCreated/createPty
-// creates a new session, onSetAutoContinueConfig pushes the new config and overrides the old entries.
-// Check whether any config is enabled, and start the timer if so
-const hasEnabledConfig = Array.from(sessionAutoContinue.values()).some(c => c.enabled);
-if (hasEnabledConfig) initAutoContinueTimer();
-
-// Auto-continue timer
-let autoContinueTimer: ReturnType<typeof setInterval> | null = null;
-
-// Write to the PTY and reset the auto-continue timer
+// Write to the PTY with input tracking (recent input buffer + mouse report flagging)
 function writePtyWithAutoReset(id: string, data: string): void {
   termManager.notifyInput(id);
   // Record recently-sent input (keystrokes, xterm mouse reports, file/paste payloads all
@@ -1023,242 +952,6 @@ function writePtyWithAutoReset(id: string, data: string): void {
   // that follows isn't misread as agent activity.
   if (/\x1b\[(?:M|<[0-9])/.test(data)) sessionLastMouseInputAt.set(id, Date.now());
   window.posse.writePty(id, data);
-  // Reset this session's auto-continue timer
-  const config = sessionAutoContinue.get(id);
-  if (config && config.enabled) {
-    config.lastSendTime = Date.now();
-  }
-}
-
-// Initialize the auto-continue timer
-function initAutoContinueTimer(): void {
-  if (autoContinueTimer) {
-    clearInterval(autoContinueTimer);
-  }
-  autoContinueTimer = setInterval(() => {
-    const now = Date.now();
-    const staleSessionIds: string[] = [];
-    sessionAutoContinue.forEach((config, sessionId) => {
-      if (!config.enabled) return;
-      if (!hasSessionInUI(sessionId)) {
-        staleSessionIds.push(sessionId);
-        return;
-      }
-      // Check max duration; auto-stop the loop on timeout
-      if (config.maxDurationMs > 0 && config.enabledAt > 0 && (now - config.enabledAt >= config.maxDurationMs)) {
-        console.log(`[Loop] Session ${sessionId} reached max duration ${config.maxDurationMs}ms, auto-stopping loop`);
-        config.enabled = false;
-        saveAutoContinueToStorage();
-        renderSessionList();
-        return;
-      }
-      // Check whether the interval has elapsed
-      if (now - config.lastSendTime >= config.intervalMs) {
-        const messages = config.messages || AUTO_CONTINUE_DEFAULT_MESSAGES;
-        const cmdInterval = config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL;
-        const sendDelay = (config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC) * 1000;
-        console.log(`[Loop] Sending ${messages.length} command(s) to session ${sessionId}`);
-
-        // Send each command in order, with an interval between commands
-        let cmdIdx = 0;
-        const sendNextCommand = () => {
-          if (cmdIdx >= messages.length) {
-            console.log(`[Loop] Sent all ${messages.length} command(s)`);
-            return;
-          }
-          const msg = messages[cmdIdx];
-          cmdIdx++;
-          window.posse.writePty(sessionId, msg);
-          // Send Enter after a delay
-          setTimeout(() => {
-            const enterKeys = [
-              '\r', '\n', '\r\n', '\x0d', '\x0a', '\x1b\n', '\x1b\r',
-            ];
-            let ei = 0;
-            const sendNextEnter = () => {
-              if (ei < enterKeys.length) {
-                window.posse.writePty(sessionId, enterKeys[ei]);
-                ei++;
-                setTimeout(sendNextEnter, 15);
-              } else {
-                // Enter sent for this command; move to the next command
-                setTimeout(sendNextCommand, cmdInterval);
-              }
-            };
-            sendNextEnter();
-          }, sendDelay);
-        };
-        sendNextCommand();
-        config.lastSendTime = now;
-      }
-    });
-    if (staleSessionIds.length > 0) {
-      staleSessionIds.forEach((id) => sessionAutoContinue.delete(id));
-      saveAutoContinueToStorage();
-      renderSessionList();
-    }
-  }, 1000); // Check once per second
-}
-
-// Toggle the auto-continue switch
-function toggleAutoContinue(sessionId: string, enabled: boolean): void {
-  let config = sessionAutoContinue.get(sessionId);
-  if (!config) {
-    config = {
-      enabled: false,
-      messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
-      intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
-      commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-      lastSendTime: Date.now(),
-      autoAgree: true,
-      autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
-      sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
-      maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-      enabledAt: 0,
-    };
-    sessionAutoContinue.set(sessionId, config);
-  }
-  config.enabled = enabled;
-  config.lastSendTime = Date.now();
-  if (enabled) {
-    config.enabledAt = Date.now();
-  }
-  saveAutoContinueToStorage();
-
-  // Start the timer (if not already running)
-  initAutoContinueTimer();
-
-  // Re-render the session list to reflect the switch state
-  renderSessionList();
-}
-
-// Show the auto-continue config dialog
-function showAutoContinueConfigDialog(sessionId: string): void {
-  const config = sessionAutoContinue.get(sessionId) || {
-    enabled: false,
-    messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
-    intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
-    commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-    lastSendTime: Date.now(),
-    autoAgree: true,
-    autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
-    sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
-    maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-    enabledAt: 0,
-  };
-
-  const currentMessages = config.messages || AUTO_CONTINUE_DEFAULT_MESSAGES;
-  const currentInterval = config.intervalMs || AUTO_CONTINUE_DEFAULT_INTERVAL;
-  const currentIntervalMinutes = Math.round(currentInterval / 60000);
-  const currentCommandInterval = Math.round((config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL) / 1000);
-  const currentAutoAgree = config.autoAgree ?? true;
-  const currentAutoAgreeDelay = config.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC;
-  const currentSendDelay = config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC;
-  const currentMaxDuration = config.maxDurationMs ?? AUTO_CONTINUE_DEFAULT_MAX_DURATION;
-  const currentMaxDurationMinutes = currentMaxDuration > 0 ? Math.round(currentMaxDuration / 60000) : 0;
-
-  const overlay = document.getElementById('auto-continue-overlay')!;
-  const messageInput = document.getElementById('auto-continue-message') as HTMLTextAreaElement;
-  const intervalInput = document.getElementById('auto-continue-interval') as HTMLInputElement;
-  const commandIntervalInput = document.getElementById('auto-continue-command-interval') as HTMLInputElement;
-  const autoAgreeCheckbox = document.getElementById('auto-continue-auto-agree') as HTMLInputElement;
-  const autoAgreeDelayInput = document.getElementById('auto-continue-agree-delay') as HTMLInputElement;
-  const autoAgreeDelayRow = document.getElementById('auto-agree-delay-row')!;
-  const sendDelayInput = document.getElementById('auto-continue-send-delay') as HTMLInputElement;
-  const maxDurationInput = document.getElementById('auto-continue-max-duration') as HTMLInputElement;
-  const saveBtn = document.getElementById('auto-continue-save')!;
-  const stopBtn = document.getElementById('auto-continue-stop')!;
-  const cancelBtn = document.getElementById('auto-continue-cancel')!;
-  const closeBtn = document.getElementById('auto-continue-dialog-close')!;
-
-  messageInput.value = currentMessages.join('\n');
-  messageInput.placeholder = 'One command per line, sent in order';
-  intervalInput.value = String(currentIntervalMinutes);
-  if (commandIntervalInput) commandIntervalInput.value = String(currentCommandInterval);
-  autoAgreeCheckbox.checked = currentAutoAgree;
-  autoAgreeDelayInput.value = String(currentAutoAgreeDelay);
-  autoAgreeDelayRow.style.display = currentAutoAgree ? '' : 'none';
-  sendDelayInput.value = String(currentSendDelay);
-  maxDurationInput.value = String(currentMaxDurationMinutes);
-
-  // Set the button label and visibility based on current state
-  if (config.enabled) {
-    saveBtn.textContent = 'Save';
-    stopBtn.style.display = '';
-  } else {
-    saveBtn.textContent = 'Save and Start';
-    stopBtn.style.display = 'none';
-  }
-
-  autoAgreeCheckbox.onchange = () => {
-    autoAgreeDelayRow.style.display = autoAgreeCheckbox.checked ? '' : 'none';
-  };
-
-  overlay.classList.add('active');
-  messageInput.focus();
-
-  function close(): void {
-    overlay.classList.remove('active');
-    saveBtn.removeEventListener('click', onSave);
-    stopBtn.removeEventListener('click', onStop);
-    cancelBtn.removeEventListener('click', close);
-    closeBtn.removeEventListener('click', close);
-    autoAgreeCheckbox.onchange = null;
-  }
-
-  function onSave(): void {
-    const messages = messageInput.value.split('\n').map(m => m.trim()).filter(Boolean);
-    if (!messages.length) { messageInput.focus(); return; }
-    const intervalMinutes = parseInt(intervalInput.value, 10);
-    if (isNaN(intervalMinutes) || intervalMinutes < 1) { intervalInput.focus(); return; }
-
-    const agreeDelay = parseInt(autoAgreeDelayInput.value, 10);
-    if (autoAgreeCheckbox.checked && (isNaN(agreeDelay) || agreeDelay < 0)) { autoAgreeDelayInput.focus(); return; }
-
-    const sendDelay = parseInt(sendDelayInput.value, 10);
-    if (isNaN(sendDelay) || sendDelay < 0) { sendDelayInput.focus(); return; }
-
-    const maxDurationMinutes = parseInt(maxDurationInput.value, 10);
-    if (isNaN(maxDurationMinutes) || maxDurationMinutes < 0) { maxDurationInput.focus(); return; }
-
-    config.messages = messages;
-    config.intervalMs = intervalMinutes * 60000;
-    if (commandIntervalInput) {
-      const cmdIntervalSec = parseInt(commandIntervalInput.value, 10);
-      config.commandIntervalMs = isNaN(cmdIntervalSec) || cmdIntervalSec < 0 ? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL : cmdIntervalSec * 1000;
-    }
-    config.lastSendTime = Date.now();
-    config.autoAgree = autoAgreeCheckbox.checked;
-    config.autoAgreeDelaySec = isNaN(agreeDelay) ? AUTO_AGREE_DEFAULT_DELAY_SEC : agreeDelay;
-    config.sendDelaySec = sendDelay;
-    config.maxDurationMs = maxDurationMinutes > 0 ? maxDurationMinutes * 60000 : 0;
-    sessionAutoContinue.set(sessionId, config);
-
-    if (!config.enabled) {
-      config.enabled = true;
-      config.enabledAt = Date.now();
-      initAutoContinueTimer();
-    }
-
-    saveAutoContinueToStorage();
-    close();
-    renderSessionList();
-  }
-
-  function onStop(): void {
-    config.enabled = false;
-    config.lastSendTime = Date.now();
-    sessionAutoContinue.set(sessionId, config);
-    saveAutoContinueToStorage();
-    initAutoContinueTimer();
-    close();
-    renderSessionList();
-  }
-
-  saveBtn.addEventListener('click', onSave);
-  stopBtn.addEventListener('click', onStop);
-  cancelBtn.addEventListener('click', close);
-  closeBtn.addEventListener('click', close);
 }
 
 // ID of the session whose title is currently being edited
@@ -4456,14 +4149,12 @@ function clearSessionState(id: string): void {
   sessionAgentId.delete(id);
   sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
-  sessionAutoContinue.delete(id);
   sessionAutoSwitchStatus.delete(id);
 }
 
 function destroySession(id: string): void {
   window.posse.destroyPty(id);
   clearSessionState(id);
-  saveAutoContinueToStorage();
   termManager.destroy(id);
   updateEmptyState();
   renderSessionList();
@@ -4479,7 +4170,6 @@ function destroySessions(ids: string[]): void {
     clearSessionState(id);
     termManager.destroy(id);
   }
-  saveAutoContinueToStorage();
   updateEmptyState();
   renderSessionList();
   updateSessionTitleBar();
@@ -4912,7 +4602,6 @@ function clearAllLocalSessions(): void {
     clearSessionState(id);
     termManager.destroy(id);
   }
-  saveAutoContinueToStorage();
   updateEmptyState();
   renderSessionList();
   updateSessionTitleBar();
@@ -5243,25 +4932,6 @@ window.posse.onPtyData((id, data) => {
       }
       break; // first match wins
     }
-    // When the loop is on, auto-confirm the CLI's various confirmation prompts (proceed / make this edit / etc.)
-    const acConfig = sessionAutoContinue.get(id);
-    let autoAgreeFired = false;
-    if (acConfig?.enabled && (acConfig.autoAgree ?? true) && /Do you want to .*\?/.test(plain)) {
-      autoAgreeFired = true;
-      // Count the option lines (format: "  1. xxx", "  2. xxx"...)
-      const optionCount = (plain.match(/^\s+\d+\.\s/gm) || []).length;
-      // 3 options: 1=Yes, 2=Yes (always), 3=No → choose 2
-      // 2 options: 1=Yes, 2=No → choose 1
-      const choice = optionCount >= 3 ? '2' : '1';
-      const delayMs = (acConfig.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC) * 1000;
-      setTimeout(() => {
-        window.posse.writePty(id, choice);
-        window.posse.writePty(id, String.fromCharCode(0x0d));
-        console.log(`[AutoConfirm] Session ${id} detected ${optionCount} options, choosing ${choice}, delayed ${delayMs}ms`);
-      }, delayMs);
-      // Clear the buffer to avoid re-triggering
-      recentDataBuffer.delete(id);
-    }
 
     // Prompt detection: split by line and check whether the last few lines contain a prompt
     const lines = plain.split('\n').map(l => l.trimEnd()).filter(l => l.length > 0);
@@ -5274,8 +4944,8 @@ window.posse.onPtyData((id, data) => {
     const decisionPrompt =
       /Do you want to .*\?/.test(plain) ||
       (/^\s*❯?\s*\d+\.\s/m.test(recentLines) && /\?/.test(recentLines));
-    if (decisionPrompt && !autoAgreeFired) {
-      // Awaiting the user's decision (and NOT being auto-handled). Waiting takes priority
+    if (decisionPrompt) {
+      // Awaiting the user's decision. Waiting takes priority
       // over busy/unread.
       clearTimeout(unreadTimers.get(id));
       unreadTimers.delete(id);
@@ -5368,7 +5038,6 @@ window.posse.onChatTitleUpdate((id, title) => {
 
 window.posse.onPtyExit((id) => {
   clearSessionState(id);
-  saveAutoContinueToStorage();
   termManager.destroy(id);
   updateEmptyState();
   renderSessionList();
@@ -5478,38 +5147,6 @@ window.posse.onAutoSwitchStatus((id, status, detail) => {
   } else {
     sessionAutoSwitchStatus.set(id, { status, detail });
   }
-  renderSessionList();
-});
-
-// Auto-continue config: mobile reads the desktop config via the main process
-window.posse.onGetAutoContinueConfig((sessionId) => {
-  const config = sessionAutoContinue.get(sessionId);
-  window.posse.sendAutoContinueConfig(sessionId, config || null);
-});
-
-// Auto-continue config: mobile writes the desktop config via the main process
-window.posse.onSetAutoContinueConfig((sessionId, config) => {
-  if (!config || !hasSessionInUI(sessionId)) return;
-  const existing = sessionAutoContinue.get(sessionId) || {
-    enabled: false,
-    messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
-    intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
-    commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-    lastSendTime: Date.now(),
-    autoAgree: true,
-    autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
-    sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
-    maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-    enabledAt: 0,
-  };
-  Object.assign(existing, config);
-  existing.lastSendTime = Date.now();
-  if (config.enabled && !existing.enabledAt) {
-    existing.enabledAt = Date.now();
-  }
-  sessionAutoContinue.set(sessionId, existing);
-  saveAutoContinueToStorage();
-  if (existing.enabled) initAutoContinueTimer();
   renderSessionList();
 });
 

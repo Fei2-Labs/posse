@@ -321,69 +321,6 @@ function showCopyToast(text) {
   }, 1200);
 }
 
-// ========== 催工核心逻辑（通过 API 读写桌面端配置）==========
-
-async function getAutoContinueConfig(sessionId) {
-  try {
-    return await api(`/api/sessions/${sessionId}/auto-continue`);
-  } catch {
-    return null;
-  }
-}
-
-async function saveAutoContinueConfig(sessionId, config) {
-  try {
-    await api(`/api/sessions/${sessionId}/auto-continue`, {
-      method: 'PUT',
-      body: JSON.stringify(config),
-    });
-  } catch (e) {
-    console.error('[AutoContinue] 保存失败', e);
-  }
-}
-
-async function toggleAutoContinue(sessionId, enabled) {
-  const config = await getAutoContinueConfig(sessionId) || {};
-  config.enabled = enabled;
-  await saveAutoContinueConfig(sessionId, config);
-  updateDetailAutoContinueUI(config);
-}
-
-async function showAutoContinueConfigModal(sessionId) {
-  const config = await getAutoContinueConfig(sessionId) || {};
-  const modal = $('auto-continue-modal');
-  // 兼容旧版 message → messages
-  const msgs = Array.isArray(config.messages) ? config.messages : (config.message ? [config.message] : ['继续']);
-  $('ac-message').value = msgs.join('\n');
-  $('ac-interval').value = String(Math.round((config.intervalMs || 600000) / 60000));
-  $('ac-cmd-interval').value = String(Math.round((config.commandIntervalMs || 2000) / 1000));
-  $('ac-send-delay').value = String(config.sendDelaySec ?? 2);
-  $('ac-max-duration').value = String(config.maxDurationMs ? Math.round(config.maxDurationMs / 60000) : 0);
-  $('ac-auto-agree').checked = config.autoAgree !== false;
-  $('ac-agree-delay').value = String(config.autoAgreeDelaySec ?? 5);
-  $('ac-agree-delay-row').style.display = $('ac-auto-agree').checked ? '' : 'none';
-
-  // 根据当前状态设置按钮
-  if (config.enabled) {
-    $('ac-save').textContent = '保存';
-    $('ac-stop').style.display = '';
-  } else {
-    $('ac-save').textContent = '保存并开启';
-    $('ac-stop').style.display = 'none';
-  }
-
-  modal.classList.add('active');
-}
-
-function updateDetailAutoContinueUI(config) {
-  const label = $('detail-ac-label');
-  if (label) {
-    const enabled = config && config.enabled;
-    label.textContent = '催';
-    label.className = 'ac-label' + (enabled ? ' enabled' : '');
-  }
-}
-
 // 判断终端是否滚动到底部附近（容差 2 行）
 function isAtBottom() {
   if (!term) return true;
@@ -1805,9 +1742,6 @@ async function openSession(id) {
   console.log('[openSession] terminal ready, cols=', term?.cols, 'rows=', term?.rows);
   connectWebSocket(id);
   console.log('[openSession] connectWebSocket called');
-
-  // 初始化催工 UI（从桌面端读取配置）
-  getAutoContinueConfig(id).then(config => updateDetailAutoContinueUI(config));
 }
 
 // 点击标题编辑
@@ -1835,64 +1769,6 @@ $('back-btn').onclick = () => {
   closeTerminal();
   showPage('main-page');
   refreshSessions();
-};
-
-// 催工：点击标签直接弹配置弹窗
-$('detail-ac-label').onclick = () => {
-  if (!currentSessionId) return;
-  showAutoContinueConfigModal(currentSessionId);
-};
-
-// 催工配置弹窗：自动同意 checkbox 联动
-$('ac-auto-agree').onchange = () => {
-  $('ac-agree-delay-row').style.display = $('ac-auto-agree').checked ? '' : 'none';
-};
-
-// 催工配置弹窗：取消
-$('ac-cancel').onclick = () => {
-  $('auto-continue-modal').classList.remove('active');
-};
-
-// 催工配置弹窗：点击遮罩关闭
-$('auto-continue-modal').onclick = (e) => {
-  if (e.target === $('auto-continue-modal')) {
-    $('auto-continue-modal').classList.remove('active');
-  }
-};
-
-// 催工配置弹窗：关闭催工
-$('ac-stop').onclick = async () => {
-  if (!currentSessionId) return;
-  await toggleAutoContinue(currentSessionId, false);
-  $('auto-continue-modal').classList.remove('active');
-};
-
-// 催工配置弹窗：保存并开启
-$('ac-save').onclick = async () => {
-  if (!currentSessionId) return;
-  const msgs = $('ac-message').value.split('\n').map(m => m.trim()).filter(Boolean);
-  if (!msgs.length) { $('ac-message').focus(); return; }
-  const intervalMinutes = parseInt($('ac-interval').value, 10);
-  if (isNaN(intervalMinutes) || intervalMinutes < 1) { $('ac-interval').focus(); return; }
-  const agreeDelay = parseInt($('ac-agree-delay').value, 10);
-  const cmdIntervalSec = parseInt($('ac-cmd-interval')?.value || '2', 10);
-  const sendDelaySec = parseInt($('ac-send-delay')?.value || '2', 10);
-  const maxDurationMinutes = parseInt($('ac-max-duration')?.value || '0', 10);
-
-  const config = {
-    enabled: true,
-    messages: msgs,
-    intervalMs: intervalMinutes * 60000,
-    commandIntervalMs: (isNaN(cmdIntervalSec) || cmdIntervalSec < 0 ? 2 : cmdIntervalSec) * 1000,
-    sendDelaySec: isNaN(sendDelaySec) || sendDelaySec < 0 ? 2 : sendDelaySec,
-    maxDurationMs: isNaN(maxDurationMinutes) || maxDurationMinutes < 0 ? 0 : maxDurationMinutes * 60000,
-    autoAgree: $('ac-auto-agree').checked,
-    autoAgreeDelaySec: isNaN(agreeDelay) ? 5 : agreeDelay,
-  };
-
-  await saveAutoContinueConfig(currentSessionId, config);
-  $('auto-continue-modal').classList.remove('active');
-  updateDetailAutoContinueUI(config);
 };
 
 // 发送消息 — 点击发送按钮

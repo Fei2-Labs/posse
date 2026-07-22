@@ -1878,89 +1878,6 @@ html, body {
   color: #fff;
 }
 
-/* Auto-continue toggle switch */
-.session-auto-continue-toggle {
-  position: relative;
-  display: inline-flex;
-  width: 32px;
-  height: 16px;
-  flex-shrink: 0;
-  align-self: center;
-  cursor: pointer;
-}
-
-.session-auto-continue-toggle input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.session-auto-continue-toggle .toggle-slider {
-  position: absolute;
-  cursor: pointer;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: #4a4a4a;
-  transition: 0.2s;
-  border-radius: 18px;
-}
-
-.session-auto-continue-toggle .toggle-slider:before {
-  position: absolute;
-  content: "";
-  height: 12px;
-  width: 12px;
-  left: 2px;
-  bottom: 2px;
-  background-color: white;
-  transition: 0.2s;
-  border-radius: 50%;
-}
-
-.session-auto-continue-toggle input:checked + .toggle-slider {
-  background-color: #4caf50;
-}
-
-.session-auto-continue-toggle input:checked + .toggle-slider:before {
-  transform: translateX(16px);
-}
-
-.session-auto-continue-toggle:hover .toggle-slider {
-  background-color: #5a5a5a;
-}
-
-.session-auto-continue-toggle input:checked:hover + .toggle-slider {
-  background-color: #66bb6a;
-}
-
-/* Auto-continue text label */
-.session-auto-continue-label {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 12px;
-  cursor: pointer;
-  background: #555;
-  color: #aaa;
-  flex-shrink: 0;
-  align-self: center;
-  transition: background 0.2s, color 0.2s;
-}
-
-.session-auto-continue-label.enabled {
-  background: #4caf50;
-  color: #fff;
-}
-
-.session-auto-continue-label:hover {
-  background: #666;
-}
-
-.session-auto-continue-label.enabled:hover {
-  background: #66bb6a;
-}
-
 /* Auto account-switch status label */
 .session-switch-status {
   font-size: 10px;
@@ -1998,23 +1915,6 @@ html, body {
 @keyframes switch-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
-}
-
-/* Config button */
-.session-auto-continue-config-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 11px;
-  padding: 2px;
-  opacity: 0.5;
-  transition: opacity 0.2s;
-  flex-shrink: 0;
-  align-self: center;
-}
-
-.session-auto-continue-config-btn:hover {
-  opacity: 1;
 }
 
 /* Pin button */

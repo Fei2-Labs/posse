@@ -1019,24 +1019,6 @@ export function startRemoteServer(
     }
   });
 
-  // ========== Auto-continue config API ==========
-
-  // Read the auto-continue config (from the desktop renderer)
-  app.get('/api/sessions/:id/auto-continue', async (req, res) => {
-    const getConfig = (global as any).__getAutoContinueConfig;
-    if (!getConfig) { res.json(null); return; }
-    const config = await getConfig(req.params.id);
-    res.json(config);
-  });
-
-  // Write the auto-continue config (synced to the desktop renderer)
-  app.put('/api/sessions/:id/auto-continue', (req, res) => {
-    const setConfig = (global as any).__setAutoContinueConfig;
-    if (!setConfig) { res.status(500).json({ error: 'Desktop not ready' }); return; }
-    setConfig(req.params.id, req.body);
-    res.json({ ok: true });
-  });
-
   // SSE event stream
   app.get('/api/events', (req, res) => {
     res.writeHead(200, {

@@ -67,47 +67,6 @@
     </div>
   </div>
 
-  <!-- Loop config dialog -->
-  <div id="auto-continue-overlay" class="new-session-overlay">
-    <div class="new-session-dialog" style="width: min(400px, calc(100vw - 40px));">
-      <div class="new-session-header">
-        <h3>Loop Settings</h3>
-        <button id="auto-continue-dialog-close" class="new-session-close" title="Close">&times;</button>
-      </div>
-      <div class="new-session-body">
-        <label>Command list (one per line, sent in order)</label>
-        <textarea id="auto-continue-message" rows="4" placeholder="One command per line, sent in order" style="width:100%;resize:vertical;padding:6px 8px;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary);font-size:12px;outline:none;font-family:inherit;"></textarea>
-        <label>Loop interval (minutes)</label>
-        <input id="auto-continue-interval" type="number" min="1" placeholder="minutes" />
-        <label>Command interval (seconds)</label>
-        <input id="auto-continue-command-interval" type="number" min="0" value="2" placeholder="seconds" />
-        <div style="margin-top: 8px;">
-          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-            <input id="auto-continue-auto-agree" type="checkbox" checked />
-            Enable auto-approve (auto-confirm permission prompts)
-          </label>
-        </div>
-        <div id="auto-agree-delay-row" style="margin-top: 6px;">
-          <label>Auto-approve delay (seconds)</label>
-          <input id="auto-continue-agree-delay" type="number" min="0" value="5" placeholder="seconds" />
-        </div>
-        <div style="margin-top: 8px;">
-          <label>Send delay (seconds)<span style="font-size:10px;color:#888;">— how long to wait after typing before sending Enter</span></label>
-          <input id="auto-continue-send-delay" type="number" min="0" value="2" placeholder="seconds" />
-        </div>
-        <div style="margin-top: 8px;">
-          <label>Max duration (minutes)<span style="font-size:10px;color:#888;">— auto-stop the loop after this time; 0 means no limit</span></label>
-          <input id="auto-continue-max-duration" type="number" min="0" value="0" placeholder="minutes (0=no limit)" />
-        </div>
-      </div>
-      <div class="confirm-buttons" style="margin-top: 12px;">
-        <button id="auto-continue-cancel" class="btn-cancel">Cancel</button>
-        <button id="auto-continue-stop" class="btn-close-confirm" style="display:none;">Stop Loop</button>
-        <button id="auto-continue-save" class="toolbar-btn">Save and Start</button>
-      </div>
-    </div>
-  </div>
-
   <!-- Main body -->
   <div id="main">
     <!-- Left sidebar collapse button -->

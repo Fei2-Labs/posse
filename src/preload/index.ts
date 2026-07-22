@@ -177,14 +177,6 @@ contextBridge.exposeInMainWorld('posse', {
   syncSessionStatus: (statuses: Record<string, string>) =>
     ipcRenderer.send('session:sync-status', statuses),
 
-  // Auto-continue config: read/written by the main process from the renderer
-  onGetAutoContinueConfig: (cb: (sessionId: string) => void) =>
-    ipcRenderer.on('auto-continue:get', (_e, sessionId) => cb(sessionId)),
-  sendAutoContinueConfig: (sessionId: string, config: any) =>
-    ipcRenderer.send('auto-continue:config-reply', sessionId, config),
-  onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) =>
-    ipcRenderer.on('auto-continue:set', (_e, sessionId, config) => cb(sessionId, config)),
-
   // ========== Closed sessions ==========
   closedSessionsList: () => ipcRenderer.invoke('closed-sessions:list'),
   closedSessionsRemove: (id: string) => ipcRenderer.invoke('closed-sessions:remove', id),

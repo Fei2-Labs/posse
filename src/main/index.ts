@@ -3314,41 +3314,6 @@ function registerIPC(): void {
   // Renderer proactively fetches remote server info (resolves the race where IPC messages arrive before the renderer loads)
   ipcMain.handle('remote:get-server-info', () => cachedRemoteServerInfo);
 
-  // ========== Auto-continue config relay IPC ==========
-  // The main process acts as a relay: remote-server API -> the renderer's sessionAutoContinue
-
-  // Holds pending get-request callbacks
-  const autoContinuePendingGets = new Map<string, (config: any) => void>();
-
-  // The renderer replies with the config
-  ipcMain.on('auto-continue:config-reply', (_e, sessionId: string, config: any) => {
-    const resolve = autoContinuePendingGets.get(sessionId);
-    if (resolve) {
-      autoContinuePendingGets.delete(sessionId);
-      resolve(config);
-    }
-  });
-
-  // Called by remote-server: read the auto-continue config
-  (global as any).__getAutoContinueConfig = (sessionId: string): Promise<any> => {
-    return new Promise((resolve) => {
-      autoContinuePendingGets.set(sessionId, resolve);
-      safeSend('auto-continue:get', sessionId);
-      // Timeout fallback
-      setTimeout(() => {
-        if (autoContinuePendingGets.has(sessionId)) {
-          autoContinuePendingGets.delete(sessionId);
-          resolve(null);
-        }
-      }, 2000);
-    });
-  };
-
-  // Called by remote-server: write the auto-continue config
-  (global as any).__setAutoContinueConfig = (sessionId: string, config: any): void => {
-    safeSend('auto-continue:set', sessionId, config);
-  };
-
   // Called by remote-server: read session status (busy/unread/idle)
   // The renderer syncs status here via IPC
   (global as any).__sessionStatuses = {} as Record<string, string>;
