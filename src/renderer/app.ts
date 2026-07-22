@@ -1943,6 +1943,23 @@ function statusDbg(event: string, id: string, detail?: string): void {
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
 const recentDataBuffer: Map<string, string> = new Map();
+// Context-usage % per live session, surfaced as a small chip on the session row. Shows "used"
+// (higher = closer to the limit), normalized from whichever phrasing the agent emits. Only agents
+// that print a context line get a value; agents with no parseable signal simply show no chip.
+const sessionContextPct: Map<string, number> = new Map();
+// Context-usage patterns. Ordered most-specific-first; first match wins. Each entry extracts a
+// percentage and a flag for whether it's "remaining"/"left" semantics (inverted to "used" on store).
+// To add a new agent: append one {re, invert} object derived from its emitted status line.
+const CONTEXT_PATTERNS: ReadonlyArray<{ re: RegExp; invert: boolean }> = [
+  // Devin structured: "Context: 157k / 200k tokens (78%)" — (78%) is used.
+  { re: /Context:\s*\d+(?:\.\d+)?[km]?\s*\/\s*\d+(?:\.\d+)?[km]?\s*tokens?\s*\((\d+)%\)/i, invert: false },
+  // Devin legacy: "72% remaining" → invert.
+  { re: /(\d+)%\s*remaining\b/i, invert: true },
+  // Claude: "87% context used (167k tokens)" / "100% context used".
+  { re: /(\d+)%\s*context\s*used\b/i, invert: false },
+  // Claude: "Context left until auto-compact: 87%" → invert.
+  { re: /context\s*(?:left|until)[^:\n]*:\s*(\d+)%/i, invert: true },
+];
 // Tiny rolling carry used ONLY for the WORKING test. Holds the last ~64 chars of raw output so a
 // spinner split across two pty chunks still matches — but small enough that a finished agent's
 // result/prompt text pushes any old spinner word OUT of the window within one or two chunks. This
@@ -2968,6 +2985,17 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   item.appendChild(dot);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
+  // Context-usage chip: only when an agent emitted a parseable context line (Claude, Devin).
+  // Codex/Copilot/Kiro emit none → no chip. Color: green < 60%, amber 60–85%, red > 85%.
+  const ctxPct = sessionContextPct.get(id);
+  if (ctxPct !== undefined) {
+    const chip = document.createElement('span');
+    chip.className = 'nav-session-context-chip'
+      + (ctxPct > 85 ? ' ctx-red' : ctxPct >= 60 ? ' ctx-amber' : ' ctx-green');
+    chip.textContent = `${ctxPct}%`;
+    chip.title = `${ctxPct}% context used`;
+    item.appendChild(chip);
+  }
   item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(editBtn);
   item.appendChild(closeBtn);
@@ -4419,6 +4447,7 @@ function clearSessionState(id: string): void {
   sessionLastWorkingAt.delete(id);
   sessionLastAttachAt.delete(id);
   sessionTitleLocked.delete(id);
+  sessionContextPct.delete(id);
   // NOTE: don't unpin here — pins are keyed by conversationKey (not the ephemeral
   // pty id) so a pinned session stays pinned after it closes / is resumed (#38).
   sessionCwds.delete(id);
@@ -5197,6 +5226,23 @@ window.posse.onPtyData((id, data) => {
     // Detect the AI CLI prompt after stripping ANSI escapes
     // Improvement: only match real prompts, excluding false positives like HTML tags
     const plain = recentDataBuffer.get(id)!.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+
+    // Context-usage % extraction. plain is ANSI-stripped and bridges chunk boundaries via the
+    // 500-char recentDataBuffer carry, so a status line split across chunks still matches. Only
+    // re-render when the percentage actually changes (no storm on every chunk). "remaining"/"left"
+    // phrasings are inverted to "used" so the chip always means "how full".
+    for (const pat of CONTEXT_PATTERNS) {
+      const m = pat.re.exec(plain);
+      if (!m) continue;
+      let pct = Math.round(Number(m[1]));
+      if (!Number.isFinite(pct)) break;
+      pct = Math.max(0, Math.min(100, pat.invert ? 100 - pct : pct));
+      if (sessionContextPct.get(id) !== pct) {
+        sessionContextPct.set(id, pct);
+        renderSessionList();
+      }
+      break; // first match wins
+    }
     // When the loop is on, auto-confirm the CLI's various confirmation prompts (proceed / make this edit / etc.)
     const acConfig = sessionAutoContinue.get(id);
     let autoAgreeFired = false;

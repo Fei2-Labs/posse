@@ -1649,6 +1649,21 @@ html, body {
   color: var(--text-secondary, #888);
 }
 
+/* Context-usage chip: shown only when the agent emits a parseable context line (Claude, Devin).
+   Color tiers: green < 60%, amber 60–85%, red > 85%. */
+.nav-session-context-chip {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.2px;
+}
+.nav-session-context-chip.ctx-green  { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
+.nav-session-context-chip.ctx-amber  { color: #fbbf24; background: rgba(251, 191, 36, 0.14); }
+.nav-session-context-chip.ctx-red    { color: #f87171; background: rgba(248, 113, 113, 0.15); }
+
 .nav-session-action {
   width: 18px;
   height: 18px;
