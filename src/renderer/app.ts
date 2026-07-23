@@ -76,9 +76,10 @@ declare global {
       projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
         path: string;
         name: string;
+        aliases: string[];
         agents: Array<{
           agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
-          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin'; sourcePath: string; archived?: boolean }>;
+          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin'; sourcePath: string; archived?: boolean; cwd?: string }>;
         }>;
         lastActiveMs: number;
       }>>;
@@ -220,10 +221,10 @@ let showArchivedProjects: Set<string> = (() => {
   } catch { return new Set(); }
 })();
 function isShowArchived(normalizedKey: string): boolean {
-  return showArchivedProjects.has(normalizedKey);
+  return showArchivedProjects.has(canonicalProjectKey(normalizedKey));
 }
 function setShowArchived(projPath: string, on: boolean): void {
-  const key = normalizeCwd(projPath);
+  const key = canonicalProjectKey(projPath);
   if (on) showArchivedProjects.add(key); else showArchivedProjects.delete(key);
   try { localStorage.setItem(SHOW_ARCHIVED_KEY, JSON.stringify([...showArchivedProjects])); } catch { /* ignore */ }
   renderSessionList();
@@ -393,13 +394,20 @@ let selectedProjectPath: string | null = null;
 // Backend-discovered, multi-agent (Claude/Codex/Kiro/Copilot) session history keyed by normalized
 // project path. Loaded via window.posse.projectsList({ extraFolders }) — see refreshProjectsData().
 type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
-interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId; sourcePath?: string; archived?: boolean }
+interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId; sourcePath?: string; archived?: boolean; cwd?: string }
 interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
-interface BackendProject { path: string; name: string; agents: BackendProjectAgent[]; lastActiveMs: number }
+interface BackendProject { path: string; name: string; aliases: string[]; agents: BackendProjectAgent[]; lastActiveMs: number }
 
 // Normalized-path -> backend project record (merged with user-added folders in refreshProjectsData)
 const backendProjects: Map<string, BackendProject> = new Map();
+const projectCanonicalAliases: Map<string, string> = new Map();
 let projectsDataLoading = false;
+let projectsDataRefreshPending = false;
+
+function canonicalProjectKey(cwd: string): string {
+  const key = normalizeCwd(cwd);
+  return projectCanonicalAliases.get(key) || key;
+}
 
 // Display label per backend agent id
 const AGENT_ID_LABEL: Record<ProjectsAgentId, string> = {
@@ -586,7 +594,7 @@ const PROJECT_TAG_PALETTE: Array<{ bg: string; border: string; fg: string }> = [
 const projectColorAssignments = new Map<string, { bg: string; border: string; fg: string }>();
 const projectColorSlotsUsed = new Set<number>();
 function projectColorForCwd(cwd: string): { bg: string; border: string; fg: string } {
-  const key = normalizeCwd(cwd || '');
+  const key = canonicalProjectKey(cwd || '');
   const existing = projectColorAssignments.get(key);
   if (existing) return existing;
 
@@ -651,15 +659,69 @@ async function syncSessionAgentIds(): Promise<void> {
 }
 
 async function refreshProjectsData(): Promise<void> {
-  if (projectsDataLoading) return;
+  if (projectsDataLoading) {
+    projectsDataRefreshPending = true;
+    return;
+  }
   projectsDataLoading = true;
   try {
     await syncSessionAgentIds();
-    const extraFolders = projects.map(p => p.path);
+    // Include every local source, not just persisted projects: live/restored
+    // PTYs and closed records may be the only references to a worktree.
+    const extraFolders = Array.from(new Set([
+      ...projects.map((p) => p.path),
+      ...sessionCwds.values(),
+      ...closedSessions.map((session) => session.cwd),
+    ].filter(Boolean)));
     const list = await window.posse.projectsList({ extraFolders });
     backendProjects.clear();
+    projectCanonicalAliases.clear();
     for (const proj of list) {
-      backendProjects.set(normalizeCwd(proj.path), proj as BackendProject);
+      const canonical = normalizeCwd(proj.path);
+      backendProjects.set(canonical, proj as BackendProject);
+      projectCanonicalAliases.set(canonical, canonical);
+      for (const alias of proj.aliases || []) projectCanonicalAliases.set(normalizeCwd(alias), canonical);
+    }
+
+    // Fold saved worktree entries into their canonical project while retaining
+    // user metadata. This also removes stale top-level worktree rows.
+    const coalesced = new Map<string, ProjectEntry>();
+    for (const saved of projects) {
+      const savedKey = normalizeCwd(saved.path);
+      const canonicalKey = projectCanonicalAliases.get(savedKey) || savedKey;
+      const backend = backendProjects.get(canonicalKey);
+      const canonicalPath = backend?.path || saved.path;
+      const existing = coalesced.get(canonicalKey);
+      if (!existing) {
+        coalesced.set(canonicalKey, { ...saved, path: canonicalPath });
+      } else {
+        existing.pinned = existing.pinned || saved.pinned;
+        existing.addedAt = Math.min(existing.addedAt, saved.addedAt);
+        // Prefer an explicit name already attached to the canonical record;
+        // otherwise retain a useful name from a stale alias record.
+        if (saved.name && (savedKey === canonicalKey || !existing.name)) existing.name = saved.name;
+      }
+      if (savedKey !== canonicalKey) {
+        if (expandedProjects.delete(savedKey)) expandedProjects.add(canonicalKey);
+        if (searchCollapsedProjects.delete(savedKey)) searchCollapsedProjects.add(canonicalKey);
+        if (showArchivedProjects.delete(savedKey)) showArchivedProjects.add(canonicalKey);
+        for (const groupKey of Array.from(expandedAgentGroups)) {
+          const prefix = `${savedKey}::`;
+          if (!groupKey.startsWith(prefix)) continue;
+          expandedAgentGroups.delete(groupKey);
+          expandedAgentGroups.add(`${canonicalKey}::${groupKey.slice(prefix.length)}`);
+        }
+      }
+      // Keep selectedProjectPath at the actual checkout cwd. Canonical comparisons
+      // still highlight the grouped row without rerooting file operations.
+    }
+    projects = Array.from(coalesced.values());
+    saveExpandState();
+    try {
+      localStorage.setItem(SHOW_ARCHIVED_KEY, JSON.stringify([...showArchivedProjects]));
+    } catch { /* ignore quota errors */ }
+
+    for (const proj of list) {
       // Auto-register discovered folders (with a real path) so they render in the Projects list.
       if (proj.path && !findProject(proj.path)) {
         projects.push({ path: proj.path, pinned: false, addedAt: proj.lastActiveMs || Date.now() });
@@ -671,6 +733,10 @@ async function refreshProjectsData(): Promise<void> {
   } finally {
     projectsDataLoading = false;
     renderSessionList();
+    if (projectsDataRefreshPending) {
+      projectsDataRefreshPending = false;
+      void refreshProjectsData();
+    }
   }
 }
 
@@ -703,29 +769,29 @@ function saveProjects(): void {
 }
 
 function findProject(path: string): ProjectEntry | undefined {
-  const key = normalizeCwd(path);
-  return projects.find(p => normalizeCwd(p.path) === key);
+  const key = canonicalProjectKey(path);
+  return projects.find(p => canonicalProjectKey(p.path) === key);
 }
 
 function addProject(path: string): void {
   if (!path) return;
   if (findProject(path)) {
     // Already exists: just expand it
-    setProjectExpanded(normalizeCwd(path), true);
+    setProjectExpanded(canonicalProjectKey(path), true);
     renderSessionList();
     return;
   }
   projects.push({ path, pinned: false, addedAt: Date.now() });
-  setProjectExpanded(normalizeCwd(path), true);
+  setProjectExpanded(canonicalProjectKey(path), true);
   saveProjects();
   renderSessionList();
 }
 
 function removeProject(path: string): void {
-  const key = normalizeCwd(path);
-  projects = projects.filter(p => normalizeCwd(p.path) !== key);
+  const key = canonicalProjectKey(path);
+  projects = projects.filter(p => canonicalProjectKey(p.path) !== key);
   setProjectExpanded(key, false);
-  if (selectedProjectPath && normalizeCwd(selectedProjectPath) === key) {
+  if (selectedProjectPath && canonicalProjectKey(selectedProjectPath) === canonicalProjectKey(key)) {
     selectedProjectPath = null;
     updateSessionTitleBar();
     void renderFileTree();
@@ -782,15 +848,15 @@ function projectDisplayName(p: ProjectEntry): string {
 // Most-recent activity for a project (ms): backend lastActiveMs, else any matching live/closed
 // session time, else the time the project was added. Used by the "Recent" sort.
 function projectLastActiveMs(p: ProjectEntry): number {
-  const key = normalizeCwd(p.path);
+  const key = canonicalProjectKey(p.path);
   let latest = backendProjects.get(key)?.lastActiveMs || 0;
   for (const id of sessionTitles.keys()) {
-    if (normalizeCwd(sessionCwds.get(id) || '') === key) {
+    if (canonicalProjectKey(sessionCwds.get(id) || '') === key) {
       latest = Math.max(latest, sessionUpdateTimes.get(id) || 0);
     }
   }
   for (const cs of closedSessions) {
-    if (normalizeCwd(cs.cwd || '') === key) latest = Math.max(latest, cs.closedAt || 0);
+    if (canonicalProjectKey(cs.cwd || '') === key) latest = Math.max(latest, cs.closedAt || 0);
   }
   return latest || p.addedAt || 0;
 }
@@ -2898,7 +2964,7 @@ function showSessionContextMenu(e: MouseEvent, targetId: string): void {
       label: 'Close other sessions in this project',
       action: () => {
         destroySessions(Array.from(sessionTitles.keys()).filter(id =>
-          id !== targetId && normalizeCwd(sessionCwds.get(id) || '') === targetCwdKey
+          id !== targetId && canonicalProjectKey(sessionCwds.get(id) || '') === canonicalProjectKey(targetCwdKey)
         ));
       },
     },
@@ -3216,7 +3282,7 @@ function closedSessionRecentKey(cs: ClosedSessionInfo): string {
 }
 
 function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup> {
-  const key = normalizeCwd(projPath);
+  const key = canonicalProjectKey(projPath);
   const groups = new Map<string, ProjectAgentGroup>();
   const ensure = (family: string): ProjectAgentGroup => {
     let g = groups.get(family);
@@ -3241,7 +3307,7 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
 
   // 1. Live PTY sessions in this cwd (highest priority)
   for (const id of sessionTitles.keys()) {
-    if (normalizeCwd(sessionCwds.get(id) || '') !== key) continue;
+    if (canonicalProjectKey(sessionCwds.get(id) || '') !== key) continue;
     const uuid = sessionResumeId.get(id) || sessionAgentId.get(id);
     // Live↔live dedup: two live PTYs can share one uuid if discovery mis-bound a fresh
     // run to an already-active session's file. Skip the duplicate so the sidebar never
@@ -3257,7 +3323,7 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
 
   // 2. Closed DuoCLI sessions in this cwd — skip any already shown as a live PTY.
   for (const cs of closedSessions) {
-    if (normalizeCwd(cs.cwd || '') !== key) continue;
+    if (canonicalProjectKey(cs.cwd || '') !== key) continue;
     if (cs.resumeId && shownUuids.has(conversationKey(cs.resumeId))) continue;
     const family = agentFamilyFromDisplayName(cs.displayName || '');
     const g = ensure(family);
@@ -3283,7 +3349,7 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
         g.history.push({
           id: s.id,
           title: s.title,
-          cwd: backend.path,
+          cwd: s.cwd || backend.path,
           mtimeMs: s.mtimeMs,
           // ClaudeHistorySession.agent is a narrow union; only claude/codex are typed there.
           agent: agentGroup.agent === 'codex' ? 'codex' : 'claude',
@@ -3308,7 +3374,7 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
 
 // Render a single project entry (collapsed by default)
 function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
-  const key = normalizeCwd(p.path);
+  const key = canonicalProjectKey(p.path);
   // While searching, force-expand matching projects to reveal hits (without mutating persisted
   // collapse state). Two refinements (#60): (1) only force-expand projects that have a matching
   // CHILD — name-only matches respect the user's persisted expand state instead of dumping all
@@ -3320,7 +3386,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
     ? projectHasMatchingChild(p) && !searchCollapsedProjects.has(key)
     : expandedProjects.has(key);
 
-  const isSelected = selectedProjectPath != null && normalizeCwd(selectedProjectPath) === key;
+  const isSelected = selectedProjectPath != null && canonicalProjectKey(selectedProjectPath) === key;
   const row = document.createElement('div');
   row.className = 'nav-project-row' + (isExpanded ? ' expanded' : '') + (isSelected ? ' selected' : '');
 
@@ -3508,7 +3574,7 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
         const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family); appendProjectTag(el, id);
         out.push({
           time: sessionUpdateTimes.get(id) || 0,
-          projectKey: normalizeCwd(sessionCwds.get(id) || ''),
+          projectKey: canonicalProjectKey(sessionCwds.get(id) || ''),
           el,
         });
       }
@@ -4187,6 +4253,8 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   if (replayRawBuffer && info.rawBuffer) {
     termManager.write(info.id, info.rawBuffer);
   }
+  // A live/restored session may be the only reference to this checkout.
+  void refreshProjectsData();
 }
 
 // Extract the agent + session id from a captured resume command, so we can
@@ -4319,7 +4387,7 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   if (cs.resumeId && isMeaningfulTitle(cs.title)) {
     window.posse.renamePty(result.id, cs.title);
   }
-  if (cwd) { selectedProjectPath = cwd; setProjectExpanded(normalizeCwd(cwd), true); }
+  if (cwd) { selectedProjectPath = cwd; setProjectExpanded(canonicalProjectKey(cwd), true); }
 
   // Remove from the closed list
   closedSessions = await window.posse.closedSessionsRemove(cs.id);
@@ -4391,7 +4459,7 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   if (isMeaningfulTitle(s.title)) {
     window.posse.renamePty(result.id, s.title);
   }
-  if (s.cwd) { selectedProjectPath = s.cwd; setProjectExpanded(normalizeCwd(s.cwd), true); }
+  if (s.cwd) { selectedProjectPath = s.cwd; setProjectExpanded(canonicalProjectKey(s.cwd), true); }
 
   updateEmptyState();
   renderSessionList();
@@ -5529,10 +5597,12 @@ void waitForRemoteServerInfo();
 window.posse.closedSessionsList().then(sessions => {
   closedSessions = sessions;
   renderSessionList();
+  void refreshProjectsData();
 });
 window.posse.onClosedSessionsUpdate((sessions) => {
   closedSessions = sessions;
   renderSessionList();
+  void refreshProjectsData();
 });
 
 // ========== Closed chat sessions: load on startup + live updates ==========

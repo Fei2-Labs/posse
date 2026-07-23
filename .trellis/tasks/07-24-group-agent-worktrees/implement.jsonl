@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Place reusable Git canonical-root logic in an Electron-free service/lib module and keep handlers thin."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Handle expected non-Git, timeout, and remote protocol failures without silent success-shaped corruption."}
+{"file": ".trellis/spec/backend/api-patterns.md", "reason": "Follow existing backend/remote API request and response patterns for the batch canonical-root endpoint."}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Keep Git/process work in the main or remote backend and expose only typed data to the renderer."}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Extend project/alias shapes consistently across preload and renderer boundaries."}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Maintain explicit, reusable TypeScript types across local and remote grouping paths."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace canonical project identity through resolver, API/IPC, backend bucketing, renderer state, and persisted aliases."}
+{"file": ".trellis/tasks/07-24-group-agent-worktrees/research/worktree-canonical-root.md", "reason": "Use verified Git common-dir semantics, public comparable implementations, and documented edge-case handling."}

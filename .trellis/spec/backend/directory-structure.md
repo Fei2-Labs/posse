@@ -119,6 +119,85 @@ tests/
 4. **lib/ is optional** - Only add when you have reusable logic
 5. **IPC handlers are thin** - They only call procedures, no business logic
 
+## Scenario: Canonical Git Project Identity
+
+### 1. Scope / Trigger
+
+Use this contract whenever project/session UI groups cwd values that may belong
+to linked Git worktrees. Checkout cwd is execution state; canonical project path
+is grouping state. Never replace a PTY, resume, file, or Git operation cwd with
+the grouping path.
+
+### 2. Signatures
+
+```typescript
+resolveGitProjectRoot(cwd: string): Promise<string>
+resolveGitProjectRoots(cwds: string[]): Promise<Array<{
+  cwd: string;
+  canonicalPath: string;
+}>>
+
+POST /api/git/project-roots
+body: { paths: string[] }
+response: { roots: Array<{ cwd: string; canonicalPath: string }> }
+```
+
+Project-list records include `aliases: string[]`; each alias is a raw checkout
+path grouped under the record's canonical `path`.
+
+### 3. Contracts
+
+- Resolve with `execFile('git', ['-C', cwd, 'rev-parse', ...])`, never a shell.
+- Git common-dir is repository identity. For a non-bare, non-submodule common
+  directory ending in `.git`, its parent is the canonical main checkout.
+- Non-Git, missing, bare, submodule, timeout, and malformed-output cases keep
+  the normalized input cwd.
+- Resolution runs on the host owning the path. Remote desktop clients call the
+  token-authenticated batch endpoint; they never run local Git on remote paths.
+- Project aliases affect grouping/comparison only. Session cwd remains raw.
+- Sanitize inherited `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`, and
+  `GIT_INDEX_FILE` before repository discovery.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| `paths` is not an array | HTTP 400 `paths-array-required` |
+| More than 2000 paths | HTTP 413 `too-many-paths` |
+| Empty, non-string, or >4096-char path | HTTP 400 `invalid-path` |
+| Git unavailable/non-Git/timeout | Return input cwd as `canonicalPath` |
+| Old remote lacks endpoint | Client falls back one-to-one to input cwd |
+| Separate clones share a remote | Keep separate; common dirs differ |
+
+### 5. Good / Base / Bad Cases
+
+- **Good**: linked worktree cwd aliases the main checkout project while PTY cwd
+  remains the linked checkout.
+- **Base**: normal checkout and ordinary non-Git folder map to themselves.
+- **Bad**: grouping by folder name or remote URL merges unrelated clones and
+  breaks when an agent changes its generated worktree naming.
+
+### 6. Tests Required
+
+- Temporary linked worktree resolves to its main checkout.
+- Nested cwd inside that worktree resolves to the same checkout.
+- Normal checkout and non-Git directory map to themselves.
+- Separate clones of one source remain distinct.
+- Inherited Git repository-selection environment variables do not reroot an
+  unrelated cwd.
+- Bucketing exposes raw worktree aliases under one canonical path.
+
+### 7. Wrong vs Correct
+
+```typescript
+// Wrong: path naming is product-specific and does not preserve clone identity.
+const project = cwd.includes('copilot-worktrees') ? guessParent(cwd) : cwd;
+
+// Correct: Git metadata supplies identity; cwd remains untouched for execution.
+const canonicalPath = await resolveGitProjectRoot(cwd);
+return { path: canonicalPath, aliases: [cwd, canonicalPath] };
+```
+
 ---
 
 ## IPC Handler Example

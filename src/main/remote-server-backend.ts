@@ -372,6 +372,32 @@ export class RemoteServerBackend implements PtyBackend {
     }
   }
 
+  /** Resolve canonical Git project roots on the remote host in one request. */
+  async resolveGitProjectRoots(paths: string[]): Promise<Array<{ cwd: string; canonicalPath: string }>> {
+    if (paths.length === 0) return [];
+    try {
+      const response = await this.request<{ roots: Array<{ cwd: string; canonicalPath: string }> }>(
+        'POST',
+        '/api/git/project-roots',
+        { paths },
+      );
+      if (!Array.isArray(response.roots)) return paths.map((cwd) => ({ cwd, canonicalPath: cwd }));
+      const requested = new Set(paths);
+      const valid = response.roots.filter(
+        (item): item is { cwd: string; canonicalPath: string } =>
+          !!item
+          && typeof item.cwd === 'string'
+          && requested.has(item.cwd)
+          && typeof item.canonicalPath === 'string'
+          && item.canonicalPath !== '',
+      );
+      const byCwd = new Map(valid.map((item) => [item.cwd, item]));
+      return paths.map((cwd) => byCwd.get(cwd) || { cwd, canonicalPath: cwd });
+    } catch {
+      return paths.map((cwd) => ({ cwd, canonicalPath: cwd }));
+    }
+  }
+
   /** List a remote directory (GET /api/fs/list). Mirrors `file-tree:list-dir`. */
   async fsList(dirPath: string): Promise<Array<{ name: string; path: string; isDir: boolean }>> {
     try {

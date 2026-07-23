@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/quality.md", "reason": "Verify service boundaries, imports, and native-process usage."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Check non-Git, timeout, malformed output, and remote endpoint failure behavior."}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Verify context-isolated API shapes and no renderer Node access."}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "Check renderer alias coalescing, state consistency, and performance."}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Check reuse, explicit types, no duplication, and focused changes."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify end-to-end local and remote data flow across every session source."}
+{"file": ".trellis/tasks/07-24-group-agent-worktrees/research/worktree-canonical-root.md", "reason": "Validate implementation against Git semantics and edge cases."}

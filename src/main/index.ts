@@ -7,6 +7,7 @@ import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
 import { RemoteServerBackend } from './remote-server-backend';
+import { resolveGitProjectRoots } from './git-project-root';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
 import { loadSubscriptionToken, saveSubscriptionToken, clearSubscriptionToken, subscriptionTokenStatus } from './subscription-token';
 import { AIConfigManager } from './ai-config';
@@ -1242,6 +1243,8 @@ type ProjectSession = {
   agent: ProjectsAgentId;
   sourcePath: string;
   archived?: boolean;
+  // Actual checkout cwd used for resume/file/Git operations. ProjectEntry.path is grouping-only.
+  cwd?: string;
 };
 
 // Internal flat record before bucketing
@@ -1252,6 +1255,7 @@ type DiscoveredSession = ProjectSession & {
 type ProjectEntry = {
   path: string;
   name: string;
+  aliases: string[];
   agents: Array<{ agent: ProjectsAgentId; sessions: ProjectSession[] }>;
   lastActiveMs: number;
 };
@@ -1666,6 +1670,11 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
              JOIN workspaces w ON w.id = wt.workspace_id
              JOIN projects p ON p.id = w.project_id
              WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL`,
+            // Current Copilot CLI schema: worktrees points directly at projects.
+            `SELECT wt.path AS worktree_path, p.main_repo_path AS main_repo_path
+             FROM worktrees wt
+             JOIN projects p ON p.id = wt.project_id
+             WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL`,
           ];
           for (const q of queries) {
             try { pushRows(db.prepare(q).all()); } catch { /* schema drift -> try next */ }
@@ -1690,6 +1699,10 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
            FROM worktrees wt
            JOIN workspaces w ON w.id = wt.workspace_id
            JOIN projects p ON p.id = w.project_id
+           WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL;`,
+          `SELECT wt.path AS worktree_path, p.main_repo_path AS main_repo_path
+           FROM worktrees wt
+           JOIN projects p ON p.id = wt.project_id
            WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL;`,
         ];
         for (const q of queries) {
@@ -1816,7 +1829,7 @@ function discoverDevinSessions(): DiscoveredSession[] {
 
 // Bucket all discovered sessions by project cwd. Sessions with no usable folder
 // are grouped under a synthetic project (e.g. Copilot without a real cwd).
-function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
+async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEntry[]> {
   const discovered: DiscoveredSession[] = [
     ...discoverClaudeSessions(),
     ...discoverCodexSessions(),
@@ -1828,19 +1841,45 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
   const archivedIds = loadArchivedSessionIds();
   const pathRemaps = loadPathRemaps();
   const copilotWorktreeProjectMap = discoverCopilotWorktreeProjectMap();
+  const effectiveSessionCwds = new Map<DiscoveredSession, string>();
+  const groupingSessionCwds = new Map<DiscoveredSession, string>();
+  for (const session of discovered) {
+    if (!session.cwd) continue;
+    const effectiveCwd = resolveRemappedCwd(session.cwd, pathRemaps);
+    let groupingCwd = effectiveCwd;
+    // Git is authoritative while the checkout exists. The Copilot DB is only a
+    // fallback for vanished worktrees whose metadata can no longer be queried.
+    if (session.agent === 'copilot' && !fs.existsSync(effectiveCwd)) {
+      groupingCwd = copilotWorktreeProjectMap.get(normalizeRemapCwd(session.cwd)) || effectiveCwd;
+    }
+    effectiveSessionCwds.set(session, effectiveCwd);
+    groupingSessionCwds.set(session, groupingCwd);
+  }
+  const effectiveExtraFolders = extraFolders
+    .map((folder) => String(folder || '').trim())
+    .filter(Boolean)
+    .map((folder) => path.resolve(folder))
+    .map((folder) => resolveRemappedCwd(folder, pathRemaps));
+  const pathsToResolve = [
+    ...groupingSessionCwds.values(),
+    ...effectiveExtraFolders,
+  ];
+  const resolvedRoots = await resolveGitProjectRoots(pathsToResolve);
+  const canonicalByPath = new Map(resolvedRoots.map((item) => [item.cwd, item.canonicalPath]));
 
   const COPILOT_NO_FOLDER = '__copilot_no_folder__';
   // bucketKey -> { path, name, agentMap }
   const buckets = new Map<string, {
     path: string;
     name: string;
+    aliases: Set<string>;
     agentMap: Map<ProjectsAgentId, ProjectSession[]>;
   }>();
 
   const getBucket = (key: string, displayPath: string, name: string) => {
     let b = buckets.get(key);
     if (!b) {
-      b = { path: displayPath, name, agentMap: new Map() };
+      b = { path: displayPath, name, aliases: new Set(displayPath ? [displayPath] : []), agentMap: new Map() };
       buckets.set(key, b);
     }
     return b;
@@ -1851,16 +1890,12 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     let displayPath: string;
     let name: string;
     if (s.cwd) {
-      const mappedCopilotCwd = s.agent === 'copilot'
-        ? copilotWorktreeProjectMap.get(normalizeRemapCwd(s.cwd)) || s.cwd
-        : s.cwd;
-      // Honor a path remap: a session whose recorded cwd matches a remap key is bucketed
-      // under the NEW folder. This re-attaches historical sessions to a renamed/moved folder
-      // and makes the dead old entry disappear (it no longer produces a bucket).
-      const effectiveCwd = resolveRemappedCwd(mappedCopilotCwd, pathRemaps);
-      key = effectiveCwd;
-      displayPath = effectiveCwd;
-      name = path.basename(effectiveCwd) || effectiveCwd;
+      const effectiveCwd = effectiveSessionCwds.get(s) || s.cwd;
+      const groupingCwd = groupingSessionCwds.get(s) || effectiveCwd;
+      const canonicalCwd = canonicalByPath.get(groupingCwd) || groupingCwd;
+      key = canonicalCwd;
+      displayPath = canonicalCwd;
+      name = path.basename(canonicalCwd) || canonicalCwd;
     } else if (s.agent === 'copilot') {
       key = COPILOT_NO_FOLDER;
       displayPath = '';
@@ -1869,6 +1904,11 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
       continue; // unknown-folder non-copilot sessions are skipped
     }
     const bucket = getBucket(key, displayPath, name);
+    if (s.cwd) {
+      bucket.aliases.add(s.cwd);
+      bucket.aliases.add(effectiveSessionCwds.get(s) || s.cwd);
+      bucket.aliases.add(groupingSessionCwds.get(s) || s.cwd);
+    }
     let arr = bucket.agentMap.get(s.agent);
     if (!arr) { arr = []; bucket.agentMap.set(s.agent, arr); }
     arr.push({
@@ -1879,6 +1919,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
       agent: s.agent,
       sourcePath: s.sourcePath,
       archived: archivedIds.has(s.id),
+      cwd: s.cwd ? (effectiveSessionCwds.get(s) || s.cwd) : undefined,
     });
   }
 
@@ -1889,13 +1930,16 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
   // sessions directly, deduping (agent + id) against anything already discovered globally.
   for (const folder of extraFolders) {
     try {
-      const rawAbs = path.resolve(String(folder || ''));
-      if (!rawAbs) continue;
+      const rawFolder = String(folder || '').trim();
+      if (!rawFolder) continue;
+      const rawAbs = path.resolve(rawFolder);
       // If this tracked folder's path was remapped (renamed/moved), fold it into the new path
       // so we don't resurrect the dead old bucket. The per-folder scan still reads the OLD
       // on-disk location (rawAbs) where the sessions physically live.
       const abs = resolveRemappedCwd(rawAbs, pathRemaps);
-      const bucket = getBucket(abs, abs, path.basename(abs) || abs);
+      const canonicalAbs = canonicalByPath.get(abs) || abs;
+      const bucket = getBucket(canonicalAbs, canonicalAbs, path.basename(canonicalAbs) || canonicalAbs);
+      bucket.aliases.add(abs);
 
       const mergeIntoBucket = (sessions: DiscoveredSession[]) => {
         for (const s of sessions) {
@@ -1912,6 +1956,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
             agent: s.agent,
             sourcePath: s.sourcePath,
             archived: archivedIds.has(s.id),
+            cwd: s.cwd || abs,
           });
         }
       };
@@ -1949,7 +1994,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
       if (capped.length > 0) lastActiveMs = Math.max(lastActiveMs, capped[0].mtimeMs);
       agents.push({ agent, sessions: capped });
     }
-    projects.push({ path: b.path, name: b.name, agents, lastActiveMs });
+    projects.push({ path: b.path, name: b.name, aliases: Array.from(b.aliases), agents, lastActiveMs });
   }
 
   projects.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
@@ -1978,26 +2023,35 @@ function remoteBackendForEvent(event?: Electron.IpcMainInvokeEvent | Electron.Ip
  * resumable sessions bucket by their own cwd. Sessions with no cwd fall under one "<label>"
  * node so they stay visible + clickable (acceptable MVP per the task).
  */
-async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<ProjectEntry[]> {
-  const conn = connectionRegistry.get(activeConnectionId);
+async function buildRemoteProjectsList(
+  remote: RemoteServerBackend,
+  connectionId: string,
+  extraFolders: string[] = [],
+): Promise<ProjectEntry[]> {
+  const conn = connectionRegistry.get(connectionId);
   const label = conn?.label || 'Remote';
-  const FALLBACK_KEY = `__remote_${activeConnectionId}__`;
+  const FALLBACK_KEY = `__remote_${connectionId}__`;
 
-  const buckets = new Map<string, { path: string; name: string; agentMap: Map<ProjectsAgentId, ProjectSession[]> }>();
+  const buckets = new Map<string, { path: string; name: string; aliases: Set<string>; agentMap: Map<ProjectsAgentId, ProjectSession[]> }>();
   const getBucket = (key: string, displayPath: string, name: string) => {
     let b = buckets.get(key);
-    if (!b) { b = { path: displayPath, name, agentMap: new Map() }; buckets.set(key, b); }
+    if (!b) { b = { path: displayPath, name, aliases: new Set(displayPath ? [displayPath] : []), agentMap: new Map() }; buckets.set(key, b); }
     return b;
   };
   const normAgent = (a: string): ProjectsAgentId => {
     const v = (a || '').toLowerCase();
     return v === 'codex' || v === 'kiro' || v === 'copilot' || v === 'devin' ? (v as ProjectsAgentId) : 'claude';
   };
+  const pending: Array<{ cwd: string; session: ProjectSession }> = [];
   const addSession = (cwd: string, s: ProjectSession) => {
+    pending.push({ cwd, session: { ...s, cwd: cwd || undefined } });
+  };
+  const bucketSession = (cwd: string, canonicalCwd: string, s: ProjectSession) => {
     let key: string; let displayPath: string; let name: string;
-    if (cwd) { key = cwd; displayPath = cwd; name = path.basename(cwd) || cwd; }
+    if (cwd) { key = canonicalCwd; displayPath = canonicalCwd; name = path.basename(canonicalCwd) || canonicalCwd; }
     else { key = FALLBACK_KEY; displayPath = ''; name = label; }
     const bucket = getBucket(key, displayPath, name);
+    if (cwd) bucket.aliases.add(cwd);
     let arr = bucket.agentMap.get(s.agent);
     if (!arr) { arr = []; bucket.agentMap.set(s.agent, arr); }
     arr.push(s);
@@ -2033,6 +2087,19 @@ async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<Pro
     }
   } catch { /* ignore */ }
 
+  const remoteExtraFolders = extraFolders.map((folder) => String(folder || '').trim()).filter(Boolean);
+  const allCwds = [...pending.map((item) => item.cwd), ...remoteExtraFolders].filter(Boolean);
+  const resolvedRoots = await remote.resolveGitProjectRoots(Array.from(new Set(allCwds)));
+  const canonicalByPath = new Map(resolvedRoots.map((item) => [item.cwd, item.canonicalPath]));
+  for (const item of pending) {
+    bucketSession(item.cwd, canonicalByPath.get(item.cwd) || item.cwd, item.session);
+  }
+  for (const folder of remoteExtraFolders) {
+    const canonical = canonicalByPath.get(folder) || folder;
+    const bucket = getBucket(canonical, canonical, path.basename(canonical) || canonical);
+    bucket.aliases.add(folder);
+  }
+
   const projects: ProjectEntry[] = [];
   for (const b of buckets.values()) {
     const agents: ProjectEntry['agents'] = [];
@@ -2043,7 +2110,7 @@ async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<Pro
       if (capped.length > 0) lastActiveMs = Math.max(lastActiveMs, capped[0].mtimeMs);
       agents.push({ agent, sessions: capped });
     }
-    projects.push({ path: b.path, name: b.name, agents, lastActiveMs });
+    projects.push({ path: b.path, name: b.name, aliases: Array.from(b.aliases), agents, lastActiveMs });
   }
   projects.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
   return projects;
@@ -2730,8 +2797,10 @@ function registerIPC(): void {
   ipcMain.handle('projects:list', async (_e, opts?: { extraFolders?: string[] }) => {
     try {
       const remote = remoteBackendForEvent(_e);
-      if (remote) return await buildRemoteProjectsList(remote);
-      return buildProjectsList(opts?.extraFolders ?? []);
+      if (remote) {
+        return await buildRemoteProjectsList(remote, connectionIdForEvent(_e), opts?.extraFolders ?? []);
+      }
+      return await buildProjectsList(opts?.extraFolders ?? []);
     } catch {
       return [];
     }

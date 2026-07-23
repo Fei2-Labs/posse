@@ -16,6 +16,7 @@ import webpush from 'web-push';
 import sharp from 'sharp';
 import { getDisplayName } from './pty-manager';
 import { PtyBackend, PtySessionSnapshot } from './pty-backend';
+import { resolveGitProjectRoots } from './git-project-root';
 
 // App version provider. Electron's main process sets this to `app.getVersion()`;
 // the headless backend sets it to the version read from package.json. Keeping this
@@ -686,6 +687,32 @@ export function startRemoteServer(
     const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : '';
     try { res.json(listResumableSessions ? listResumableSessions(cwd) : []); }
     catch { res.json([]); }
+  });
+
+  // Resolve repository grouping on this host. Remote paths must never be
+  // passed to Git on the desktop client.
+  app.post('/api/git/project-roots', async (req, res) => {
+    if (!Array.isArray(req.body?.paths)) {
+      res.status(400).json({ error: 'paths-array-required' });
+      return;
+    }
+    if (req.body.paths.length > 2000) {
+      res.status(413).json({ error: 'too-many-paths' });
+      return;
+    }
+    const paths = req.body.paths.filter(
+      (value: unknown): value is string =>
+        typeof value === 'string' && value.trim() !== '' && value.length <= 4096,
+    );
+    if (paths.length !== req.body.paths.length) {
+      res.status(400).json({ error: 'invalid-path' });
+      return;
+    }
+    try {
+      res.json({ roots: await resolveGitProjectRoots(paths) });
+    } catch {
+      res.status(500).json({ error: 'git-project-root-resolution-failed' });
+    }
   });
 
   // ========== Filesystem access (REMOTE clients) ==========
