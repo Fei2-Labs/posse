@@ -865,6 +865,7 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
       nodeIntegrationInSubFrames: false,
     },
   });
+  const windowWebContentsId = win.webContents.id;
 
   if (isPrimary) mainWindow = win;
 
@@ -901,7 +902,7 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
   win.on('closed', () => {
     // Closing a window NEVER kills its connection (remote daemons keep running 24/7). Just drop
     // the binding so its frames stop routing here.
-    revokeProjectPreviewRoots(win.webContents.id);
+    revokeProjectPreviewRoots(windowWebContentsId);
     unbindWindow(win);
     if (win === mainWindow) {
       mainWindow = null;
