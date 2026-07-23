@@ -1626,6 +1626,104 @@ function discoverCopilotSessions(): DiscoveredSession[] {
   return out;
 }
 
+// --- Copilot Desktop workspace map: ~/.copilot/data.db (projects/workspaces/worktrees) ---
+// Best-effort map from worktree-backed workspace cwd -> canonical repo root (main_repo_path).
+// This is only used to rebucket Copilot history sessions under the parent project.
+function discoverCopilotWorktreeProjectMap(): Map<string, string> {
+  const mapping = new Map<string, string>();
+  try {
+    const dbPath = path.join(os.homedir(), '.copilot', 'data.db');
+    if (!fs.existsSync(dbPath)) return mapping;
+
+    type Row = Record<string, unknown>;
+    const rows: Row[] = [];
+
+    const pushRows = (incoming: unknown): void => {
+      if (!Array.isArray(incoming)) return;
+      for (const row of incoming) {
+        if (row && typeof row === 'object') rows.push(row as Row);
+      }
+    };
+
+    // Try node:sqlite first.
+    let usedNode = false;
+    try {
+      const sqlite = require('node:sqlite') as {
+        DatabaseSync?: new (p: string, opts?: { readOnly?: boolean }) => {
+          prepare: (sql: string) => { all: () => unknown[] };
+          close: () => void;
+        };
+      };
+      if (sqlite?.DatabaseSync) {
+        const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+        try {
+          const queries = [
+            // Workspace path directly joined to project main repo path.
+            `SELECT w.path AS workspace_path, p.main_repo_path AS main_repo_path
+             FROM workspaces w
+             JOIN projects p ON p.id = w.project_id
+             WHERE w.path IS NOT NULL AND p.main_repo_path IS NOT NULL`,
+            // Some installs model worktree path in a separate table.
+            `SELECT wt.path AS worktree_path, p.main_repo_path AS main_repo_path
+             FROM worktrees wt
+             JOIN workspaces w ON w.id = wt.workspace_id
+             JOIN projects p ON p.id = w.project_id
+             WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL`,
+          ];
+          for (const q of queries) {
+            try { pushRows(db.prepare(q).all()); } catch { /* schema drift -> try next */ }
+          }
+          usedNode = true;
+        } finally {
+          db.close();
+        }
+      }
+    } catch { /* node:sqlite unavailable -> fall through */ }
+
+    // Fallback to sqlite3 binary if present.
+    if (!usedNode) {
+      try {
+        const { execFileSync } = require('child_process') as typeof import('child_process');
+        const queries = [
+          `SELECT w.path AS workspace_path, p.main_repo_path AS main_repo_path
+           FROM workspaces w
+           JOIN projects p ON p.id = w.project_id
+           WHERE w.path IS NOT NULL AND p.main_repo_path IS NOT NULL;`,
+          `SELECT wt.path AS worktree_path, p.main_repo_path AS main_repo_path
+           FROM worktrees wt
+           JOIN workspaces w ON w.id = wt.workspace_id
+           JOIN projects p ON p.id = w.project_id
+           WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL;`,
+        ];
+        for (const q of queries) {
+          try {
+            const raw = execFileSync('sqlite3', ['-json', dbPath, q], {
+              encoding: 'utf-8',
+              timeout: 5000,
+            });
+            pushRows(JSON.parse(raw || '[]'));
+          } catch { /* query/table may be absent */ }
+        }
+      } catch { /* sqlite3 binary missing */ }
+    }
+
+    for (const row of rows) {
+      const workspaceRaw = typeof row.workspace_path === 'string'
+        ? row.workspace_path
+        : (typeof row.worktree_path === 'string' ? row.worktree_path : '');
+      const mainRepoRaw = typeof row.main_repo_path === 'string' ? row.main_repo_path : '';
+      if (!workspaceRaw || !mainRepoRaw) continue;
+
+      const workspacePath = normalizeRemapCwd(path.resolve(workspaceRaw));
+      const canonicalProjectPath = normalizeRemapCwd(path.resolve(mainRepoRaw));
+      if (!workspacePath || !canonicalProjectPath) continue;
+
+      mapping.set(workspacePath, canonicalProjectPath);
+    }
+  } catch { /* never throw - mapping is optional enhancement */ }
+  return mapping;
+}
+
 // --- Devin: ~/.local/share/devin/cli/sessions.db (+ cli-next/sessions.db). Best-effort, sqlite. ---
 // Schema (verified on-disk):
 //   sessions(id TEXT PRIMARY KEY, working_directory TEXT NOT NULL, backend_type TEXT NOT NULL,
@@ -1732,6 +1830,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
 
   const archivedIds = loadArchivedSessionIds();
   const pathRemaps = loadPathRemaps();
+  const copilotWorktreeProjectMap = discoverCopilotWorktreeProjectMap();
 
   const COPILOT_NO_FOLDER = '__copilot_no_folder__';
   // bucketKey -> { path, name, agentMap }
@@ -1755,10 +1854,13 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     let displayPath: string;
     let name: string;
     if (s.cwd) {
+      const mappedCopilotCwd = s.agent === 'copilot'
+        ? copilotWorktreeProjectMap.get(normalizeRemapCwd(s.cwd)) || s.cwd
+        : s.cwd;
       // Honor a path remap: a session whose recorded cwd matches a remap key is bucketed
       // under the NEW folder. This re-attaches historical sessions to a renamed/moved folder
       // and makes the dead old entry disappear (it no longer produces a bucket).
-      const effectiveCwd = resolveRemappedCwd(s.cwd, pathRemaps);
+      const effectiveCwd = resolveRemappedCwd(mappedCopilotCwd, pathRemaps);
       key = effectiveCwd;
       displayPath = effectiveCwd;
       name = path.basename(effectiveCwd) || effectiveCwd;
