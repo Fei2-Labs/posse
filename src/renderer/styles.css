@@ -528,7 +528,7 @@ html, body {
   height: 100%;
 }
 
-/* Left file tree */
+/* Persistent right-side workspace inspector */
 #file-tree-panel {
   width: var(--file-tree-width);
   background: var(--bg-panel);
@@ -545,6 +545,63 @@ html, body {
   min-width: 0 !important;
   overflow: hidden;
   opacity: 0;
+}
+
+#inspector-tabs {
+  height: 38px;
+  display: flex;
+  align-items: stretch;
+  padding: 0 8px;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-toolbar);
+  flex: 0 0 auto;
+}
+
+.inspector-tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inspector-tab:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.inspector-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.inspector-tab-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.inspector-tab-panel[hidden] {
+  display: none;
+}
+
+.inspector-empty-panel {
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.inspector-empty-panel strong {
+  color: var(--text-primary);
+  font-size: 13px;
 }
 
 #file-tree-header {
@@ -579,6 +636,7 @@ html, body {
   overflow: auto;
   padding: 6px 4px;
   font-family: var(--font-mono);
+  scrollbar-gutter: stable;
 }
 
 #file-tree-list::-webkit-scrollbar {
@@ -620,6 +678,10 @@ html, body {
   background: var(--row-selected);
 }
 
+.file-tree-row[aria-selected="true"] {
+  background: var(--row-selected);
+}
+
 .file-tree-arrow {
   width: 12px;
   color: var(--text-secondary);
@@ -650,6 +712,9 @@ html, body {
 
 /* Directory row "Reveal in Finder" button */
 .file-tree-open-folder {
+  border: 0;
+  background: transparent;
+  color: inherit;
   font-size: 11px;
   cursor: pointer;
   opacity: 0;
@@ -660,6 +725,10 @@ html, body {
 
 .file-tree-row:hover .file-tree-open-folder {
   opacity: 0.6;
+}
+
+.file-tree-open-folder:focus-visible {
+  opacity: 1;
 }
 
 .file-tree-open-folder:hover {
@@ -676,18 +745,13 @@ html, body {
   position: relative;
 }
 
-/* File preview panel: overlays the terminal area */
+/* File preview lives inside the inspector and never covers the terminal. */
 #file-preview-panel {
-  position: absolute;
-  inset: 0;
-  z-index: 20;
   display: flex;
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   background: var(--bg-primary);
-}
-
-#file-preview-panel[hidden] {
-  display: none;
 }
 
 #file-preview-header {
@@ -724,6 +788,34 @@ html, body {
   flex-direction: column;
 }
 
+#file-preview-body[hidden] {
+  display: none;
+}
+
+.file-preview-state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.file-preview-state strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.file-preview-state-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 #file-preview-body .cm-editor {
   height: 100%;
 }
@@ -736,6 +828,10 @@ html, body {
 .fp-source,
 .fp-markdown,
 .fp-html,
+.fp-mermaid,
+.fp-csv,
+.fp-svg,
+.fp-pdf,
 .fp-image {
   flex: 1;
   min-height: 0;
@@ -748,6 +844,10 @@ html, body {
 .fp-source[hidden],
 .fp-markdown[hidden],
 .fp-html[hidden],
+.fp-mermaid[hidden],
+.fp-csv[hidden],
+.fp-svg[hidden],
+.fp-pdf[hidden],
 .fp-image[hidden] {
   display: none;
 }
@@ -818,6 +918,97 @@ html, body {
   width: 100%;
   border: 0;
   background: #fff;
+}
+
+.fp-mermaid,
+.fp-svg {
+  overflow: auto;
+  padding: 16px;
+  background: var(--bg-secondary, #0d0d0d);
+  color: var(--text-primary, #e6e6e6);
+}
+
+.fp-mermaid svg,
+.fp-svg svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.fp-csv {
+  overflow: auto;
+  background: var(--bg-primary, #111);
+}
+
+.fp-csv table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font: 12px/1.4 var(--font-mono, monospace);
+}
+
+.fp-csv th,
+.fp-csv td {
+  max-width: 360px;
+  padding: 5px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border, #2a2a2a);
+  color: var(--text-primary, #e6e6e6);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fp-csv th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-tertiary, #222);
+  font-weight: 600;
+}
+
+.fp-render-error {
+  max-width: 380px;
+  margin: 20px auto;
+  padding: 12px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  color: var(--text-secondary, #aaa);
+  text-align: center;
+}
+
+.fp-pdf {
+  overflow: auto;
+  padding: 12px;
+  background: var(--bg-secondary, #0d0d0d);
+  text-align: center;
+}
+
+.fp-pdf-toolbar {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px;
+  background: var(--bg-secondary, #0d0d0d);
+}
+
+.fp-pdf-toolbar button {
+  padding: 3px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  background: var(--bg-tertiary, #222);
+  color: var(--text-primary, #e6e6e6);
+}
+
+.fp-pdf canvas {
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 2px 8px #0008;
 }
 
 /* Image preview */
@@ -3382,3 +3573,51 @@ select.ai-form-input {
 }
 .host-switcher-newwin:hover { color: var(--accent); }
 .host-switcher-add { color: var(--accent); }
+
+/* Keyboard focus must remain visible across all workspace controls. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+@media (max-width: 1000px) {
+  #file-tree-resizer {
+    display: none;
+  }
+
+  #file-tree-panel {
+    position: fixed;
+    z-index: 30;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, calc(100vw - 44px)) !important;
+    max-width: none;
+    min-width: 0;
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+    transition: transform 0.2s ease;
+  }
+
+  #file-tree-panel.collapsed {
+    width: min(420px, calc(100vw - 44px)) !important;
+    min-width: 0 !important;
+    overflow: visible;
+    opacity: 1;
+    transform: translateX(100%);
+  }
+
+  #file-tree-toggle {
+    position: fixed;
+    z-index: 31;
+    top: 50%;
+    right: 0;
+    height: 44px;
+    border: 1px solid var(--border-color);
+    border-right: 0;
+    border-radius: 6px 0 0 6px;
+  }
+}

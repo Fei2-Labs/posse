@@ -1,0 +1,13 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend constraints and relevant guideline index for the inspector."}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Preload and context-isolation requirements for the inspector IPC boundary."}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "Electron-safe alternatives for preview and dialog behavior."}
+{"file": ".trellis/spec/frontend/components.md", "reason": "Semantic controls, loading, error, scroll, and focus guidance."}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "Token, focus, and CSS organization guidance for the workspace refactor."}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "Type safety, file-size, lazy-loading, and validation standards."}
+{"file": ".trellis/spec/backend/api-module.md", "reason": "Typed, validated, thin-handler shape for new inspector services."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Structured user-safe errors for preview and Git services."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Main/preload/renderer/filesystem boundary checklist."}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "Shared types and reuse checks before implementation."}
+{"file": ".trellis/tasks/07-23-redesign-posse-workspace-ux/research/agent-desktop-workspace-audit.md", "reason": "Product interaction reference; patterns only, no code reuse."}
+{"file": ".trellis/tasks/07-23-redesign-posse-workspace-ux/research/renderer-integration-options.md", "reason": "Stack-specific protocol, renderer, packaging, and security decisions."}

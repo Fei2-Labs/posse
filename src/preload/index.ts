@@ -54,6 +54,10 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('fs:write-file', filePath, content),
   // Read a (binary) file as a base64 data URL — used for image previews
   readFileBase64: (filePath: string) => ipcRenderer.invoke('fs:read-file-base64', filePath),
+  inspectorRegisterProjectRoot: (rootPath: string) =>
+    ipcRenderer.invoke('inspector:register-project-root', rootPath) as Promise<{ ok: boolean; token?: string; rootName?: string; error?: string }>,
+  inspectorProjectPreviewUrl: (token: string, relativePath: string) =>
+    ipcRenderer.invoke('inspector:project-preview-url', token, relativePath) as Promise<{ ok: boolean; url?: string; error?: string }>,
   // Desktop -> remote upload: native multi-select dialog, then write the picked file(s)
   // into destDir on the active connection (remote over HTTP, or local copy). 50MB/file cap.
   remoteUploadFiles: (args: { destDir: string }) =>

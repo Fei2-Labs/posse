@@ -12,6 +12,13 @@ import { loadSubscriptionToken, saveSubscriptionToken, clearSubscriptionToken, s
 import { AIConfigManager } from './ai-config';
 import { startRemoteServer, setAppVersionProvider, pushRawDataToRemote, sendRemotePush, addRemoteRecentCwd, getTailscaleInfo, type RemoteConnectionStatus } from './remote-server';
 import { CloudflaredManager } from './cloudflared-manager';
+import {
+  installProjectPreviewProtocol,
+  registerProjectPreviewScheme,
+  registerProjectPreviewRoot,
+  revokeProjectPreviewRoots,
+  createProjectPreviewUrl,
+} from './project-preview';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
 import { autoUpdater } from 'electron-updater';
@@ -34,6 +41,8 @@ import {
 } from './resumable-sessions';
 
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
+
+registerProjectPreviewScheme();
 
 // macOS: set regular app mode so it appears in the Dock and Command+Tab switcher
 if (process.platform === 'darwin') {
@@ -852,6 +861,8 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      nodeIntegrationInSubFrames: false,
     },
   });
 
@@ -862,6 +873,15 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
   bindWindowConnection(win, connectionId);
 
   win.maximize();
+
+  let initialNavigationComplete = false;
+  win.webContents.once('did-finish-load', () => {
+    initialNavigationComplete = true;
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event) => {
+    if (initialNavigationComplete) event.preventDefault();
+  });
 
   win.loadFile(path.join(__dirname, '../renderer/index.html'));
 
@@ -881,6 +901,7 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
   win.on('closed', () => {
     // Closing a window NEVER kills its connection (remote daemons keep running 24/7). Just drop
     // the binding so its frames stop routing here.
+    revokeProjectPreviewRoots(win.webContents.id);
     unbindWindow(win);
     if (win === mainWindow) {
       mainWindow = null;
@@ -2134,6 +2155,16 @@ function registerIPC(): void {
     }
   });
 
+  ipcMain.handle('inspector:register-project-root', (event, rootPath: string) => {
+    if (remoteBackendForEvent(event)) return { ok: false, error: 'remote-unsupported' };
+    return registerProjectPreviewRoot(event.sender.id, rootPath);
+  });
+
+  ipcMain.handle('inspector:project-preview-url', (event, token: string, relativePath: string) => {
+    if (remoteBackendForEvent(event)) return { ok: false, error: 'remote-unsupported' };
+    return createProjectPreviewUrl(event.sender.id, token, relativePath);
+  });
+
   // Move a file/folder to the OS trash (recoverable). Used by the file-tree context menu.
   ipcMain.handle('file-tree:trash', async (_e, targetPath: string) => {
     try {
@@ -2360,7 +2391,7 @@ function registerIPC(): void {
     }
   });
 
-  // Read a file as a base64 data URL (for image previews). Never throws.
+  // Read a bounded binary file as a base64 data URL (for image and PDF previews). Never throws.
   ipcMain.handle('fs:read-file-base64', async (_e, filePath: string) => {
     const remote = remoteBackendForEvent(_e);
     if (remote) return remote.fsReadBase64(String(filePath || ''));
@@ -2374,6 +2405,7 @@ function registerIPC(): void {
       const mimeByExt: Record<string, string> = {
         png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
         svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
+        pdf: 'application/pdf',
       };
       const mime = mimeByExt[ext] || 'application/octet-stream';
       const buf = fs.readFileSync(abs);
@@ -3250,6 +3282,7 @@ function initAutoUpdater(): void {
 
 app.whenReady().then(async () => {
   await setupPtyManager();
+  installProjectPreviewProtocol();
 
   // macOS Dock icon — set before creating the window
   const appIcon = loadAppIcon();

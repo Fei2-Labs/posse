@@ -65,6 +65,8 @@ declare global {
       readFile: (filePath: string) => Promise<{ ok: boolean; content?: string; size?: number; ext?: string; error?: string }>;
       writeFile: (filePath: string, content: string) => Promise<{ ok: boolean; error?: string }>;
       readFileBase64: (filePath: string) => Promise<{ ok: boolean; dataUrl?: string; size?: number; ext?: string; error?: string }>;
+      inspectorRegisterProjectRoot: (rootPath: string) => Promise<{ ok: boolean; token?: string; rootName?: string; error?: string }>;
+      inspectorProjectPreviewUrl: (token: string, relativePath: string) => Promise<{ ok: boolean; url?: string; error?: string }>;
       remoteUploadFiles: (args: { destDir: string }) => Promise<{ ok: boolean; uploaded: string[]; skipped?: string[]; error?: string }>;
       remoteDownloadFile: (args: { remotePath: string }) => Promise<{ ok: boolean; savedTo?: string; error?: string }>;
       gitBranch: (cwd: string) => Promise<string>;
@@ -1630,49 +1632,231 @@ const fileTreeList = document.getElementById('file-tree-list')!;
 const fileTreeRefreshBtn = document.getElementById('file-tree-refresh-btn')!;
 const fileTreeUploadBtn = document.getElementById('file-tree-upload-btn') as HTMLButtonElement | null;
 
-// File preview panel
-const filePreviewPanel = document.getElementById('file-preview-panel')! as HTMLElement;
+// Persistent workspace inspector
+const inspectorTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.inspector-tab'));
+const inspectorPanels: Record<InspectorTab, HTMLElement> = {
+  files: document.getElementById('inspector-files-panel')!,
+  preview: document.getElementById('inspector-preview-panel')!,
+  git: document.getElementById('inspector-git-panel')!,
+};
+type InspectorTab = 'files' | 'preview' | 'git';
+let activeInspectorTab: InspectorTab = 'files';
+
+function setInspectorTab(tab: InspectorTab, persist = true): void {
+  activeInspectorTab = tab;
+  for (const button of inspectorTabs) {
+    const active = button.id === `inspector-${tab}-tab`;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
+  for (const [name, panel] of Object.entries(inspectorPanels) as Array<[InspectorTab, HTMLElement]>) {
+    panel.hidden = name !== tab;
+  }
+  if (persist) localStorage.setItem('posse_inspector_tab', tab);
+}
+
+inspectorTabs.forEach((button, index) => {
+  button.addEventListener('click', () => {
+    const tab = button.id.replace('inspector-', '').replace('-tab', '') as InspectorTab;
+    setInspectorTab(tab);
+  });
+  button.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowRight' ? 1 : -1;
+    const nextIndex = (index + direction + inspectorTabs.length) % inspectorTabs.length;
+    inspectorTabs[nextIndex].focus();
+    inspectorTabs[nextIndex].click();
+  });
+});
+
+const savedInspectorTab = localStorage.getItem('posse_inspector_tab');
+if (savedInspectorTab === 'files' || savedInspectorTab === 'preview' || savedInspectorTab === 'git') {
+  setInspectorTab(savedInspectorTab, false);
+}
+
 const filePreviewName = document.getElementById('file-preview-name')!;
 const filePreviewMeta = document.getElementById('file-preview-meta')!;
 const filePreviewBody = document.getElementById('file-preview-body')!;
 const filePreviewCloseBtn = document.getElementById('file-preview-close')!;
-const filePreviewExternalBtn = document.getElementById('file-preview-external')!;
+const filePreviewExternalBtn = document.getElementById('file-preview-external') as HTMLButtonElement;
+const filePreviewState = document.getElementById('file-preview-state')!;
+const filePreviewStateTitle = document.getElementById('file-preview-state-title')!;
+const filePreviewStateMessage = document.getElementById('file-preview-state-message')!;
+const filePreviewRetryBtn = document.getElementById('file-preview-retry') as HTMLButtonElement;
+const filePreviewStateExternalBtn = document.getElementById('file-preview-state-external') as HTMLButtonElement;
 let filePreview: FilePreview | null = null;
 let filePreviewPath = '';
+let previewRequestId = 0;
+let previewRetry: { path: string; name: string } | null = null;
+let projectPreviewRoot: { path: string; token: string } | null = null;
 
-function closeFilePreview(): void {
-  filePreviewPanel.hidden = true;
+type PreviewState = 'empty' | 'loading' | 'ready' | 'error';
+
+function setPreviewState(state: PreviewState, title: string, message: string, canOpenExternally = false): void {
+  const ready = state === 'ready';
+  filePreviewState.hidden = ready;
+  filePreviewBody.hidden = !ready;
+  filePreviewStateTitle.textContent = title;
+  filePreviewStateMessage.textContent = message;
+  filePreviewRetryBtn.hidden = state !== 'error';
+  filePreviewStateExternalBtn.hidden = !canOpenExternally;
+  filePreviewExternalBtn.hidden = !ready;
+  filePreviewCloseBtn.hidden = state === 'empty';
+}
+
+function ensureFilePreview(): FilePreview {
+  if (!filePreview) {
+    filePreview = createFilePreview(filePreviewBody, {
+      onSave: (path, content) => window.posse.writeFile(path, content),
+      onToast: (message) => showBriefNotice(message),
+    });
+  }
+  return filePreview;
+}
+
+async function resolveUnsavedPreviewChanges(): Promise<boolean> {
+  if (!filePreview?.hasUnsavedChanges()) return true;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    overlay.setAttribute('role', 'presentation');
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'preview-unsaved-title');
+
+    const title = document.createElement('h3');
+    title.id = 'preview-unsaved-title';
+    title.textContent = 'Save changes before continuing?';
+    const message = document.createElement('p');
+    message.textContent = 'This file has unsaved changes.';
+    const actions = document.createElement('div');
+    actions.className = 'confirm-buttons';
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'btn-cancel';
+    cancelButton.type = 'button';
+    cancelButton.textContent = 'Cancel';
+    const discardButton = document.createElement('button');
+    discardButton.className = 'btn-close-confirm';
+    discardButton.type = 'button';
+    discardButton.textContent = 'Discard';
+    const saveButton = document.createElement('button');
+    saveButton.className = 'toolbar-btn';
+    saveButton.type = 'button';
+    saveButton.textContent = 'Save';
+    actions.append(cancelButton, discardButton, saveButton);
+    dialog.append(title, message, actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    const cleanup = (proceed: boolean): void => {
+      overlay.remove();
+      resolve(proceed);
+    };
+    cancelButton.addEventListener('click', () => cleanup(false));
+    discardButton.addEventListener('click', () => {
+      filePreview?.discardChanges();
+      cleanup(true);
+    });
+    saveButton.addEventListener('click', async () => {
+      saveButton.disabled = true;
+      const saved = await filePreview?.save();
+      if (saved) cleanup(true);
+      else saveButton.disabled = false;
+    });
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) cleanup(false);
+    });
+    dialog.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        cleanup(false);
+      }
+    });
+    cancelButton.focus();
+  });
+}
+
+async function closeFilePreview(): Promise<void> {
+  if (!(await resolveUnsavedPreviewChanges())) return;
+  previewRequestId += 1;
   filePreviewPath = '';
+  updateTreeSelection();
+  previewRetry = null;
+  filePreviewName.textContent = 'Preview';
+  filePreviewMeta.textContent = '';
+  setPreviewState('empty', 'Select a file to preview', 'Your terminal remains available while you inspect files.');
 }
 
 async function openFilePreview(filePath: string, name: string): Promise<void> {
+  if (filePreviewPath === filePath && filePreview?.hasUnsavedChanges()) {
+    setInspectorTab('preview');
+    return;
+  }
+  if (filePreviewPath && filePreviewPath !== filePath && !(await resolveUnsavedPreviewChanges())) return;
+  const requestId = ++previewRequestId;
+  filePreviewPath = filePath;
+  updateTreeSelection();
+  previewRetry = { path: filePath, name };
+  setInspectorTab('preview');
+  filePreviewName.textContent = name;
+  filePreviewName.title = filePath;
+  filePreviewMeta.textContent = '';
+  setPreviewState('loading', 'Loading preview', `Reading ${name}…`);
   const ext = (filePath.split('.').pop() || '').toLowerCase();
 
+  if (ext === 'pdf') {
+    let pdf: { ok: boolean; dataUrl?: string; size?: number; ext?: string };
+    try {
+      pdf = await window.posse.readFileBase64(filePath);
+    } catch (err) {
+      console.error('readFileBase64 failed', err);
+      if (requestId === previewRequestId) {
+        setPreviewState('error', 'Preview unavailable', 'The PDF could not be read. You can retry or open it externally.', true);
+      }
+      return;
+    }
+    if (!pdf.ok || !pdf.dataUrl) {
+      if (requestId === previewRequestId) {
+        setPreviewState('error', 'Preview unavailable', 'This PDF cannot be displayed here. You can retry or open it externally.', true);
+      }
+      return;
+    }
+    if (requestId !== previewRequestId) return;
+    const kb = pdf.size ? (pdf.size / 1024).toFixed(1) : '0';
+    filePreviewMeta.textContent = `${pdf.ext || ext} · ${kb} KB`;
+    ensureFilePreview().showPdf(pdf.dataUrl, filePath);
+    setPreviewState('ready', '', '');
+    return;
+  }
+
   // Images → read as a base64 data URL and show inline.
-  if (isImageExt(ext)) {
+  if (isImageExt(ext) && ext !== 'svg') {
     let img: { ok: boolean; dataUrl?: string; size?: number; ext?: string };
     try {
       img = await window.posse.readFileBase64(filePath);
     } catch (err) {
       console.error('readFileBase64 failed', err);
-      window.posse.openFile(filePath);
+      if (requestId === previewRequestId) {
+        setPreviewState('error', 'Preview unavailable', 'The image could not be read. You can retry or open it externally.', true);
+      }
       return;
     }
     if (!img.ok || !img.dataUrl) {
-      window.posse.openFile(filePath);
+      if (requestId === previewRequestId) {
+        setPreviewState('error', 'Preview unavailable', 'This image cannot be displayed here. You can retry or open it externally.', true);
+      }
       return;
     }
-    filePreviewPath = filePath;
-    filePreviewName.textContent = name;
-    filePreviewName.title = filePath;
+    if (requestId !== previewRequestId) return;
     const kb = img.size ? (img.size / 1024).toFixed(1) : '0';
     filePreviewMeta.textContent = `${img.ext || ext} · ${kb} KB`;
-    filePreviewPanel.hidden = false;
-    if (!filePreview) filePreview = createFilePreview(filePreviewBody, {
-    onSave: (p, content) => window.posse.writeFile(p, content),
-    onToast: (msg) => showBriefNotice(msg),
-  });
-    filePreview.showImage(img.dataUrl, img.ext || ext);
+    ensureFilePreview().showImage(img.dataUrl, img.ext || ext);
+    setPreviewState('ready', '', '');
     return;
   }
 
@@ -1680,34 +1864,65 @@ async function openFilePreview(filePath: string, name: string): Promise<void> {
   try {
     res = await window.posse.readFile(filePath);
   } catch (err) {
-    // IPC failed → fall back to opening in an external editor
     console.error('readFile failed', err);
-    window.posse.openFile(filePath);
+    if (requestId === previewRequestId) {
+      setPreviewState('error', 'Preview unavailable', 'The file could not be read. You can retry or open it externally.', true);
+    }
     return;
   }
   if (!res.ok) {
-    // Binary / too large / read failure → fall back to opening in an external editor
-    window.posse.openFile(filePath);
+    if (requestId === previewRequestId) {
+      setPreviewState('error', 'Preview unavailable', res.error || 'This file cannot be displayed here. You can open it externally.', true);
+    }
     return;
   }
-  filePreviewPath = filePath;
-  filePreviewName.textContent = name;
-  filePreviewName.title = filePath;
+  if (requestId !== previewRequestId) return;
   const kb = res.size ? (res.size / 1024).toFixed(1) : '0';
   filePreviewMeta.textContent = `${res.ext || 'txt'} · ${kb} KB`;
-  filePreviewPanel.hidden = false;
-  if (!filePreview) filePreview = createFilePreview(filePreviewBody, {
-    onSave: (p, content) => window.posse.writeFile(p, content),
-    onToast: (msg) => showBriefNotice(msg),
-  });
-  // The preview picks the render mode (markdown/html/source) from the extension.
+  // The preview picks the render mode from the extension.
   // Pass the absolute path so in-app edits know what to save.
-  filePreview.show(res.content || '', res.ext || '', filePath);
+  const htmlPreviewUrl = res.ext === 'html' || res.ext === 'htm'
+    ? await getProjectHtmlPreviewUrl(filePath)
+    : undefined;
+  if (requestId !== previewRequestId) return;
+  if (htmlPreviewUrl && projectPreviewRoot) {
+    filePreviewMeta.textContent = `${filePreviewMeta.textContent} · ${projectPreviewRoot.path.split(/[/\\]/).filter(Boolean).pop()}`;
+  }
+  ensureFilePreview().show(res.content || '', res.ext || '', filePath, htmlPreviewUrl);
+  setPreviewState('ready', '', '');
 }
 
-filePreviewCloseBtn.addEventListener('click', closeFilePreview);
+function relativePathWithinRoot(rootPath: string, filePath: string): string | null {
+  const normalizedRoot = rootPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalizedFile = filePath.replace(/\\/g, '/');
+  const prefix = `${normalizedRoot}/`;
+  return normalizedFile.startsWith(prefix) ? normalizedFile.slice(prefix.length) : null;
+}
+
+async function getProjectHtmlPreviewUrl(filePath: string): Promise<string | undefined> {
+  if (activeConnectionIsRemote) return undefined;
+  const rootPath = getActiveSessionCwd();
+  const relativePath = relativePathWithinRoot(rootPath, filePath);
+  if (!relativePath) return undefined;
+
+  if (!projectPreviewRoot || projectPreviewRoot.path !== rootPath) {
+    const registration = await window.posse.inspectorRegisterProjectRoot(rootPath);
+    if (!registration.ok || !registration.token) return undefined;
+    projectPreviewRoot = { path: rootPath, token: registration.token };
+  }
+  const result = await window.posse.inspectorProjectPreviewUrl(projectPreviewRoot.token, relativePath);
+  return result.ok ? result.url : undefined;
+}
+
+filePreviewCloseBtn.addEventListener('click', () => { void closeFilePreview(); });
 filePreviewExternalBtn.addEventListener('click', () => {
   if (filePreviewPath) window.posse.openFile(filePreviewPath);
+});
+filePreviewStateExternalBtn.addEventListener('click', () => {
+  if (filePreviewPath) window.posse.openFile(filePreviewPath);
+});
+filePreviewRetryBtn.addEventListener('click', () => {
+  if (previewRetry) void openFilePreview(previewRetry.path, previewRetry.name);
 });
 
 const fileTreePath = document.getElementById('file-tree-path')!;
@@ -2415,7 +2630,127 @@ async function loadDirItems(dirPath: string): Promise<FileTreeItem[]> {
   return items;
 }
 
-async function renderFileTree(): Promise<void> {
+function focusTreeRow(path: string): void {
+  const row = fileTreeList.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(path)}"]`);
+  row?.focus();
+}
+
+function updateTreeSelection(): void {
+  for (const row of Array.from(fileTreeList.querySelectorAll<HTMLElement>('[role="treeitem"]'))) {
+    const isFile = row.classList.contains('file');
+    row.setAttribute('aria-selected', String(isFile && row.dataset.treePath === filePreviewPath));
+  }
+}
+
+function visibleTreeRows(): HTMLElement[] {
+  return Array.from(fileTreeList.querySelectorAll<HTMLElement>('[role="treeitem"]'));
+}
+
+function makeTreeRowAccessible(
+  row: HTMLElement,
+  item: Pick<FileTreeItem, 'path' | 'isDir'>,
+  level: number,
+  activate: () => Promise<void>,
+): void {
+  row.setAttribute('role', 'treeitem');
+  row.setAttribute('aria-level', String(level));
+  row.setAttribute('aria-selected', String(!item.isDir && item.path === filePreviewPath));
+  row.tabIndex = level === 1 ? 0 : -1;
+  row.dataset.treePath = item.path;
+  row.dataset.treeLevel = String(level);
+  if (item.isDir) row.setAttribute('aria-expanded', String(fileTreeExpandedDirs.has(item.path)));
+
+  row.addEventListener('keydown', async (event) => {
+    const rows = visibleTreeRows();
+    const index = rows.indexOf(row);
+    if (index === -1) return;
+    const focusIndex = (nextIndex: number): void => {
+      if (nextIndex >= 0 && nextIndex < rows.length) rows[nextIndex].focus();
+    };
+
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        focusIndex(index + 1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        focusIndex(index - 1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        focusIndex(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        focusIndex(rows.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        await activate();
+        focusTreeRow(item.path);
+        break;
+      case 'ArrowRight':
+        if (!item.isDir) return;
+        event.preventDefault();
+        if (!fileTreeExpandedDirs.has(item.path)) {
+          await activate();
+          focusTreeRow(item.path);
+        } else {
+          const next = rows[index + 1];
+          if (next && Number(next.dataset.treeLevel) > level) next.focus();
+        }
+        break;
+      case 'ArrowLeft':
+        if (!item.isDir) {
+          for (let previousIndex = index - 1; previousIndex >= 0; previousIndex -= 1) {
+            if (Number(rows[previousIndex].dataset.treeLevel) < level) {
+              event.preventDefault();
+              rows[previousIndex].focus();
+              break;
+            }
+          }
+          return;
+        }
+        if (fileTreeExpandedDirs.has(item.path) && level > 1) {
+          event.preventDefault();
+          await activate();
+          focusTreeRow(item.path);
+          return;
+        }
+        if (level > 1) {
+          for (let previousIndex = index - 1; previousIndex >= 0; previousIndex -= 1) {
+            if (Number(rows[previousIndex].dataset.treeLevel) < level) {
+              event.preventDefault();
+              rows[previousIndex].focus();
+              break;
+            }
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+function renderFileTreeError(message: string): void {
+  fileTreeList.replaceChildren();
+  const state = document.createElement('div');
+  state.className = 'file-tree-empty';
+  const detail = document.createElement('p');
+  detail.textContent = message;
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'toolbar-btn';
+  retry.textContent = 'Retry';
+  retry.addEventListener('click', () => { void refreshFileTree(true); });
+  state.append(detail, retry);
+  fileTreeList.appendChild(state);
+}
+
+async function renderFileTree(focusPath?: string): Promise<void> {
   const rootCwd = getActiveSessionCwd();
   if (!rootCwd) {
     fileTreeList.innerHTML = '<div class="file-tree-empty">Select a session to show the current directory</div>';
@@ -2436,6 +2771,7 @@ async function renderFileTree(): Promise<void> {
   const rootRow = document.createElement('div');
   rootRow.className = 'file-tree-row dir active-dir';
   rootRow.style.paddingLeft = '6px';
+  makeTreeRowAccessible(rootRow, { path: rootCwd, isDir: true }, 1, async () => {});
 
   const rootArrow = document.createElement('span');
   rootArrow.className = 'file-tree-arrow';
@@ -2448,14 +2784,17 @@ async function renderFileTree(): Promise<void> {
   rootName.title = rootCwd;
   rootRow.appendChild(rootName);
 
-  const rootOpenBtn = document.createElement('span');
+  const rootOpenBtn = document.createElement('button');
+  rootOpenBtn.type = 'button';
   rootOpenBtn.className = 'file-tree-open-folder';
   rootOpenBtn.innerHTML = ICON.folder;
   rootOpenBtn.title = 'Reveal in Finder';
+  rootOpenBtn.setAttribute('aria-label', `Reveal ${rootCwd} in Finder`);
   rootOpenBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     window.posse.openFolder(rootCwd);
   });
+  rootOpenBtn.addEventListener('keydown', (event) => event.stopPropagation());
   rootRow.appendChild(rootOpenBtn);
 
   rootRow.addEventListener('contextmenu', (e) => {
@@ -2466,7 +2805,14 @@ async function renderFileTree(): Promise<void> {
 
   fileTreeList.appendChild(rootRow);
 
-  const rootItems = await loadDirItems(rootCwd);
+  let rootItems: FileTreeItem[];
+  try {
+    rootItems = await loadDirItems(rootCwd);
+  } catch (error) {
+    console.error('Failed to list project files', error);
+    renderFileTreeError('Could not load project files.');
+    return;
+  }
 
   const appendRows = async (items: FileTreeItem[], level: number): Promise<void> => {
     for (const item of items) {
@@ -2489,35 +2835,42 @@ async function renderFileTree(): Promise<void> {
       name.title = item.path;
       row.appendChild(name);
 
-      // Directory row: add a "Reveal in Finder" icon button
-      if (item.isDir) {
-        const openFolderBtn = document.createElement('span');
-        openFolderBtn.className = 'file-tree-open-folder';
-        openFolderBtn.innerHTML = ICON.folder;
-        openFolderBtn.title = 'Reveal in Finder';
-        openFolderBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          window.posse.openFolder(item.path);
-        });
-        row.appendChild(openFolderBtn);
-      }
-
-      row.addEventListener('click', async () => {
+      const activate = async (): Promise<void> => {
         if (item.isDir) {
           const wasExpanded = fileTreeExpandedDirs.has(item.path);
           if (wasExpanded) fileTreeExpandedDirs.delete(item.path);
           else fileTreeExpandedDirs.add(item.path);
-          await renderFileTree();
-          // After expanding, scroll to this directory
+          await renderFileTree(item.path);
           if (!wasExpanded) {
             requestAnimationFrame(() => {
-              row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              focusTreeRow(item.path);
+              document.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(item.path)}"]`)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             });
           }
         } else {
           void openFilePreview(item.path, item.name);
         }
-      });
+      };
+      makeTreeRowAccessible(row, item, level + 1, activate);
+
+      // Directory row: add a "Reveal in Finder" icon button
+      if (item.isDir) {
+        const openFolderBtn = document.createElement('button');
+        openFolderBtn.type = 'button';
+        openFolderBtn.className = 'file-tree-open-folder';
+        openFolderBtn.innerHTML = ICON.folder;
+        openFolderBtn.title = 'Reveal in Finder';
+        openFolderBtn.setAttribute('aria-label', `Reveal ${item.name} in Finder`);
+        openFolderBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          window.posse.openFolder(item.path);
+        });
+        openFolderBtn.addEventListener('keydown', (event) => event.stopPropagation());
+        row.appendChild(openFolderBtn);
+      }
+
+      row.addEventListener('click', () => { void activate(); });
 
       // Context menu: supported for both files and directories
       row.addEventListener('contextmenu', (e) => {
@@ -2535,10 +2888,17 @@ async function renderFileTree(): Promise<void> {
     }
   };
 
-  await appendRows(rootItems, 0);
+  try {
+    await appendRows(rootItems, 0);
+  } catch (error) {
+    console.error('Failed to load project files', error);
+    renderFileTreeError('Could not load project files.');
+    return;
+  }
   if (!fileTreeList.children.length) {
     fileTreeList.innerHTML = '<div class="file-tree-empty">Directory is empty</div>';
   }
+  if (focusPath) focusTreeRow(focusPath);
 }
 
 async function refreshFileTree(force = false): Promise<void> {
@@ -4396,25 +4756,36 @@ cwdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') cwdInput.bl
 
 // ========== Panel collapse/expand and resizing ==========
 
-// Left file-tree collapse/expand
+// Workspace inspector collapse/expand
 let fileTreeCollapsed = false;
 let fileTreeLastWidth = 220;
 
-fileTreeToggle.addEventListener('click', () => {
-  fileTreeCollapsed = !fileTreeCollapsed;
-  if (fileTreeCollapsed) {
+function setInspectorCollapsed(collapsed: boolean, persist = true): void {
+  fileTreeCollapsed = collapsed;
+  if (collapsed) {
     fileTreeLastWidth = fileTreePanel.offsetWidth;
     fileTreePanel.classList.add('collapsed');
     fileTreeToggle.classList.add('collapsed');
-    // File tree is on the right: collapsed \u2192 point left (expand), expanded \u2192 point right (collapse)
     fileTreeToggle.textContent = '\u25C0';
+    fileTreeToggle.setAttribute('aria-expanded', 'false');
+    fileTreeToggle.setAttribute('aria-label', 'Expand workspace inspector');
   } else {
     fileTreePanel.style.width = fileTreeLastWidth + 'px';
     fileTreePanel.classList.remove('collapsed');
     fileTreeToggle.classList.remove('collapsed');
     fileTreeToggle.textContent = '\u25B6';
+    fileTreeToggle.setAttribute('aria-expanded', 'true');
+    fileTreeToggle.setAttribute('aria-label', 'Collapse workspace inspector');
+    requestAnimationFrame(() => {
+      const activeTab = inspectorTabs.find((tab) => tab.classList.contains('active'));
+      activeTab?.focus();
+    });
   }
-  localStorage.setItem('posse_filetree_collapsed', String(fileTreeCollapsed));
+  if (persist) localStorage.setItem('posse_filetree_collapsed', String(fileTreeCollapsed));
+}
+
+fileTreeToggle.addEventListener('click', () => {
+  setInspectorCollapsed(!fileTreeCollapsed);
 });
 
 // Right sidebar collapse/expand
@@ -4457,7 +4828,7 @@ const dragState: DragState = {
   maxWidth: 0
 };
 
-// Left file-tree drag
+// Workspace inspector drag
 fileTreeResizer.addEventListener('mousedown', (e) => {
   if (fileTreeCollapsed) return;
   e.preventDefault();
@@ -4526,10 +4897,7 @@ document.addEventListener('mouseup', () => {
   }
   const savedFileTreeCollapsed = localStorage.getItem('posse_filetree_collapsed');
   if (savedFileTreeCollapsed === 'true') {
-    fileTreeCollapsed = true;
-    fileTreePanel.classList.add('collapsed');
-    fileTreeToggle.classList.add('collapsed');
-    fileTreeToggle.textContent = '\u25C0';
+    setInspectorCollapsed(true, false);
   }
   const savedSidebarCollapsed = localStorage.getItem('posse_sidebar_collapsed');
   if (savedSidebarCollapsed === 'true') {

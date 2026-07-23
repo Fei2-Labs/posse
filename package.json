@@ -6,7 +6,7 @@
   "scripts": {
     "build:main": "tsc -p tsconfig.main.json",
     "build:preload": "tsc -p tsconfig.preload.json",
-    "build:renderer": "esbuild src/renderer/app.ts --bundle --outfile=dist/renderer/app.js --platform=browser --external:electron",
+    "build:renderer": "esbuild src/renderer/app.ts --bundle --outdir=dist/renderer --entry-names=app --splitting --format=esm --platform=browser --external:electron",
     "build:terminal-client": "esbuild src/terminal-client/app.ts --bundle --outfile=dist/terminal-client/app.js --platform=browser && node -e \"const fs=require('fs'),p=require('path');const d=p.join('dist','terminal-client');fs.mkdirSync(d,{recursive:true});for(const f of ['index.html','styles.css']) fs.copyFileSync(p.join('src','terminal-client',f),p.join(d,f));fs.copyFileSync(p.join('node_modules','@xterm','xterm','css','xterm.css'),p.join(d,'xterm.css'));\"",
     "build:stamp": "node scripts/build-stamp.js",
     "build:headless": "npm run build:stamp && npm run build:main && esbuild src/main/headless.ts --bundle --outfile=dist/main/headless.js --platform=node --target=node20 --external:electron --external:node-pty --external:sharp --external:ws",
@@ -14,10 +14,10 @@
     "build:ts": "npm run build:stamp && npm run build:main && npm run build:preload && npm run build:renderer && npm run build:terminal-client",
     "watch:main": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
     "watch:preload": "tsc -p tsconfig.preload.json --watch --preserveWatchOutput",
-    "watch:renderer": "esbuild src/renderer/app.ts --bundle --outfile=dist/renderer/app.js --platform=browser --external:electron --watch",
+    "watch:renderer": "esbuild src/renderer/app.ts --bundle --outdir=dist/renderer --entry-names=app --splitting --format=esm --platform=browser --external:electron --watch",
     "watch:terminal-client": "esbuild src/terminal-client/app.ts --bundle --outfile=dist/terminal-client/app.js --platform=browser --watch",
     "dev": "npm run build:ts && npm run copy:html && concurrently -k -n main,preload,rend,term,electron \"npm:watch:main\" \"npm:watch:preload\" \"npm:watch:renderer\" \"npm:watch:terminal-client\" \"electron .\"",
-    "copy:html": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('dist','renderer');fs.mkdirSync(d,{recursive:true});fs.copyFileSync(p.join('src','renderer','index.html'),p.join(d,'index.html'));fs.copyFileSync(p.join('src','renderer','styles.css'),p.join(d,'styles.css'));fs.copyFileSync(p.join('src','renderer','qrcode.jpg'),p.join(d,'qrcode.jpg'));\"",
+    "copy:html": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('dist','renderer');fs.mkdirSync(d,{recursive:true});for(const f of ['index.html','styles.css','qrcode.jpg'])fs.copyFileSync(p.join('src','renderer',f),p.join(d,f));fs.copyFileSync(p.join('node_modules','pdfjs-dist','build','pdf.worker.mjs'),p.join(d,'pdf.worker.mjs'));\"",
     "start": "npm run build:ts && npm run copy:html && electron .",
     "make-launcher": "bash scripts/make-launcher.sh",
     "rebuild": "electron-rebuild",
@@ -53,6 +53,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^20.11.0",
+    "@types/papaparse": "^5.3.16",
     "@types/qrcode": "^1.5.6",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.1",
@@ -85,13 +86,22 @@
     "electron-updater": "^6.8.9",
     "express": "^5.2.1",
     "marked": "^15.0.12",
+    "mermaid": "^11.16.0",
     "node-pty": "^1.0.0",
+    "papaparse": "^5.5.4",
+    "pdfjs-dist": "^4.10.38",
     "qrcode": "^1.5.4",
     "sharp": "^0.34.5",
     "web-push": "^3.6.7",
     "ws": "^8.19.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron", "esbuild", "lzma-native", "node-pty", "sharp"]
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "lzma-native",
+      "node-pty",
+      "sharp"
+    ]
   }
 }

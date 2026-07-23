@@ -1,0 +1,9 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend compliance index."}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Check context isolation and typed IPC exposure."}
+{"file": ".trellis/spec/frontend/components.md", "reason": "Check semantics, focus, states, and scroll containers."}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "Check token-driven CSS and focus design."}
+{"file": ".trellis/spec/frontend/quality.md", "reason": "Check quality, type safety, and lazy-load behavior."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Check surfaced, user-safe failures."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Check all renderer/preload/main data outlets."}
+{"file": ".trellis/tasks/07-23-redesign-posse-workspace-ux/research/renderer-integration-options.md", "reason": "Check security and packaging constraints from technical research."}

@@ -168,16 +168,6 @@
       <div id="terminal-content">
         <div id="empty-state">Select a working directory, then click "New Terminal" to start</div>
       </div>
-      <!-- File preview panel (read-only, overlays the terminal) -->
-      <div id="file-preview-panel" hidden>
-        <div id="file-preview-header">
-          <span id="file-preview-name" class="file-preview-name">File Preview</span>
-          <span id="file-preview-meta" class="file-preview-meta"></span>
-          <button id="file-preview-external" class="toolbar-icon-btn" title="Open in external editor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></button>
-          <button id="file-preview-close" class="toolbar-icon-btn" title="Close preview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
-        </div>
-        <div id="file-preview-body"></div>
-      </div>
       <div id="chat-content" style="display:none;">
         <div id="chat-empty-state" class="chat-empty-state">
           <p>Select a chat session or click "New Chat" to start</p>
@@ -191,24 +181,57 @@
       </div>
     </div>
 
-    <!-- File-tree resizer (between terminal and right file tree) -->
+    <!-- Inspector resizer (between terminal and the right-side workspace inspector) -->
     <div id="file-tree-resizer" class="resizer"></div>
 
-    <div id="file-tree-panel">
-      <div id="file-tree-header">
-        <span id="file-tree-path">Directory</span>
-        <button id="file-tree-upload-btn" class="toolbar-icon-btn" title="Upload file(s) to remote" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button>
-        <button id="file-tree-refresh-btn" class="toolbar-icon-btn" title="Refresh directory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+    <aside id="file-tree-panel" aria-label="Workspace inspector">
+      <div id="inspector-tabs" role="tablist" aria-label="Workspace inspector">
+        <button id="inspector-files-tab" class="inspector-tab active" type="button" role="tab" aria-selected="true" aria-controls="inspector-files-panel">Files</button>
+        <button id="inspector-preview-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="inspector-preview-panel">Preview</button>
+        <button id="inspector-git-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="inspector-git-panel">Git</button>
       </div>
-      <div id="file-tree-list">
-        <div class="file-tree-empty">Select a session to show the current directory</div>
-      </div>
-    </div>
 
-    <!-- Right file-tree collapse button -->
-    <div id="file-tree-toggle" class="panel-toggle" title="Collapse/expand file tree">&#9654;</div>
+      <section id="inspector-files-panel" class="inspector-tab-panel" role="tabpanel" aria-labelledby="inspector-files-tab">
+        <div id="file-tree-header">
+          <span id="file-tree-path">Directory</span>
+          <button id="file-tree-upload-btn" class="toolbar-icon-btn" title="Upload file(s) to remote" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button>
+          <button id="file-tree-refresh-btn" class="toolbar-icon-btn" title="Refresh directory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+        </div>
+        <div id="file-tree-list" role="tree" aria-label="Project files">
+          <div class="file-tree-empty">Select a session to show the current directory</div>
+        </div>
+      </section>
+
+      <section id="inspector-preview-panel" class="inspector-tab-panel" role="tabpanel" aria-labelledby="inspector-preview-tab" hidden>
+        <div id="file-preview-panel">
+          <div id="file-preview-header">
+            <span id="file-preview-name" class="file-preview-name">Preview</span>
+            <span id="file-preview-meta" class="file-preview-meta"></span>
+            <button id="file-preview-external" class="toolbar-icon-btn" title="Open in external editor" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></button>
+            <button id="file-preview-close" class="toolbar-icon-btn" title="Close preview" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+          </div>
+          <div id="file-preview-state" class="file-preview-state" aria-live="polite">
+            <strong id="file-preview-state-title">Select a file to preview</strong>
+            <span id="file-preview-state-message">Your terminal remains available while you inspect files.</span>
+            <div id="file-preview-state-actions" class="file-preview-state-actions">
+              <button id="file-preview-retry" type="button" class="toolbar-btn" hidden>Retry</button>
+              <button id="file-preview-state-external" type="button" class="btn-cancel" hidden>Open externally</button>
+            </div>
+          </div>
+          <div id="file-preview-body" hidden></div>
+        </div>
+      </section>
+
+      <section id="inspector-git-panel" class="inspector-tab-panel inspector-empty-panel" role="tabpanel" aria-labelledby="inspector-git-tab" hidden>
+        <strong>Git inspector is coming next</strong>
+        <span>Status and read-only diffs will appear here. Use the terminal for Git changes.</span>
+      </section>
+    </aside>
+
+    <!-- Inspector collapse/expand button -->
+    <button id="file-tree-toggle" class="panel-toggle" type="button" title="Collapse/expand workspace inspector" aria-label="Collapse workspace inspector" aria-expanded="true">&#9654;</button>
   </div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -750,7 +750,8 @@ export function startRemoteServer(
     }
   });
 
-  // Read a file as a base64 data URL (image previews). Mirrors `fs:read-file-base64`.
+  // Read a bounded binary file as a base64 data URL (image and PDF previews).
+  // Mirrors `fs:read-file-base64`.
   app.get('/api/fs/read-base64', (req, res) => {
     const MAX_IMAGE_BYTES = 16 * 1024 * 1024; // 16MB cap
     try {
@@ -763,6 +764,7 @@ export function startRemoteServer(
       const mimeByExt: Record<string, string> = {
         png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
         svg: 'image/svg+xml', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
+        pdf: 'application/pdf',
       };
       const mime = mimeByExt[ext] || 'application/octet-stream';
       const buf = fs.readFileSync(abs);
