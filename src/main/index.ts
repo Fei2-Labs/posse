@@ -1999,20 +1999,21 @@ function registerIPC(): void {
   // ========== Closed session IPC ==========
   ipcMain.handle('closed-sessions:list', () => loadClosedSessions());
   ipcMain.handle('closed-sessions:remove', (_e, id: string) => {
-    const sessions = loadClosedSessions().filter(s => s.id !== id);
-    saveClosedSessions(sessions);
+    const sessions = saveClosedSessions(loadClosedSessions().filter(s => s.id !== id));
+    safeSend('closed-sessions:update', sessions);
     return sessions;
   });
   ipcMain.handle('closed-sessions:clear', () => {
-    saveClosedSessions([]);
-    return [];
+    const sessions = saveClosedSessions([]);
+    safeSend('closed-sessions:update', sessions);
+    return sessions;
   });
   ipcMain.handle('closed-sessions:rename', (_e, id: string, title: string) => {
     const newTitle = String(title || '').slice(0, 200);
-    const sessions = loadClosedSessions().map(s =>
+    const sessions = saveClosedSessions(loadClosedSessions().map(s =>
       s.id === id ? { ...s, title: newTitle } : s
-    );
-    saveClosedSessions(sessions);
+    ));
+    safeSend('closed-sessions:update', sessions);
     // Propagate into the agent's own session file for closed Claude / Codex sessions.
     const target = sessions.find(s => s.id === id);
     const cmd = (target?.presetCommand || '').trim();

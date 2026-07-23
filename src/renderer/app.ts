@@ -3347,6 +3347,18 @@ function conversationKey(uuid: string): string {
   return m ? m[0] : u;
 }
 
+// Recent-list dedup key for closed sessions.
+// Prefer resumable conversation ids; fallback to a stable path/command/title tuple.
+function closedSessionRecentKey(cs: ClosedSessionInfo): string {
+  const parsed = parseResumeCommand(cs.resumeCommand || '');
+  const resumeId = (cs.resumeId || parsed?.id || '').trim();
+  if (resumeId) return `resume:${conversationKey(resumeId)}`;
+  const cwd = normalizeCwd(cs.cwd || '');
+  const command = (cs.presetCommand || '').trim();
+  const title = (cs.title || '').trim().toLowerCase();
+  return `fallback:${cwd}|${command}|${title}`;
+}
+
 function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup> {
   const key = normalizeCwd(projPath);
   const groups = new Map<string, ProjectAgentGroup>();
@@ -3632,6 +3644,25 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
   return out;
 }
 
+// Flatten recently-closed sessions so users can quickly reopen without drilling
+// into project folders. Dedup by conversation id and hide sessions known deleted.
+function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
+  const out: Array<{ time: number; el: HTMLElement }> = [];
+  const seen = new Set<string>();
+  const sorted = [...closedSessions].sort((a, b) => b.closedAt - a.closedAt);
+  for (const cs of sorted) {
+    if (cs.resumeId && removedHistoryKeys.has(conversationKey(cs.resumeId))) continue;
+    const k = closedSessionRecentKey(cs);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const el = buildClosedSessionRow(cs);
+    appendAgentTag(el, agentFamilyFromDisplayName(cs.displayName || ''));
+    appendProjectTagForCwd(el, cs.cwd || '');
+    out.push({ time: cs.closedAt || 0, el });
+  }
+  return out;
+}
+
 function renderSessionList(): void {
   const activeId = termManager.getActiveId();
   statusDbg('render', activeId || '', `liveCount=${sessionTitles.size}`);
@@ -3691,6 +3722,30 @@ function renderSessionList(): void {
     sessionList.appendChild(header);
     if (!activeCollapsed) {
       for (const r of activeSessionRows) sessionList.appendChild(r.el);
+    }
+  }
+
+  // ========== Recent section ==========
+  // Quick-access closed-session list (most-recent-first), deduped by conversation id.
+  const recentSessionRows = collectRecentSessionRows();
+  if (recentSessionRows.length > 0) {
+    const recentCollapsed = collapsedSections.has('recent');
+    const header = document.createElement('div');
+    header.className = 'nav-section-header' + (recentCollapsed ? ' collapsed' : '');
+    const label = document.createElement('span');
+    label.className = 'nav-section-label';
+    const icon = document.createElement('span');
+    icon.className = 'nav-section-icon';
+    icon.innerHTML = ICON.activity;
+    const text = document.createElement('span');
+    text.textContent = `Recent (${recentSessionRows.length})`;
+    label.appendChild(icon);
+    label.appendChild(text);
+    header.appendChild(label);
+    header.addEventListener('click', () => toggleSectionCollapsed('recent'));
+    sessionList.appendChild(header);
+    if (!recentCollapsed) {
+      for (const r of recentSessionRows) sessionList.appendChild(r.el);
     }
   }
 
