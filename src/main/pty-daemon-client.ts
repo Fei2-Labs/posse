@@ -290,9 +290,6 @@ export class PtyDaemonClient implements PtyBackend {
       this.events.onPasteInput?.(event.id, event.cwd);
       return;
     }
-    if (event.type === 'autoSwitchStatus' && typeof event.status === 'string') {
-      this.events.onAutoSwitchStatus?.(event.id, event.status, event.detail);
-    }
   }
 
   private request<T = unknown>(

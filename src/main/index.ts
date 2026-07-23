@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, glo
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getDisplayName, rotateDevinInstallationId, writeClaudeSessionTitle, writeCodexSessionTitle, writeDevinSessionTitle } from './pty-manager';
+import { getDisplayName, writeClaudeSessionTitle, writeCodexSessionTitle, writeDevinSessionTitle } from './pty-manager';
 import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
@@ -1073,7 +1073,7 @@ function maybeNotifyAttention(id: string, data: string, connectionId: string = a
 
 /**
  * Build the PtyBackendEvents for a given connection. Each renderer-bound callback routes via
- * `sendToConnection(connId, ...)`, so a connection's `pty:data` / title / exit / auto-switch
+ * `sendToConnection(connId, ...)`, so a connection's `pty:data` / title / exit
  * frames reach ONLY the window(s) bound to THAT connection. Multiple windows can therefore view
  * different hosts in parallel: each window's renderer only ever receives its own connection's
  * events, so local + remote `term-N` ids never interleave or collide in the UI. A connection
@@ -1125,9 +1125,6 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
     onPasteInput: (id, _cwd) => {
       sessionLastInputAt.set(id, Date.now());
       sessionArmedForNotify.add(id);
-    },
-    onAutoSwitchStatus: (id, status, detail) => {
-      sendToConnection(connId, 'pty:auto-switch-status', id, status, detail);
     },
   };
 }
@@ -3341,110 +3338,6 @@ function registerIPC(): void {
   ipcMain.handle('claude-providers:save', (_e, providers: any[]) => {
     fs.writeFileSync(CLAUDE_PROVIDERS_PATH, JSON.stringify(providers, null, 2), 'utf-8');
     return true;
-  });
-
-  // ========== Devin account management ==========
-  const DEVIN_ACCOUNTS_PATH = path.join(os.homedir(), '.session-sync-manager', 'accounts.json');
-  const authCliPath = (() => {
-    try {
-      const syncPath = path.join(os.homedir(), '.local', 'bin', 'session-sync');
-      const resolved = fs.realpathSync(syncPath);
-      return path.join(path.dirname(resolved), 'auth-cli.mjs');
-    } catch { return null; }
-  })();
-
-  function runAuthCli(args: string[], stdin?: string): Promise<{ code: number; stdout: string; stderr: string }> {
-    return new Promise((resolve) => {
-      if (!authCliPath) { resolve({ code: 1, stdout: '', stderr: 'auth-cli.mjs not found' }); return; }
-      const child = spawn('node', [authCliPath, ...args], { stdio: 'pipe' });
-      let stdout = '', stderr = '';
-      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
-      child.on('error', (err) => resolve({ code: 1, stdout: '', stderr: err.message }));
-      if (stdin !== undefined) {
-        child.stdin.write(stdin);
-        child.stdin.end();
-      }
-    });
-  }
-
-  ipcMain.handle('devin-accounts:list', () => {
-    try {
-      if (fs.existsSync(DEVIN_ACCOUNTS_PATH)) {
-        return JSON.parse(fs.readFileSync(DEVIN_ACCOUNTS_PATH, 'utf-8'));
-      }
-    } catch { /* ignore */ }
-    return { accounts: [], currentIndex: 0 };
-  });
-
-  ipcMain.handle('devin-accounts:add', async (_e, email: string, password: string) => {
-    const { code, stderr } = await runAuthCli(['add', email, password]);
-    return { ok: code === 0, error: code !== 0 ? stderr.trim() : undefined };
-  });
-
-  ipcMain.handle('devin-accounts:add-batch', async (_e, text: string) => {
-    const { code, stderr } = await runAuthCli(['add', '--batch'], text);
-    // auth-cli.mjs's add --batch writes its stats to stderr
-    return { ok: code === 0, output: stderr.trim(), error: code !== 0 ? stderr.trim() : undefined };
-  });
-
-  ipcMain.handle('devin-accounts:remove', async (_e, email: string) => {
-    const { code, stderr } = await runAuthCli(['remove', email]);
-    return { ok: code === 0, error: code !== 0 ? stderr.trim() : undefined };
-  });
-
-  ipcMain.handle('devin-accounts:switch', async (_e, opts: { email?: string; next?: boolean }) => {
-    // When next is true or no email is passed, auth-cli.mjs rotates to the next account by default
-    const args = opts.email ? ['switch', '--force', opts.email] : ['switch'];
-    const { code, stdout, stderr } = await runAuthCli([...args, '--json']);
-    // auth-cli.mjs also rotates installation_id internally; rotate once more here as a fallback
-    rotateDevinInstallationId();
-    if (code !== 0) return { ok: false, error: stderr.trim() };
-    // Re-read the updated account state
-    try {
-      const updated = JSON.parse(fs.readFileSync(DEVIN_ACCOUNTS_PATH, 'utf-8'));
-      const cur = updated.accounts[updated.currentIndex];
-      return { ok: true, email: cur?.email, quota: cur?.quota };
-    } catch {
-      return { ok: true };
-    }
-  });
-
-  ipcMain.handle('devin-accounts:quota', async () => {
-    const { code, stdout, stderr } = await runAuthCli(['quota', '--json']);
-    if (code !== 0) return { ok: false, error: stderr.trim() };
-    try {
-      return { ok: true, ...JSON.parse(stdout.trim()) };
-    } catch {
-      return { ok: false, error: 'Parse failed' };
-    }
-  });
-
-  ipcMain.handle('devin-accounts:quota-all', async () => {
-    const { code, stdout, stderr } = await runAuthCli(['quota', '--all', '--json']);
-    if (code !== 0) return { ok: false, error: stderr.trim() };
-    try {
-      const results = JSON.parse(stdout.trim());
-      return { ok: true, results };
-    } catch {
-      return { ok: false, error: 'Parse failed' };
-    }
-  });
-
-  ipcMain.handle('devin-accounts:quota-one', async (_e, email: string) => {
-    const { code, stdout, stderr } = await runAuthCli(['quota', '--email', email, '--json']);
-    if (code !== 0) return { ok: false, error: stderr.trim() };
-    try {
-      return { ok: true, ...JSON.parse(stdout.trim()) };
-    } catch {
-      return { ok: false, error: 'Parse failed' };
-    }
-  });
-
-  ipcMain.handle('devin-accounts:rotate-device', () => {
-    rotateDevinInstallationId();
-    return { ok: true };
   });
 
   // Renderer proactively fetches remote server info (resolves the race where IPC messages arrive before the renderer loads)

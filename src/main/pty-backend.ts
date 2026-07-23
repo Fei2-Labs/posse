@@ -23,7 +23,6 @@ export interface PtyBackendEvents {
   onExit: (id: string, session?: PtySessionSnapshot) => void;
   onPasteInput?: (id: string, cwd: string) => void;
   onRawData?: (id: string, data: string) => void;
-  onAutoSwitchStatus?: (id: string, status: string, detail?: string) => void;
 }
 
 export interface PtyBackend {
@@ -43,4 +42,3 @@ export interface PtyBackend {
   getRawBuffer(id: string): Promise<string>;
   restart(): Promise<void>;
 }
-

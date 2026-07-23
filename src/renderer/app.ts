@@ -121,16 +121,6 @@ declare global {
       // Claude provider config
       claudeProvidersList: () => Promise<Array<{ id: string; name: string; baseUrl: string; apiKey: string; model?: string }>>;
       claudeProvidersSave: (providers: Array<{ id: string; name: string; baseUrl: string; apiKey: string; model?: string }>) => Promise<boolean>;
-      // Devin account management
-      devinAccountsList: () => Promise<{ accounts: Array<{ email: string; enabled: boolean; addedAt: number; lastLogin?: string; lastError?: string; quota?: { daily: number; weekly: number }; planName?: string; lastSwitchAt?: number }>; currentIndex: number }>;
-      devinAccountsAdd: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
-      devinAccountsAddBatch: (text: string) => Promise<{ ok: boolean; output?: string; error?: string }>;
-      devinAccountsRemove: (email: string) => Promise<{ ok: boolean; error?: string }>;
-      devinAccountsSwitch: (opts: { email?: string; next?: boolean }) => Promise<{ ok: boolean; error?: string; email?: string; quota?: { daily: number; weekly: number } }>;
-      devinAccountsQuota: () => Promise<{ ok: boolean; daily?: number; weekly?: number; planName?: string; error?: string }>;
-      devinAccountsQuotaAll: () => Promise<{ ok: boolean; results?: Array<{ email: string; ok: boolean; quota?: { daily: number; weekly: number; planName?: string }; error?: string }>; error?: string }>;
-      devinAccountsQuotaOne: (email: string) => Promise<{ ok: boolean; daily?: number; weekly?: number; planName?: string; error?: string }>;
-      devinAccountsRotateDevice: () => Promise<{ ok: boolean }>;
       // File operations
       openFile: (filePath: string) => Promise<void>;
       readDirectory: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean; isFile: boolean }>>;
@@ -142,8 +132,6 @@ declare global {
       closedSessionsRename: (id: string, title: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsClear: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       onClosedSessionsUpdate: (cb: (sessions: Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>) => void) => void;
-      // Auto account-switch status
-      onAutoSwitchStatus: (cb: (id: string, status: string, detail?: string) => void) => void;
       onCloseCurrentSession: (cb: () => void) => void;
       // Connections (remote host add/switch)
       connectionsList: () => Promise<Array<{ id: string; label: string; kind: 'local' | 'remote'; active: boolean }>>;
@@ -165,8 +153,9 @@ declare global {
 const savedCwd = localStorage.getItem('posse_cwd') || '';
 let currentCwd = savedCwd;
 let lastPreset = localStorage.getItem('posse_preset') || '';
-// One-time cleanup: remove stale auto-continue configs from previous versions
-try { localStorage.removeItem('posse_auto_continue'); } catch { /* ignore */ }
+// One-time cleanup: remove the stale legacy Loop config from previous versions.
+const LEGACY_LOOP_STORAGE_KEY = ['posse', 'auto', 'continue'].join('_');
+try { localStorage.removeItem(LEGACY_LOOP_STORAGE_KEY); } catch { /* ignore */ }
 const sessionTitles: Map<string, string> = new Map();
 const sessionThemes: Map<string, string> = new Map();
 const sessionUpdateTimes: Map<string, number> = new Map();
@@ -925,9 +914,6 @@ interface ClosedChatSessionInfo {
 }
 let closedChatSessions: ClosedChatSessionInfo[] = [];
 
-// Auto account-switch status: sessionId → { status, detail }
-const sessionAutoSwitchStatus: Map<string, { status: string; detail?: string }> = new Map();
-
 function hasSessionInUI(sessionId: string): boolean {
   return sessionTitles.has(sessionId);
 }
@@ -940,8 +926,7 @@ function getSessionCreateTime(id: string): number {
   return fallback;
 }
 
-// Write to the PTY with input tracking (recent input buffer + mouse report flagging)
-function writePtyWithAutoReset(id: string, data: string): void {
+function writePtyWithInputTracking(id: string, data: string): void {
   termManager.notifyInput(id);
   // Record recently-sent input (keystrokes, xterm mouse reports, file/paste payloads all
   // flow through here). The PTY echoes typed visible chars back via onPtyData; we use this
@@ -2326,7 +2311,7 @@ function quotePathForShell(filePath: string): string {
 function insertPathToActiveTerminal(filePath: string): void {
   const activeId = getActiveSessionId();
   if (!activeId) return;
-  writePtyWithAutoReset(activeId, quotePathForShell(filePath) + ' ');
+  writePtyWithInputTracking(activeId, quotePathForShell(filePath) + ' ');
 }
 
 // Lightweight confirm for trashing a folder (recoverable, so kept light). Resolves true on confirm.
@@ -4198,7 +4183,7 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   // Record when this session was (re)attached so onPtyData can treat the immediate rawBuffer replay
   // burst as cosmetic (historical scrollback must not flip busy/unread or bump the sort time).
   sessionLastAttachAt.set(info.id, Date.now());
-  termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithAutoReset(info.id, data); });
+  termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithInputTracking(info.id, data); });
   if (replayRawBuffer && info.rawBuffer) {
     termManager.write(info.id, info.rawBuffer);
   }
@@ -4564,7 +4549,6 @@ function clearSessionState(id: string): void {
   sessionAgentId.delete(id);
   sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
-  sessionAutoSwitchStatus.delete(id);
 }
 
 function destroySession(id: string): void {
@@ -4986,7 +4970,7 @@ document.addEventListener('drop', (e) => {
     return;
   }
   const payload = files.map((f) => quotePathForShell(f.path)).join(' ') + ' ';
-  writePtyWithAutoReset(activeId, payload);
+  writePtyWithInputTracking(activeId, payload);
 });
 
 function openNewSessionDialog(cwd?: string): void {
@@ -5338,7 +5322,6 @@ window.posse.onPtyData((id, data) => {
     // Detect the AI CLI prompt after stripping ANSI escapes
     // Improvement: only match real prompts, excluding false positives like HTML tags
     const plain = recentDataBuffer.get(id)!.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-
     // Context-usage % extraction. plain is ANSI-stripped and bridges chunk boundaries via the
     // 500-char recentDataBuffer carry, so a status line split across chunks still matches. Only
     // re-render when the percentage actually changes (no storm on every chunk). "remaining"/"left"
@@ -5368,8 +5351,7 @@ window.posse.onPtyData((id, data) => {
       /Do you want to .*\?/.test(plain) ||
       (/^\s*❯?\s*\d+\.\s/m.test(recentLines) && /\?/.test(recentLines));
     if (decisionPrompt) {
-      // Awaiting the user's decision. Waiting takes priority
-      // over busy/unread.
+      // Awaiting the user's decision. Waiting takes priority over busy/unread.
       clearTimeout(unreadTimers.get(id));
       unreadTimers.delete(id);
       const wasWaiting = sessionWaiting.has(id);
@@ -5560,16 +5542,6 @@ window.posse.closedChatList().then(sessions => {
 });
 window.posse.onClosedChatUpdate((sessions) => {
   closedChatSessions = sessions;
-  renderSessionList();
-});
-
-// Auto account-switch status listener
-window.posse.onAutoSwitchStatus((id, status, detail) => {
-  if (status === 'idle') {
-    sessionAutoSwitchStatus.delete(id);
-  } else {
-    sessionAutoSwitchStatus.set(id, { status, detail });
-  }
   renderSessionList();
 });
 

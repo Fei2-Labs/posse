@@ -2,7 +2,6 @@ import * as pty from 'node-pty';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { requestTitleFromConfiguredAI, TitleAIConfig } from './title-ai';
 
@@ -36,14 +35,7 @@ export interface PtySession {
   resumeId: string | null;    // Captured resume session ID (UUID)
   resumeCommand: string | null; // Full resume command (e.g. "claude --resume xxx")
   agentSessionId: string | null; // On-disk agent session id (uuid) this live PTY corresponds to (for dedup vs history)
-  autoRetryCooldown: number;    // Auto-retry cooldown deadline timestamp
-  prevData: string;              // Previous PTY chunk, merged with the current chunk for rate-limit detection
-  retryTimer: NodeJS.Timeout | null;  // Auto-retry / account-switch delay timer
   disposables: pty.IDisposable[];
-  switchAttempts: number;        // Number of auto account-switch attempts this round
-  lastAutoSwitchAt: number;      // Timestamp of the last auto account-switch
-  rateLimitRetryCount: number;   // Count of consecutive rate-limit "continue" retries (reset on success)
-  lastRateLimitAt: number;       // Timestamp of the last detected rate limit (used to judge continuity)
 }
 
 interface PtyManagerEvents {
@@ -52,7 +44,6 @@ interface PtyManagerEvents {
   onExit: (id: string) => void;
   onPasteInput?: (id: string, cwd: string) => void;
   onRawData?: (id: string, data: string) => void;
-  onAutoSwitchStatus?: (id: string, status: string, detail?: string) => void;
 }
 
 export type TitleAIConfigProvider = () => TitleAIConfig | null;
@@ -385,74 +376,6 @@ function findAgentSessionIdOnDisk(
   return null;
 }
 
-// Read the number of available Devin accounts (used to cap auto account-switch rounds)
-function getDevinAccountCount(): number {
-  try {
-    const accountsPath = path.join(os.homedir(), '.session-sync-manager', 'accounts.json');
-    if (fs.existsSync(accountsPath)) {
-      const data = JSON.parse(fs.readFileSync(accountsPath, 'utf-8'));
-      return (data.accounts || []).filter((a: any) => a.enabled !== false).length || 1;
-    }
-  } catch { /* ignore */ }
-  return 1;
-}
-
-// Devin device fingerprint rotation (prevents cross-account rate-limit correlation)
-const DEVIN_INSTALLATION_ID_PATHS = [
-  path.join(os.homedir(), '.local', 'share', 'devin', 'cli', 'installation_id'),
-  path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next', 'installation_id'),
-];
-
-// Windsurf Electron device ID (the Devin binary reads the Windsurf config path)
-const WINDSURF_MACHINEID_PATHS = [
-  path.join(os.homedir(), 'Library', 'Application Support', 'Windsurf', 'machineid'),
-  path.join(os.homedir(), 'Library', 'Application Support', 'Windsurf - Next', 'machineid'),
-];
-
-export function rotateDevinInstallationId(): void {
-  const newId = crypto.randomUUID().toUpperCase();
-
-  // 1) Devin CLI installation_id
-  for (const p of DEVIN_INSTALLATION_ID_PATHS) {
-    try {
-      if (fs.existsSync(p)) {
-        fs.writeFileSync(p, newId);
-        console.log(`[PTY] Rotated installation_id: ${p} → ${newId}`);
-      } else {
-        const dir = path.dirname(p);
-        if (fs.existsSync(dir)) {
-          fs.writeFileSync(p, newId);
-          console.log(`[PTY] Created installation_id: ${p} → ${newId}`);
-        }
-      }
-    } catch (e) {
-      console.warn(`[PTY] Failed to rotate installation_id ${p}:`, (e as Error).message);
-    }
-  }
-
-  // 2) Windsurf machineid (use a different UUID so the two IDs are not identical and correlatable)
-  const newMachineId = crypto.randomUUID().toUpperCase();
-  for (const p of WINDSURF_MACHINEID_PATHS) {
-    try {
-      if (fs.existsSync(p)) {
-        fs.writeFileSync(p, newMachineId);
-        console.log(`[PTY] Rotated machineid: ${p} → ${newMachineId}`);
-      }
-    } catch (e) {
-      console.warn(`[PTY] Failed to rotate machineid ${p}:`, (e as Error).message);
-    }
-  }
-}
-
-// Resolve the absolute path of session-sync (avoids ENOENT when PATH is missing on Dock launch)
-const sessionSyncPath = (() => {
-  try {
-    const syncSymlink = path.join(os.homedir(), '.local', 'bin', 'session-sync');
-    if (fs.existsSync(syncSymlink)) return fs.realpathSync(syncSymlink);
-  } catch { /* ignore */ }
-  return 'session-sync'; // fallback to PATH lookup
-})();
-
 export function getDisplayName(presetCommand: string): string {
   if (PRESET_DISPLAY_NAMES[presetCommand]) return PRESET_DISPLAY_NAMES[presetCommand];
   if (!presetCommand) return 'Terminal';
@@ -576,13 +499,6 @@ export class PtyManager {
       resumeId: null,
       resumeCommand: null,
       agentSessionId: null,
-      autoRetryCooldown: 0,
-      prevData: '',
-      retryTimer: null,
-      switchAttempts: 0,
-      lastAutoSwitchAt: 0,
-      rateLimitRetryCount: 0,
-      lastRateLimitAt: 0,
       disposables: [],
     };
 
@@ -664,101 +580,6 @@ export class PtyManager {
         }
       }
 
-      // Devin terminal only: auto-retry and account switching
-      // Applies only to the devin presetCommand; other terminals are not affected
-      if (session.presetCommand.startsWith('devin')) {
-        const combinedLower = (session.prevData + data).toLowerCase();
-        session.prevData = data;
-
-        // Detect rate-limit-related errors (covers hard and soft rate limiting)
-        // Typical signature: "Permission denied: Reached overall message rate limit"
-        const isRateLimit = combinedLower.includes('rate limit')
-          || combinedLower.includes('quota exhausted')
-          || combinedLower.includes('usage is exhausted');
-
-        // Strict matching: threshold for treating consecutive rate-limit errors as one round
-        const RATE_LIMIT_RETRY_MAX = 3;       // Max number of "continue" attempts
-        const RATE_LIMIT_WINDOW = 15000;      // Window: only rate limits within 15s count as one round
-
-        if (isRateLimit) {
-          session.prevData = '';
-          const now = Date.now();
-
-          // Prevent duplicate triggers from PTY chunking: if a retryTimer is already running, skip this one
-          if (session.retryTimer) return;
-
-          // Reset the count if outside the window (the previous rate limit was long ago, not consecutive)
-          if (now - session.lastRateLimitAt > RATE_LIMIT_WINDOW) {
-            session.rateLimitRetryCount = 0;
-          }
-          session.lastRateLimitAt = now;
-          session.rateLimitRetryCount++;
-
-          const maxAccounts = getDevinAccountCount();
-
-          if (session.rateLimitRetryCount <= RATE_LIMIT_RETRY_MAX) {
-            // Auto-continue is intentionally disabled: keep the user in control of prompt retries.
-            console.log(
-              `[PTY] Rate limit detected (${session.rateLimitRetryCount}/${RATE_LIMIT_RETRY_MAX}); auto-continue disabled (session: ${id})`
-            );
-          } else if (session.switchAttempts >= maxAccounts) {
-            // Phase 3: all accounts have been tried, give up
-            const errMsg = `\n⚠️ [Posse] All ${maxAccounts} accounts are exhausted; please try again later\n`;
-            ptyProcess.write(errMsg);
-            this.events.onAutoSwitchStatus?.(id, 'exhausted', `All ${maxAccounts} accounts exhausted`);
-            console.log(`[PTY] All ${maxAccounts} accounts exhausted (session: ${id})`);
-            session.switchAttempts = 0;
-            session.rateLimitRetryCount = 0;
-            session.autoRetryCooldown = now + 60000;
-          } else if (now > session.autoRetryCooldown) {
-            // Phase 2: repeated "continue" attempts failed, proceed to account switching
-            session.switchAttempts++;
-            session.rateLimitRetryCount = 0;
-            session.lastAutoSwitchAt = now;
-            session.autoRetryCooldown = now + 30000;
-
-            this.events.onAutoSwitchStatus?.(id, 'switching', `Switching account (${session.switchAttempts}/${maxAccounts})`);
-            console.log(`[PTY] ${RATE_LIMIT_RETRY_MAX} consecutive rate limits without recovery; switching account ${session.switchAttempts}/${maxAccounts} (session: ${id})`);
-
-            // 1) Gracefully exit the current Devin
-            ptyProcess.write('/exit\r');
-
-            // 2) Wait 3s for Devin to fully exit, then run session-sync go (switch account + start a new Devin)
-            session.retryTimer = setTimeout(() => {
-              session.retryTimer = null;
-              if (!this.sessions.has(id)) return;
-              session.buffer = '';
-              session.rawBuffer = '';
-              session.prevData = '';
-              rotateDevinInstallationId();
-              ptyProcess.write('session-sync go\r');
-              this.events.onAutoSwitchStatus?.(id, 'switched', `Switched (${session.switchAttempts}/${maxAccounts})`);
-              console.log(`[PTY] Sent session-sync go (session: ${id})`);
-
-              session.autoRetryCooldown = 0;
-              // If no rate limit is triggered again within 15s, reset the count
-              session.retryTimer = setTimeout(() => {
-                session.retryTimer = null;
-                if (this.sessions.has(id)) {
-                  session.switchAttempts = 0;
-                  this.events.onAutoSwitchStatus?.(id, 'idle');
-                }
-              }, 15000);
-            }, 3000);
-          }
-        }
-        // Non-rate-limit warning: auto-continue is disabled, so keep this signal informational only.
-        else if (combinedLower.includes('⚠') || combinedLower.includes('something went wrong')) {
-          session.prevData = '';
-          if (Date.now() > session.autoRetryCooldown) {
-            console.log(`[PTY] ⚠ warning detected; auto-continue disabled (session: ${id})`);
-            session.autoRetryCooldown = Date.now() + 10000;
-          }
-        }
-      } else {
-        session.prevData = data;
-      }
-
       this.events.onData(id, data);
       this.events.onRawData?.(id, data);
     }));
@@ -827,9 +648,6 @@ export class PtyManager {
     const session = this.sessions.get(id);
     if (!session) return;
 
-    // User manual input -> reset the auto account-switch count (the user has taken over)
-    session.switchAttempts = 0;
-
     // Detect pasted input (voice input methods paste, writing many characters at once)
     if (data.length > 5 && data !== '\r') {
       const cleaned = data.replace(/[\r\n]/g, ' ').trim();
@@ -882,10 +700,6 @@ export class PtyManager {
     if (session.summarizeTimer) {
       clearTimeout(session.summarizeTimer);
       session.summarizeTimer = null;
-    }
-    if (session.retryTimer) {
-      clearTimeout(session.retryTimer);
-      session.retryTimer = null;
     }
     session.disposables.forEach(d => d.dispose());
     session.disposables = [];

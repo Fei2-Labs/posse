@@ -14,8 +14,7 @@ type DaemonEvent =
   | { type: 'rawData'; id: string; data: string }
   | { type: 'titleUpdate'; id: string; title: string }
   | { type: 'exit'; id: string; session?: PtySessionSnapshot }
-  | { type: 'pasteInput'; id: string; cwd: string }
-  | { type: 'autoSwitchStatus'; id: string; status: string; detail?: string };
+  | { type: 'pasteInput'; id: string; cwd: string };
 
 const config = loadOrCreatePtyDaemonConfig();
 config.pid = process.pid;
@@ -49,9 +48,6 @@ const ptyManager = new PtyManager({
   },
   onPasteInput: (id, cwd) => {
     broadcast({ type: 'pasteInput', id, cwd });
-  },
-  onAutoSwitchStatus: (id, status, detail) => {
-    broadcast({ type: 'autoSwitchStatus', id, status, detail });
   },
 });
 

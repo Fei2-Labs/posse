@@ -131,6 +131,17 @@ For each layer boundary, ask:
 - [ ] What if a referenced entity doesn't exist?
 - [ ] What if the user closes the window mid-operation?
 
+### 6.1 Terminal and Agent Automation
+
+Any feature that writes to a PTY without direct user input must be explicit, visible, and opt-in:
+
+- [ ] The UI clearly shows when automatic PTY input is enabled.
+- [ ] The default is disabled, including after upgrades and session restore.
+- [ ] The daemon cannot enable or persist the behavior independently of the UI.
+- [ ] Replayed terminal output cannot trigger new input.
+- [ ] Disabling or removing the feature cancels delayed callbacks and clears persisted state.
+- [ ] Provider-specific recovery never sends commands, selects options, exits sessions, or switches accounts without explicit user consent.
+
 ### 7. Third-Party Library Boundaries
 
 When using external libraries:
@@ -282,6 +293,7 @@ When using external libraries:
 | Duplicate operations      | User clicks button multiple times                   | Disable button during operation          |
 | `useContext` returns null | Hook called before Provider mounts                  | Use `isMounted` pattern                  |
 | Path errors on Windows    | Using `/` instead of `path.join()`                  | Always use `path` module                 |
+| Unsolicited PTY input     | Hidden daemon automation bypassed user intent       | Require visible opt-in and audit every PTY write path |
 
 ---
 

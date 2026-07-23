@@ -166,17 +166,6 @@ contextBridge.exposeInMainWorld('posse', {
   claudeProvidersList: () => ipcRenderer.invoke('claude-providers:list'),
   claudeProvidersSave: (providers: any[]) => ipcRenderer.invoke('claude-providers:save', providers),
 
-  // Devin account management
-  devinAccountsList: () => ipcRenderer.invoke('devin-accounts:list'),
-  devinAccountsAdd: (email: string, password: string) => ipcRenderer.invoke('devin-accounts:add', email, password),
-  devinAccountsAddBatch: (text: string) => ipcRenderer.invoke('devin-accounts:add-batch', text),
-  devinAccountsRemove: (email: string) => ipcRenderer.invoke('devin-accounts:remove', email),
-  devinAccountsSwitch: (opts: { email?: string; next?: boolean }) => ipcRenderer.invoke('devin-accounts:switch', opts),
-  devinAccountsQuota: () => ipcRenderer.invoke('devin-accounts:quota'),
-  devinAccountsQuotaAll: () => ipcRenderer.invoke('devin-accounts:quota-all'),
-  devinAccountsQuotaOne: (email: string) => ipcRenderer.invoke('devin-accounts:quota-one', email),
-  devinAccountsRotateDevice: () => ipcRenderer.invoke('devin-accounts:rotate-device'),
-
   // Session status sync: renderer -> main (read by mobile)
   syncSessionStatus: (statuses: Record<string, string>) =>
     ipcRenderer.send('session:sync-status', statuses),
@@ -209,10 +198,6 @@ contextBridge.exposeInMainWorld('posse', {
   closedChatClear: () => Promise.resolve([]),
   chatRestore: () => Promise.resolve(null),
   onClosedChatUpdate: () => {},
-
-  // Auto account-switch status
-  onAutoSwitchStatus: (cb: (id: string, status: string, detail?: string) => void) =>
-    ipcRenderer.on('pty:auto-switch-status', (_e, id, status, detail) => cb(id, status, detail)),
 
   // ========== Connections (D2: remote host add/switch) ==========
   connectionsList: () => ipcRenderer.invoke('connections:list'),
