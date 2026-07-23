@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "per-render color assignment map is module-level renderer state scoped to a renderSessionList pass; confirm conventions for render-scoped mutable state"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "appendProjectTagForCwd + collectActiveSessionRows are the sidebar render path being changed; confirm chip/row conventions"}

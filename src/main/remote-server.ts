@@ -777,7 +777,7 @@ export function startRemoteServer(
   // Write a text file (utf8) for the in-app editable preview. Mirrors `fs:write-file`.
   app.post('/api/fs/write', (req, res) => {
     try {
-      const { path: filePath, content } = req.body || {};
+      const { path: filePath, content, expectedMtimeMs } = req.body || {};
       if (typeof filePath !== 'string' || filePath.trim() === '') {
         res.status(400).json({ ok: false, error: 'invalid-path' }); return;
       }
@@ -785,8 +785,25 @@ export function startRemoteServer(
         res.status(400).json({ ok: false, error: 'invalid-content' }); return;
       }
       const abs = path.resolve(filePath);
+      // Optimistic-concurrency: if the caller supplied an expectedMtimeMs, reject when the file
+      // changed on disk since their last read (mirrors the local `fs:write-file` handler).
+      if (typeof expectedMtimeMs === 'number') {
+        try {
+          const before = fs.statSync(abs);
+          if (!before.isFile()) { res.status(400).json({ ok: false, error: 'not-a-file' }); return; }
+          if (Math.abs(before.mtimeMs - expectedMtimeMs) > 1) {
+            res.status(409).json({ ok: false, error: 'conflict', mtimeMs: before.mtimeMs }); return;
+          }
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+          // ENOENT with an expectedMtimeMs means the file was deleted since the caller read it.
+          res.status(409).json({ ok: false, error: 'conflict', mtimeMs: 0 }); return;
+        }
+      }
       fs.writeFileSync(abs, content, 'utf-8');
-      res.json({ ok: true });
+      let mtimeMs: number | undefined;
+      try { mtimeMs = fs.statSync(abs).mtimeMs; } catch { /* best-effort */ }
+      res.json({ ok: true, mtimeMs });
     } catch (err) {
       res.status(500).json({ ok: false, error: (err as Error).message });
     }
@@ -1002,24 +1019,6 @@ export function startRemoteServer(
     } catch (e: any) {
       res.status(500).json({ error: e.message || String(e) });
     }
-  });
-
-  // ========== Auto-continue config API ==========
-
-  // Read the auto-continue config (from the desktop renderer)
-  app.get('/api/sessions/:id/auto-continue', async (req, res) => {
-    const getConfig = (global as any).__getAutoContinueConfig;
-    if (!getConfig) { res.json(null); return; }
-    const config = await getConfig(req.params.id);
-    res.json(config);
-  });
-
-  // Write the auto-continue config (synced to the desktop renderer)
-  app.put('/api/sessions/:id/auto-continue', (req, res) => {
-    const setConfig = (global as any).__setAutoContinueConfig;
-    if (!setConfig) { res.status(500).json({ error: 'Desktop not ready' }); return; }
-    setConfig(req.params.id, req.body);
-    res.json({ ok: true });
   });
 
   // SSE event stream

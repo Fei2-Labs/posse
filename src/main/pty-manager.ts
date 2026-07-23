@@ -63,7 +63,7 @@ const PRESET_DISPLAY_NAMES: Record<string, string> = {
   'codex --full-auto': 'Codex (auto)',
   'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"': 'Codex (auto)',
   'copilot --allow-all --autopilot': 'Copilot (auto)',
-  'devin --permission-mode bypass': 'Devin (auto)',
+  'devin --permission-mode dangerous': 'Devin (auto)',
   'opencode': 'OpenCode',
   'kiro-cli chat --trust-all-tools': 'Kiro (auto)',
 };
@@ -111,12 +111,13 @@ function parseResumeCommand(text: string): { command: string; sessionId: string 
 }
 
 // Determine which agent family a launch command belongs to (for on-disk session correlation)
-function agentKindFromCommand(command: string): 'claude' | 'codex' | 'kiro' | 'copilot' | null {
+function agentKindFromCommand(command: string): 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin' | null {
   const c = (command || '').trim().toLowerCase();
   if (/^claude\b/.test(c)) return 'claude';
   if (/^codex\b/.test(c)) return 'codex';
   if (/^kiro/.test(c)) return 'kiro';
   if (/^copilot\b/.test(c)) return 'copilot';
+  if (/^devin\b/.test(c)) return 'devin';
   return null;
 }
 
@@ -229,6 +230,56 @@ export function writeCodexSessionTitle(uuid: string, title: string): void {
     const line =
       JSON.stringify({ id: uuid, thread_name: trimmed, updated_at: new Date().toISOString() }) + '\n';
     fs.appendFileSync(target, line, 'utf-8');
+  } catch {
+    // Best-effort; never throw or block the rename.
+  }
+}
+
+// Best-effort: propagate a user rename into Devin's own sqlite session store so Devin's own
+// session list shows the same title. Devin stores sessions in sqlite (BOTH `cli` and `cli-next`
+// DBs, see discoverDevinSessions/deleteSessionFromStore in index.ts for the read/delete mirrors
+// of this exact access pattern): node:sqlite first, `sqlite3` binary as a fallback. Each DB is
+// attempted independently so a failure on one never blocks the other.
+export function writeDevinSessionTitle(id: string, title: string): void {
+  const trimmed = (title || '').trim();
+  const sid = (id || '').trim();
+  if (!trimmed || !sid) return;
+  try {
+    const cliDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli');
+    const cliNextDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next');
+    const dbPaths = [path.join(cliDir, 'sessions.db'), path.join(cliNextDir, 'sessions.db')];
+    for (const dbPath of dbPaths) {
+      if (!fs.existsSync(dbPath)) continue;
+      let done = false;
+      try {
+        const sqlite = require('node:sqlite') as {
+          DatabaseSync?: new (p: string) => {
+            prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+            close: () => void;
+          };
+        };
+        if (sqlite?.DatabaseSync) {
+          const db = new sqlite.DatabaseSync(dbPath);
+          try {
+            db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(trimmed, sid);
+            done = true;
+          } finally {
+            db.close();
+          }
+        }
+      } catch { /* node:sqlite unavailable -> fall through to binary */ }
+      if (!done) {
+        try {
+          const { execFileSync } = require('child_process') as typeof import('child_process');
+          const escapedTitle = trimmed.replace(/'/g, "''");
+          const escapedId = sid.replace(/'/g, "''");
+          execFileSync('sqlite3', [dbPath, `UPDATE sessions SET title = '${escapedTitle}' WHERE id = '${escapedId}';`], {
+            encoding: 'utf-8',
+            timeout: 5000,
+          });
+        } catch { /* sqlite3 binary missing / query failed -> best-effort skip this DB */ }
+      }
+    }
   } catch {
     // Best-effort; never throw or block the rename.
   }
@@ -445,6 +496,19 @@ export class PtyManager {
       if (value !== undefined) {
         env[key] = value;
       }
+    }
+
+    // Ensure ~/.local/bin (where devin, session-sync, and other user-installed
+    // CLIs live) is on PATH. When Posse is launched from Finder/Dock, the app
+    // (and the detached pty-daemon it spawns) inherits macOS's minimal PATH
+    // (/usr/bin:/bin:/usr/sbin:/sbin) — user shell rc files (~/.zshrc) that
+    // normally extend PATH are never sourced. Without this, `devin` (installed
+    // at ~/.local/bin/devin) is "command not found" in the spawned shell, the
+    // process exits immediately, and the session vanishes.
+    const localBin = path.join(os.homedir(), '.local', 'bin');
+    const currentPath = env.PATH || '';
+    if (!currentPath.split(':').includes(localBin)) {
+      env.PATH = currentPath ? `${localBin}:${currentPath}` : localBin;
     }
 
     // Force a UTF-8 locale for the pty.

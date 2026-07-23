@@ -211,3 +211,201 @@ discoverClaude/CodexSessions cap at newest 300 globally, so a newly added folder
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Fix status-dot render skip during title-edit
+
+**Date**: 2026-07-02
+**Task**: Fix status-dot render skip during title-edit
+**Branch**: `main`
+
+### Summary
+
+Diagnosed via live STATUS_DBG log that busy detection was correct but renderSessionList()'s title-edit guard silently dropped all other rows' dot repaints; added refreshLiveDotInPlace() to patch other rows' dots live while the edit is in progress, plus a components.md spec entry documenting the full-rebuild-skip patch-in-place pattern.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5354c2e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 7: Active Sessions: sort by Project/Recent (closes #53)
+
+**Date**: 2026-07-02
+**Task**: Active Sessions: sort by Project/Recent (closes #53)
+**Branch**: `main`
+
+### Summary
+
+Added section-local sort toggle to Active Sessions header, mirroring the existing Projects-section sort pattern: Recent (time-desc, unchanged) vs Project (grouped by normalized cwd, groups ordered by most-recent activity, rows within group by recency). Persists via its own localStorage key.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a887075` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 8: Devin CLI: discover + resume history sessions
+
+**Date**: 2026-07-04
+**Task**: Devin CLI: discover + resume history sessions
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+Devin sessions were invisible: backend had no discoverDevinSessions and ProjectsAgentId omitted devin (live Devin mislabeled Claude). Added sqlite discovery of ~/.local/share/devin/cli(+cli-next)/sessions.db mirroring Copilot, widened ProjectsAgentId main+renderer, threaded devin through normAgent/agentKindFromCommand/AGENT_ID_LABEL/resume parser/delete-from-store. Could not validate against real data (both local DBs empty) — verified by schema + graceful empty path + tsc baseline unchanged. Committed Devin-only hunks; unrelated warp/filepreview WIP from a crashed earlier agent was left unstaged on the parallel branch.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cab1a0c2` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 9: Active Sessions: stable per-project accent color
+
+**Date**: 2026-07-04
+**Task**: Active Sessions: stable per-project accent color
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+Flattened project chips were all gray and indistinguishable. Added projectColorForCwd (FNV-1a hash of normalized cwd into an 8-color dark-tuned palette) applied in appendProjectTagForCwd so each project gets a stable bg/border/fg accent across renders/restarts. Implemented directly (prior implement-agent had crashed producing no color code). Hunk-staged color-only; intermixed warp/filepreview WIP left unstaged on the parallel branch.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a0bcdd42` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 10: Active Sessions: dedupe project colors
+
+**Date**: 2026-07-05
+**Task**: Active Sessions: dedupe project colors
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+Pure-hash project colors collided (8-color palette, two projects could share a slot). Added per-render buildProjectColorAssignment: each visible project gets hash-preferred color, walks forward to next free slot — distinct colors while capacity allows, sorted keys for cross-render stability, graceful exhaustion. Wired into renderSessionList via try/finally-scoped projectColorAssignment map; appendProjectTagForCwd consults it (falls back to hash outside a pass).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `84d54130` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 11: Fix project colors still colliding (persistent registry)
+
+**Date**: 2026-07-05
+**Task**: Fix project colors still colliding (persistent registry)
+**Branch**: `chore/align-posse-warp-architecture`
+
+### Summary
+
+v1 fix (84d54130) built a per-render assignment map but fell back to the raw collision-prone hash whenever a key was missing from it — with 8 buckets that fallback collides often, exactly what user saw after rebuild+relaunch (confirmed fix WAS in installed bundle, so this was a logic gap not stale build). Replaced with persistent incremental registry in projectColorForCwd itself: no separate map, no fallback path, single source of truth. Verified dedupe logic against 4 realistic project paths -> 4 distinct slots.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f96cb1a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

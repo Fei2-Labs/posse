@@ -844,30 +844,6 @@ header h2 {
   font-size: 13px;
 }
 
-/* ========== 催工标签 ========== */
-
-.ac-label {
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 12px;
-  cursor: pointer;
-  background: #555;
-  color: #aaa;
-  flex-shrink: 0;
-  user-select: none;
-  -webkit-user-select: none;
-  transition: background 0.2s, color 0.2s;
-}
-
-.ac-label.enabled {
-  background: #4caf50;
-  color: #fff;
-}
-
-.ac-label:active {
-  opacity: 0.7;
-}
-
 /* ========== 滚动条 ========== */
 
 ::-webkit-scrollbar {

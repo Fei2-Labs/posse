@@ -1662,21 +1662,22 @@ html, body {
 #agent-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
   padding: 8px 10px 4px;
 }
 
 .agent-tab {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 10px;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
   border: 1px solid transparent;
-  border-radius: 999px;
-  background: var(--hover-bg, rgba(128, 128, 128, 0.12));
+  border-radius: 4px;
+  background: transparent;
   color: var(--text-secondary, #9aa);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
@@ -1685,30 +1686,83 @@ html, body {
 
 .agent-tab:hover {
   color: var(--text-primary);
+  background: var(--hover-bg);
 }
 
 .agent-tab.active {
-  background: var(--row-selected, color-mix(in srgb, var(--accent-green, #73c991) 16%, transparent));
-  border-color: color-mix(in srgb, var(--accent-green, #73c991) 50%, transparent);
+  background: var(--row-selected, color-mix(in srgb, var(--accent-green, #73c991) 14%, transparent));
+  border-color: color-mix(in srgb, var(--accent-green, #73c991) 45%, transparent);
   color: var(--accent-green, #73c991);
 }
 
 .agent-tab-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-/* Inline agent tag on a session row (shown only in the "All" tab) */
+.agent-tab-label {
+  line-height: 1;
+}
+
+/* "All" tab: posse mini logo button (no text) */
+.agent-tab-logo,
+.agent-tab-icon {
+  padding: 0;
+  width: 22px;
+  height: 22px;
+  justify-content: center;
+  color: var(--text-secondary, #9aa);
+}
+
+.agent-tab-logo svg,
+.agent-tab-icon svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.agent-tab-icon img {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+}
+
+.agent-tab-logo:hover,
+.agent-tab-icon:hover {
+  color: var(--accent-green, #73c991);
+}
+
+.agent-tab-logo.active,
+.agent-tab-icon.active {
+  color: var(--accent-green, #73c991);
+}
+
+/* Inline agent tag on a session row (shown only in the "All" tab): a small
+   monochrome logo icon, same visual language as the agent filter strip. */
 .nav-session-agent-tag {
   flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 1.4;
-  text-transform: none;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, #9aa);
+  line-height: 1;
+}
+
+.nav-session-agent-tag svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.nav-session-agent-tag .agent-tab-dot {
+  width: 6px;
+  height: 6px;
+}
 }
 
 /* Owning-project chip on FLATTENED session rows (Pinned / Active Sessions) (#29).
@@ -1785,6 +1839,21 @@ html, body {
   font-size: 10px;
   color: var(--text-secondary, #888);
 }
+
+/* Context-usage chip: shown only when the agent emits a parseable context line (Claude, Devin).
+   Color tiers: green < 60%, amber 60–85%, red > 85%. */
+.nav-session-context-chip {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.2px;
+}
+.nav-session-context-chip.ctx-green  { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
+.nav-session-context-chip.ctx-amber  { color: #fbbf24; background: rgba(251, 191, 36, 0.14); }
+.nav-session-context-chip.ctx-red    { color: #f87171; background: rgba(248, 113, 113, 0.15); }
 
 .nav-session-action {
   width: 18px;
@@ -2000,89 +2069,6 @@ html, body {
   color: #fff;
 }
 
-/* Auto-continue toggle switch */
-.session-auto-continue-toggle {
-  position: relative;
-  display: inline-flex;
-  width: 32px;
-  height: 16px;
-  flex-shrink: 0;
-  align-self: center;
-  cursor: pointer;
-}
-
-.session-auto-continue-toggle input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.session-auto-continue-toggle .toggle-slider {
-  position: absolute;
-  cursor: pointer;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: #4a4a4a;
-  transition: 0.2s;
-  border-radius: 18px;
-}
-
-.session-auto-continue-toggle .toggle-slider:before {
-  position: absolute;
-  content: "";
-  height: 12px;
-  width: 12px;
-  left: 2px;
-  bottom: 2px;
-  background-color: white;
-  transition: 0.2s;
-  border-radius: 50%;
-}
-
-.session-auto-continue-toggle input:checked + .toggle-slider {
-  background-color: #4caf50;
-}
-
-.session-auto-continue-toggle input:checked + .toggle-slider:before {
-  transform: translateX(16px);
-}
-
-.session-auto-continue-toggle:hover .toggle-slider {
-  background-color: #5a5a5a;
-}
-
-.session-auto-continue-toggle input:checked:hover + .toggle-slider {
-  background-color: #66bb6a;
-}
-
-/* Auto-continue text label */
-.session-auto-continue-label {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 12px;
-  cursor: pointer;
-  background: #555;
-  color: #aaa;
-  flex-shrink: 0;
-  align-self: center;
-  transition: background 0.2s, color 0.2s;
-}
-
-.session-auto-continue-label.enabled {
-  background: #4caf50;
-  color: #fff;
-}
-
-.session-auto-continue-label:hover {
-  background: #666;
-}
-
-.session-auto-continue-label.enabled:hover {
-  background: #66bb6a;
-}
-
 /* Auto account-switch status label */
 .session-switch-status {
   font-size: 10px;
@@ -2120,23 +2106,6 @@ html, body {
 @keyframes switch-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
-}
-
-/* Config button */
-.session-auto-continue-config-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 11px;
-  padding: 2px;
-  opacity: 0.5;
-  transition: opacity 0.2s;
-  flex-shrink: 0;
-  align-self: center;
-}
-
-.session-auto-continue-config-btn:hover {
-  opacity: 1;
 }
 
 /* Pin button */
@@ -3495,6 +3464,42 @@ select.ai-form-input {
 }
 
 #project-sort:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+  border-color: var(--accent-green);
+}
+
+/* Active Sessions section-local sort toggle (#53). Smaller footprint than #project-sort
+   since it lives inline in a 28px-tall nav-section-header, not the toolbar. */
+.nav-section-sort-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: none;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.nav-section-sort-btn .nav-section-sort-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.nav-section-sort-btn .nav-section-sort-glyph svg { width: 11px; height: 11px; display: block; }
+
+.nav-section-sort-btn:hover {
   color: var(--text-primary);
   background: var(--hover-bg);
   border-color: var(--accent-green);

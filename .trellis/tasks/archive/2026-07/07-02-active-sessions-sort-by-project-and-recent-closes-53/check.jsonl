@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality.md", "reason": "verify diff against repo lint/typecheck/quality bar before task completion"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "verify new ActiveSessionSortMode module state mirrors ProjectSortMode conventions correctly"}

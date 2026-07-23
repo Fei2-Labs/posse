@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, glo
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getDisplayName, rotateDevinInstallationId, writeClaudeSessionTitle, writeCodexSessionTitle } from './pty-manager';
+import { getDisplayName, rotateDevinInstallationId, writeClaudeSessionTitle, writeCodexSessionTitle, writeDevinSessionTitle } from './pty-manager';
 import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
@@ -334,6 +334,45 @@ function deleteSessionFromStore(
           encoding: 'utf-8',
           timeout: 5000,
         });
+      }
+      return { ok: true };
+    }
+
+    if (a === 'devin') {
+      // sqlite-backed: DELETE the row by id from BOTH cli and cli-next DBs (best-effort).
+      const cliDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli');
+      const cliNextDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next');
+      const dbPaths = [path.join(cliDir, 'sessions.db'), path.join(cliNextDir, 'sessions.db')];
+      for (const dbPath of dbPaths) {
+        if (!fs.existsSync(dbPath)) continue;
+        let done = false;
+        try {
+          const sqlite = require('node:sqlite') as {
+            DatabaseSync?: new (p: string) => {
+              prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+              close: () => void;
+            };
+          };
+          if (sqlite?.DatabaseSync) {
+            const db = new sqlite.DatabaseSync(dbPath);
+            try {
+              db.prepare('DELETE FROM sessions WHERE id = ?').run(sid);
+              done = true;
+            } finally {
+              db.close();
+            }
+          }
+        } catch { /* node:sqlite unavailable -> fall through to binary */ }
+        if (!done) {
+          try {
+            const { execFileSync } = require('child_process') as typeof import('child_process');
+            const escaped = sid.replace(/'/g, "''");
+            execFileSync('sqlite3', [dbPath, `DELETE FROM sessions WHERE id = '${escaped}';`], {
+              encoding: 'utf-8',
+              timeout: 5000,
+            });
+          } catch { /* sqlite3 binary missing / query failed -> best-effort skip this DB */ }
+        }
       }
       return { ok: true };
     }
@@ -1193,7 +1232,7 @@ function openWindowWithConnection(connectionId: string): BrowserWindow {
 // Every scanner is wrapped so one bad agent never breaks the list.
 // ============================================================
 
-type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
+type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
 
 type ProjectSession = {
   id: string;
@@ -1587,6 +1626,99 @@ function discoverCopilotSessions(): DiscoveredSession[] {
   return out;
 }
 
+// --- Devin: ~/.local/share/devin/cli/sessions.db (+ cli-next/sessions.db). Best-effort, sqlite. ---
+// Schema (verified on-disk):
+//   sessions(id TEXT PRIMARY KEY, working_directory TEXT NOT NULL, backend_type TEXT NOT NULL,
+//            model TEXT, agent_mode TEXT, created_at INTEGER NOT NULL,
+//            last_activity_at INTEGER NOT NULL, title TEXT, ..., hidden INTEGER NOT NULL DEFAULT 0, ...)
+// Resume CLI: `devin -r <id>` (alias `--resume`). `last_activity_at` is a unix timestamp; older
+// Devins stored seconds, newer ones may store ms — coerce so sort times are ms-comparable.
+function discoverDevinSessions(): DiscoveredSession[] {
+  const out: DiscoveredSession[] = [];
+  try {
+    const cliDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli');
+    const cliNextDir = path.join(os.homedir(), '.local', 'share', 'devin', 'cli-next');
+    const dbPaths = [path.join(cliDir, 'sessions.db'), path.join(cliNextDir, 'sessions.db')];
+
+    type Row = { id?: string; working_directory?: string; title?: string; last_activity_at?: number | string };
+    const seenIds = new Set<string>();
+
+    for (const dbPath of dbPaths) {
+      try {
+        if (!fs.existsSync(dbPath)) continue;
+
+        let rows: Row[] = [];
+        let usedNode = false;
+
+        // Try node:sqlite first (Node >= 22.5 with --experimental-sqlite).
+        try {
+          const sqlite = require('node:sqlite') as {
+            DatabaseSync?: new (p: string, opts?: { readOnly?: boolean }) => {
+              prepare: (sql: string) => { all: () => unknown[] };
+              close: () => void;
+            };
+          };
+          if (sqlite?.DatabaseSync) {
+            const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+            try {
+              rows = db.prepare(
+                'SELECT id, working_directory, title, last_activity_at, hidden FROM sessions WHERE hidden=0 ORDER BY last_activity_at DESC LIMIT 100'
+              ).all() as Row[];
+              usedNode = true;
+            } finally {
+              db.close();
+            }
+          }
+        } catch { /* node:sqlite unavailable -> fall through to binary */ }
+
+        if (!usedNode) {
+          try {
+            const { execFileSync } = require('child_process') as typeof import('child_process');
+            const raw = execFileSync(
+              'sqlite3',
+              ['-json', dbPath, 'SELECT id, working_directory, title, last_activity_at, hidden FROM sessions WHERE hidden=0 ORDER BY last_activity_at DESC LIMIT 100;'],
+              { encoding: 'utf-8', timeout: 5000 }
+            );
+            const parsed = JSON.parse(raw || '[]') as Row[];
+            if (Array.isArray(parsed)) rows = parsed;
+          } catch { /* sqlite3 binary missing / query failed -> degrade to empty */ }
+        }
+
+        for (const r of rows) {
+          const id = String(r.id || '');
+          if (!id || seenIds.has(id)) continue;
+          seenIds.add(id);
+
+          const cwdRaw = String(r.working_directory || '');
+          // Skip empty / synthetic cwds (Devin sometimes reports '/' or a internal path).
+          const isRealFolder = cwdRaw && cwdRaw !== '/' && !cwdRaw.startsWith(path.join(os.homedir(), '.local', 'share', 'devin'));
+          const cwd = isRealFolder ? path.resolve(cwdRaw) : '';
+
+          // ms-coerce: if value > 1e12 treat as ms, else seconds -> ms.
+          const rawTs = typeof r.last_activity_at === 'number' ? r.last_activity_at : Number(r.last_activity_at);
+          const mtimeMs = Number.isFinite(rawTs) && rawTs > 0
+            ? (rawTs > 1e12 ? rawTs : rawTs * 1000)
+            : 0;
+
+          const titleRaw = typeof r.title === 'string' ? r.title.trim() : '';
+          const title = titleRaw ? titleRaw.slice(0, 60) : id;
+
+          out.push({
+            agent: 'devin',
+            cwd,
+            id,
+            title,
+            mtimeMs,
+            resumeCommand: `devin -r ${id}`,
+            sourcePath: '', // sqlite-backed: delete routes by id, not a file path
+          });
+        }
+      } catch { /* per-DB best-effort: never throw */ }
+    }
+  } catch { /* never throw - Devin is best-effort */ }
+  return out;
+}
+
 // Bucket all discovered sessions by project cwd. Sessions with no usable folder
 // are grouped under a synthetic project (e.g. Copilot without a real cwd).
 function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
@@ -1595,6 +1727,7 @@ function buildProjectsList(extraFolders: string[] = []): ProjectEntry[] {
     ...discoverCodexSessions(),
     ...discoverKiroSessions(),
     ...discoverCopilotSessions(),
+    ...discoverDevinSessions(),
   ];
 
   const archivedIds = loadArchivedSessionIds();
@@ -1759,7 +1892,7 @@ async function buildRemoteProjectsList(remote: RemoteServerBackend): Promise<Pro
   };
   const normAgent = (a: string): ProjectsAgentId => {
     const v = (a || '').toLowerCase();
-    return v === 'codex' || v === 'kiro' || v === 'copilot' ? (v as ProjectsAgentId) : 'claude';
+    return v === 'codex' || v === 'kiro' || v === 'copilot' || v === 'devin' ? (v as ProjectsAgentId) : 'claude';
   };
   const addSession = (cwd: string, s: ProjectSession) => {
     let key: string; let displayPath: string; let name: string;
@@ -2023,6 +2156,8 @@ function registerIPC(): void {
         writeClaudeSessionTitle(target.resumeId, newTitle);
       } else if (/^codex\b/i.test(cmd)) {
         writeCodexSessionTitle(target.resumeId, newTitle);
+      } else if (/^devin\b/i.test(cmd)) {
+        writeDevinSessionTitle(target.resumeId, newTitle);
       }
     }
     return sessions;
@@ -2204,6 +2339,7 @@ function registerIPC(): void {
         content: buf.toString('utf-8'),
         size: st.size,
         ext: path.extname(abs).slice(1).toLowerCase(),
+        mtimeMs: st.mtimeMs,
       };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -2211,12 +2347,12 @@ function registerIPC(): void {
   });
 
   // Write a text file (utf8) for the in-app editable preview. Never throws across IPC.
-  ipcMain.handle('fs:write-file', async (_e, filePath: string, content: string) => {
+  ipcMain.handle('fs:write-file', async (_e, filePath: string, content: string, expectedMtimeMs?: number) => {
     const remote = remoteBackendForEvent(_e);
     if (remote) {
       if (typeof filePath !== 'string' || filePath.trim() === '') return { ok: false, error: 'invalid-path' };
       if (typeof content !== 'string') return { ok: false, error: 'invalid-content' };
-      return remote.fsWrite(filePath, content);
+      return remote.fsWrite(filePath, content, expectedMtimeMs);
     }
     try {
       if (typeof filePath !== 'string' || filePath.trim() === '') {
@@ -2226,8 +2362,14 @@ function registerIPC(): void {
         return { ok: false, error: 'invalid-content' };
       }
       const abs = path.resolve(filePath);
+      const before = fs.statSync(abs);
+      if (!before.isFile()) return { ok: false, error: 'not-a-file' };
+      if (typeof expectedMtimeMs === 'number' && Math.abs(before.mtimeMs - expectedMtimeMs) > 1) {
+        return { ok: false, error: 'conflict', mtimeMs: before.mtimeMs };
+      }
       fs.writeFileSync(abs, content, 'utf-8');
-      return { ok: true };
+      const after = fs.statSync(abs);
+      return { ok: true, mtimeMs: after.mtimeMs };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
@@ -2671,6 +2813,8 @@ function registerIPC(): void {
         writeClaudeSessionTitle(id, title);
       } else if (agent === 'codex') {
         writeCodexSessionTitle(id, title);
+      } else if (agent === 'devin') {
+        writeDevinSessionTitle(id, title);
       }
       // else: copilot/kiro/unknown — no writable title format, skip (no-op, not an error).
       return { ok: true };
@@ -3203,41 +3347,6 @@ function registerIPC(): void {
 
   // Renderer proactively fetches remote server info (resolves the race where IPC messages arrive before the renderer loads)
   ipcMain.handle('remote:get-server-info', () => cachedRemoteServerInfo);
-
-  // ========== Auto-continue config relay IPC ==========
-  // The main process acts as a relay: remote-server API -> the renderer's sessionAutoContinue
-
-  // Holds pending get-request callbacks
-  const autoContinuePendingGets = new Map<string, (config: any) => void>();
-
-  // The renderer replies with the config
-  ipcMain.on('auto-continue:config-reply', (_e, sessionId: string, config: any) => {
-    const resolve = autoContinuePendingGets.get(sessionId);
-    if (resolve) {
-      autoContinuePendingGets.delete(sessionId);
-      resolve(config);
-    }
-  });
-
-  // Called by remote-server: read the auto-continue config
-  (global as any).__getAutoContinueConfig = (sessionId: string): Promise<any> => {
-    return new Promise((resolve) => {
-      autoContinuePendingGets.set(sessionId, resolve);
-      safeSend('auto-continue:get', sessionId);
-      // Timeout fallback
-      setTimeout(() => {
-        if (autoContinuePendingGets.has(sessionId)) {
-          autoContinuePendingGets.delete(sessionId);
-          resolve(null);
-        }
-      }, 2000);
-    });
-  };
-
-  // Called by remote-server: write the auto-continue config
-  (global as any).__setAutoContinueConfig = (sessionId: string, config: any): void => {
-    safeSend('auto-continue:set', sessionId, config);
-  };
 
   // Called by remote-server: read session status (busy/unread/idle)
   // The renderer syncs status here via IPC

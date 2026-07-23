@@ -1,0 +1,3 @@
+{"file":".trellis/spec/shared/index.md","reason":"Shared documentation language and repository hygiene rules for this docs/metadata task."}
+{"file":".trellis/spec/guides/index.md","reason":"Pre-implementation thinking and cross-layer guardrails for architecture alignment."}
+{"file":".trellis/tasks/07-03-align-posse-warp-architecture/research/warp-reference-alignment.md","reason":"Compatibility findings and reference-only strategy for Warp alignment."}

@@ -462,6 +462,73 @@ function Button({ isLoading, children, ...props }: ButtonProps) {
 
 ---
 
+## Full-Rebuild List Renderers: Patch-in-Place for Skipped Rebuilds (posse-specific)
+
+**Problem**: `src/renderer/app.ts`'s sidebar (`renderSessionList()`) is a full teardown/rebuild
+renderer (`sessionList.innerHTML = ''` then rebuild every row from live state). Some call paths
+intentionally SKIP the full rebuild to protect transient DOM state — e.g. the title-edit guard
+(an in-progress `<input>` mid-edit must not be torn down or it loses focus/cursor position). A
+naive skip (`if (editingSomething) return;`) silently drops ALL pending visual updates for the
+rest of the list until the edit ends or an unrelated timer forces a repaint — including
+time-sensitive indicators like a busy/status dot that should flip live.
+
+**Fix pattern**: when a full-rebuild is skipped to protect one specific element, still patch the
+OTHER elements' live-derived attributes in place, reading straight from the same source-of-truth
+state the full rebuild would have used — don't touch the protected element's subtree.
+
+```typescript
+// Reproduces the same dot logic buildLiveSessionRow() would apply on a full rebuild —
+// keep the two in sync if the status-dot logic ever changes.
+function refreshLiveDotInPlace(id: string): void {
+  const row = sessionList.querySelector(`.nav-session[data-session-id="${id}"][data-session-type="pty"]`);
+  const dot = row?.querySelector('.nav-session-dot, .nav-session-dot-warn') as HTMLElement | null;
+  if (!dot) return;
+  // ...rebuild dot.className/style from sessionBusy/sessionUnread/sessionWaiting, same as the
+  // full-rebuild path.
+}
+
+if (editingTitleId) {
+  const existingInput = sessionList.querySelector(`input[data-session-id="${editingTitleId}"]`);
+  if (existingInput && document.activeElement === existingInput) {
+    // Skip the full rebuild, but keep every OTHER row's live indicator current.
+    sessionList.querySelectorAll('.nav-session[data-session-type="pty"]').forEach((row) => {
+      const rowId = (row as HTMLElement).dataset.sessionId;
+      if (rowId && rowId !== editingTitleId) refreshLiveDotInPlace(rowId);
+    });
+    return;
+  }
+}
+```
+
+**Why**: A "skip the whole rebuild" guard is a coarse instrument — it protects the one thing that
+needed protecting (the input) but also silently stalls everything else in the same render pass.
+Any live indicator (status dot, unread badge, elapsed-time label) rendered by the same function
+needs its own light-touch, source-of-truth-reading patch path for the skip branch, or it will lag
+behind reality for the duration of whatever interaction triggered the skip.
+
+**Don't**: duplicate the dot-computation logic by hand in two places without a comment linking
+them — `buildLiveSessionRow()`'s dot branch and `refreshLiveDotInPlace()` must stay identical or
+the two paths will visibly diverge (e.g. one adds a new status color the other doesn't).
+
+---
+
+## New Header/Toolbar Buttons Need Matching CSS, Not Just a Class Name (posse-specific)
+
+**Symptom**: a JS-built button mirroring an existing control (e.g. the Active Sessions sort
+toggle mirroring `#project-sort`) gets a plausible-looking class name (`nav-section-sort-btn`)
+but no corresponding rule exists in `src/renderer/styles.css` — it renders as an unstyled native
+`<button>`, breaking sizing/alignment inside a compact row like `.nav-section-header` (28px tall).
+
+**Cause**: `app.ts` builds most sidebar DOM dynamically in JS; styling still lives entirely in
+`styles.css` keyed by class name. Adding a JS element with a new class does not create styling —
+easy to miss when the element "looks right" in the diff but was never actually run in a browser.
+
+**Fix**: whenever a new dynamically-built control mirrors an existing one, grep `styles.css` for
+the existing control's class/id first and add a matching (scaled as needed) rule for the new one
+in the same commit — don't defer it. Verify by actually running the app, not just `tsc`/build.
+
+---
+
 ## Quick Reference
 
 | Pattern                    | When to Use                 |

@@ -49,9 +49,10 @@ contextBridge.exposeInMainWorld('posse', {
   fileTreeTrash: (p: string) => ipcRenderer.invoke('file-tree:trash', p),
   // Read file contents (for the right-side read-only preview panel)
   readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
-  // Write file contents (for the in-app editable preview)
-  writeFile: (filePath: string, content: string) =>
-    ipcRenderer.invoke('fs:write-file', filePath, content),
+  // Write file contents (for the in-app editable preview). `expectedMtimeMs` enables
+  // optimistic-concurrency conflict detection (server returns { ok:false, error:'conflict', mtimeMs }).
+  writeFile: (filePath: string, content: string, expectedMtimeMs?: number) =>
+    ipcRenderer.invoke('fs:write-file', filePath, content, expectedMtimeMs),
   // Read a (binary) file as a base64 data URL — used for image previews
   readFileBase64: (filePath: string) => ipcRenderer.invoke('fs:read-file-base64', filePath),
   inspectorRegisterProjectRoot: (rootPath: string) =>
@@ -179,14 +180,6 @@ contextBridge.exposeInMainWorld('posse', {
   // Session status sync: renderer -> main (read by mobile)
   syncSessionStatus: (statuses: Record<string, string>) =>
     ipcRenderer.send('session:sync-status', statuses),
-
-  // Auto-continue config: read/written by the main process from the renderer
-  onGetAutoContinueConfig: (cb: (sessionId: string) => void) =>
-    ipcRenderer.on('auto-continue:get', (_e, sessionId) => cb(sessionId)),
-  sendAutoContinueConfig: (sessionId: string, config: any) =>
-    ipcRenderer.send('auto-continue:config-reply', sessionId, config),
-  onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) =>
-    ipcRenderer.on('auto-continue:set', (_e, sessionId, config) => cb(sessionId, config)),
 
   // ========== Closed sessions ==========
   closedSessionsList: () => ipcRenderer.invoke('closed-sessions:list'),

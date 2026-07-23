@@ -1,6 +1,7 @@
 import { TerminalManager } from './terminal-manager';
 import { ChatView } from './chat-view';
 import { createFilePreview, isPreviewableExt, type FilePreview } from './file-preview';
+import { getAgentLogo } from './agent-logos';
 
 // Image extensions handled by the inline preview.
 function isImageExt(ext: string): boolean {
@@ -76,8 +77,8 @@ declare global {
         path: string;
         name: string;
         agents: Array<{
-          agent: 'claude' | 'codex' | 'kiro' | 'copilot';
-          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot'; sourcePath: string; archived?: boolean }>;
+          agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
+          sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin'; sourcePath: string; archived?: boolean }>;
         }>;
         lastActiveMs: number;
       }>>;
@@ -135,10 +136,6 @@ declare global {
       readDirectory: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean; isFile: boolean }>>;
       // Session status sync
       syncSessionStatus: (statuses: Record<string, string>) => void;
-      // Auto-continue config relay
-      onGetAutoContinueConfig: (cb: (sessionId: string) => void) => void;
-      sendAutoContinueConfig: (sessionId: string, config: any) => void;
-      onSetAutoContinueConfig: (cb: (sessionId: string, config: any) => void) => void;
       // Closed sessions
       closedSessionsList: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsRemove: (id: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
@@ -168,6 +165,8 @@ declare global {
 const savedCwd = localStorage.getItem('posse_cwd') || '';
 let currentCwd = savedCwd;
 let lastPreset = localStorage.getItem('posse_preset') || '';
+// One-time cleanup: remove stale auto-continue configs from previous versions
+try { localStorage.removeItem('posse_auto_continue'); } catch { /* ignore */ }
 const sessionTitles: Map<string, string> = new Map();
 const sessionThemes: Map<string, string> = new Map();
 const sessionUpdateTimes: Map<string, number> = new Map();
@@ -306,6 +305,17 @@ let projectSortMode: ProjectSortMode = loadProjectSort();
 // Live, lower-cased search query. Empty => no filtering, persisted collapse state is honored.
 let projectSearchQuery = '';
 
+// ========== Active Sessions section-local sort (#53) ==========
+// Independent from projectSortMode above: this only controls the ordering of the flattened
+// "Active Sessions" rows, not the Projects-section folder list.
+type ActiveSessionSortMode = 'recent' | 'project';
+const ACTIVE_SESSION_SORT_STORAGE_KEY = 'posse_active_session_sort';
+function loadActiveSessionSort(): ActiveSessionSortMode {
+  const raw = localStorage.getItem(ACTIVE_SESSION_SORT_STORAGE_KEY);
+  return raw === 'project' ? 'project' : 'recent';
+}
+let activeSessionSortMode: ActiveSessionSortMode = loadActiveSessionSort();
+
 // UI expand/collapse state (persisted to localStorage). DEFAULT for a never-touched project or
 // agent group is COLLAPSED: a project/group is only open if its key is present in the matching
 // "expanded" set. expandedProjects key = normalized project path; expandedAgentGroups key =
@@ -313,6 +323,11 @@ let projectSearchQuery = '';
 const EXPAND_STATE_STORAGE_KEY = 'posse_expand_state';
 const expandedProjects: Set<string> = new Set();
 const expandedAgentGroups: Set<string> = new Set();
+// Projects the user EXPLICITLY collapsed while a search query was active. During search, matching
+// projects are force-expanded to reveal hits; this set records the ones the user manually collapsed
+// anyway so their collapse wins across re-renders. It is cleared whenever the query clears, so the
+// user's persisted `expandedProjects` state is restored exactly (no leakage into persistence).
+const searchCollapsedProjects: Set<string> = new Set();
 let projectsSectionCollapsed = false;
 
 function loadExpandState(): void {
@@ -388,7 +403,7 @@ let selectedProjectPath: string | null = null;
 // ========== Multi-agent project history (backend projects:list) ==========
 // Backend-discovered, multi-agent (Claude/Codex/Kiro/Copilot) session history keyed by normalized
 // project path. Loaded via window.posse.projectsList({ extraFolders }) — see refreshProjectsData().
-type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot';
+type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
 interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId; sourcePath?: string; archived?: boolean }
 interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
 interface BackendProject { path: string; name: string; agents: BackendProjectAgent[]; lastActiveMs: number }
@@ -403,6 +418,7 @@ const AGENT_ID_LABEL: Record<ProjectsAgentId, string> = {
   codex: 'Codex',
   kiro: 'Kiro',
   copilot: 'Copilot',
+  devin: 'Devin',
 };
 
 // ========== Agent filter tabs ==========
@@ -460,6 +476,18 @@ function projectVisibleUnderTab(p: ProjectEntry): boolean {
   return !!g && (g.lives.length + g.closed.length + g.history.length) > 0;
 }
 
+// Posse mini logo (simplified from build/icon.svg: terminal chevron + 3 agent dots).
+// Inlined as a string so esbuild bundles it and the renderer's CSP (script-src 'self')
+// doesn't need an extra svg file asset.
+const POSSE_MINI_LOGO_SVG = `
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <path d="M300 332 L520 512 L300 692" fill="none" stroke="currentColor" stroke-width="78"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="616" cy="512" r="46" fill="currentColor"/>
+  <circle cx="742" cy="512" r="46" fill="currentColor" opacity="0.85"/>
+  <circle cx="660" cy="640" r="38" fill="currentColor" opacity="0.7"/>
+</svg>`;
+
 // Render the agent tab strip into its static host above the search toolbar.
 function renderAgentTabs(): void {
   const host = document.getElementById('agent-tabs');
@@ -470,14 +498,32 @@ function renderAgentTabs(): void {
   if (activeAgentTab !== 'all' && !families.includes(activeAgentTab)) setActiveAgentTab('all');
   for (const t of ['all', ...families]) {
     const btn = document.createElement('button');
-    btn.className = 'agent-tab' + (t === activeAgentTab ? ' active' : '');
-    btn.textContent = t === 'all' ? 'All' : t;
-    if (t !== 'all') {
-      const [fg] = getCliTagColors(t);
-      const dotc = document.createElement('span');
-      dotc.className = 'agent-tab-dot';
-      dotc.style.backgroundColor = fg;
-      btn.prepend(dotc);
+    const isAll = t === 'all';
+    btn.className = 'agent-tab' + (isAll ? ' agent-tab-logo' : ' agent-tab-icon') + (t === activeAgentTab ? ' active' : '');
+    btn.title = isAll ? 'All agents' : t;
+    btn.setAttribute('aria-label', isAll ? 'All agents' : t);
+    if (isAll) {
+      btn.innerHTML = POSSE_MINI_LOGO_SVG;
+    } else {
+      // Agent logo: prefer the official SVG (currentColor), fall back to the
+      // brand-color dot if no logo asset exists for this agent.
+      const logo = getAgentLogo(t);
+      if (logo) {
+        if (logo.kind === 'svg') {
+          btn.innerHTML = logo.markup;
+        } else {
+          const img = document.createElement('img');
+          img.src = logo.dataUrl;
+          img.alt = '';
+          btn.appendChild(img);
+        }
+      } else {
+        const [fg] = getCliTagColors(t);
+        const dotc = document.createElement('span');
+        dotc.className = 'agent-tab-dot';
+        dotc.style.backgroundColor = fg;
+        btn.appendChild(dotc);
+      }
     }
     btn.addEventListener('click', () => {
       if (activeAgentTab !== t) { setActiveAgentTab(t); renderSessionList(); }
@@ -486,15 +532,23 @@ function renderAgentTabs(): void {
   }
 }
 
-// In the "All" tab, prefix a session row with a small colored agent tag so mixed
+// In the "All" tab, prefix a session row with a small agent logo so mixed
 // agents stay distinguishable without a group header.
 function appendAgentTag(row: HTMLElement, family: string): void {
   const tag = document.createElement('span');
   tag.className = 'nav-session-agent-tag';
-  const [fg, bg] = getCliTagColors(family);
-  tag.textContent = family;
-  tag.style.color = fg;
-  tag.style.backgroundColor = bg;
+  const logo = getAgentLogo(family);
+  if (logo) {
+    tag.innerHTML = logo.markup;
+  } else {
+    // No logo asset: fall back to the brand-color dot.
+    const [fg] = getCliTagColors(family);
+    const dot = document.createElement('span');
+    dot.className = 'agent-tab-dot';
+    dot.style.backgroundColor = fg;
+    tag.appendChild(dot);
+  }
+  tag.title = family;
   // Insert right after the status dot (children[0]), before the title.
   row.insertBefore(tag, row.children[1] || null);
 }
@@ -520,6 +574,53 @@ function appendProjectTag(row: HTMLElement, id: string): void {
   appendProjectTagForCwd(row, sessionCwds.get(id) || '');
 }
 
+// Stable per-project accent palette for flattened session project chips (#07-02, fixed #07-05).
+// Different projects must render visibly distinct colors. A pure per-call hash collides often
+// (only 8 buckets — birthday-paradox territory with as few as 3-4 real projects), and an earlier
+// per-render "build a complete assignment map, hope every render call site is covered" design
+// could silently fall back to the raw colliding hash whenever a key was missing from that map.
+// Fix: a PERSISTENT, INCREMENTAL registry. `projectColorForCwd` is the single source of truth —
+// a key either already has a recorded color, or gets the nearest free slot right now (hash as the
+// preference, walk forward on collision, wrapping). No separate map to keep in sync, no fallback
+// path that can silently un-dedupe. Colors are stable for the process lifetime (reset on relaunch,
+// which is fine — same guarantee the earlier design offered).
+const PROJECT_TAG_PALETTE: Array<{ bg: string; border: string; fg: string }> = [
+  { bg: 'rgba(99, 179, 237, 0.18)',  border: 'rgba(99, 179, 237, 0.45)',  fg: '#9cc8f0' }, // blue
+  { bg: 'rgba(159, 230, 145, 0.18)', border: 'rgba(159, 230, 145, 0.45)', fg: '#a7e39a' }, // green
+  { bg: 'rgba(237, 168, 99, 0.18)',  border: 'rgba(237, 168, 99, 0.45)',  fg: '#e8b274' }, // amber
+  { bg: 'rgba(217, 130, 217, 0.18)', border: 'rgba(217, 130, 217, 0.45)', fg: '#d396d3' }, // magenta
+  { bg: 'rgba(99, 217, 199, 0.18)',  border: 'rgba(99, 217, 199, 0.45)',  fg: '#7fd9c6' }, // teal
+  { bg: 'rgba(237, 130, 130, 0.18)', border: 'rgba(237, 130, 130, 0.45)', fg: '#e89494' }, // red
+  { bg: 'rgba(200, 175, 237, 0.18)', border: 'rgba(200, 175, 237, 0.45)', fg: '#c4b1ec' }, // violet
+  { bg: 'rgba(237, 215, 99, 0.18)',  border: 'rgba(237, 215, 99, 0.45)',  fg: '#dccc6e' }, // yellow
+];
+const projectColorAssignments = new Map<string, { bg: string; border: string; fg: string }>();
+const projectColorSlotsUsed = new Set<number>();
+function projectColorForCwd(cwd: string): { bg: string; border: string; fg: string } {
+  const key = normalizeCwd(cwd || '');
+  const existing = projectColorAssignments.get(key);
+  if (existing) return existing;
+
+  // FNV-1a 32-bit: stable, cheap, no Date/Math.random (would break determinism).
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  let idx = h % PROJECT_TAG_PALETTE.length;
+  // Walk forward to the nearest free slot; wrap around the palette. If every slot is already
+  // taken (more distinct projects than palette entries), idx lands back on the hash-preferred
+  // slot and we tolerate the collision — better to show a color than none.
+  for (let step = 0; step < PROJECT_TAG_PALETTE.length; step++) {
+    if (!projectColorSlotsUsed.has(idx)) break;
+    idx = (idx + 1) % PROJECT_TAG_PALETTE.length;
+  }
+  projectColorSlotsUsed.add(idx);
+  const color = PROJECT_TAG_PALETTE[idx];
+  projectColorAssignments.set(key, color);
+  return color;
+}
+
 function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
   const name = projectNameForCwd(cwd);
   if (!name) return;
@@ -527,6 +628,10 @@ function appendProjectTagForCwd(row: HTMLElement, cwd: string): void {
   tag.className = 'nav-session-project-tag';
   tag.textContent = name;
   tag.title = cwd;
+  const c = projectColorForCwd(cwd);
+  tag.style.backgroundColor = c.bg;
+  tag.style.borderColor = c.border;
+  tag.style.color = c.fg;
   // Insert right before the title span so it reads "[dot][agent][project] title".
   const titleEl = row.querySelector('.nav-session-title');
   row.insertBefore(tag, titleEl || null);
@@ -768,6 +873,19 @@ function agentGroupMatchesSearch(g: ProjectAgentGroup): boolean {
   return false;
 }
 
+// During search, does this project have at least one matching CHILD (a session title hit)?
+// Name-only matches are excluded — a project that only matches by name is NOT force-expanded by
+// the search and respects its normal `expandedProjects` state, so it doesn't dump all its
+// non-matching children into the list.
+function projectHasMatchingChild(p: ProjectEntry): boolean {
+  const q = projectSearchQuery;
+  if (!q) return false;
+  for (const g of collectProjectSessions(p.path).values()) {
+    if (agentGroupMatchesSearch(g)) return true;
+  }
+  return false;
+}
+
 // Map a session displayName / preset family to a coarse agent group label
 function agentFamilyFromDisplayName(displayName: string): string {
   const d = (displayName || '').toLowerCase();
@@ -810,16 +928,6 @@ let closedChatSessions: ClosedChatSessionInfo[] = [];
 // Auto account-switch status: sessionId → { status, detail }
 const sessionAutoSwitchStatus: Map<string, { status: string; detail?: string }> = new Map();
 
-// Auto-continue config
-const sessionAutoContinue: Map<string, { enabled: boolean; messages: string[]; intervalMs: number; commandIntervalMs: number; lastSendTime: number; autoAgree: boolean; autoAgreeDelaySec: number; sendDelaySec: number; maxDurationMs: number; enabledAt: number }> = new Map();
-const AUTO_CONTINUE_DEFAULT_MESSAGES = ['continue'];
-const AUTO_CONTINUE_DEFAULT_INTERVAL = 10 * 60 * 1000; // 10 minutes
-const AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL = 2000; // 2-second command interval
-const AUTO_AGREE_DEFAULT_DELAY_SEC = 5; // auto-approve default delay: 5 seconds
-const AUTO_CONTINUE_SEND_DELAY_SEC = 2; // default delay before sending Enter: 2 seconds
-const AUTO_CONTINUE_DEFAULT_MAX_DURATION = 0; // 0 means no limit
-const AUTO_CONTINUE_STORAGE_KEY = 'posse_auto_continue';
-
 function hasSessionInUI(sessionId: string): boolean {
   return sessionTitles.has(sessionId);
 }
@@ -832,66 +940,7 @@ function getSessionCreateTime(id: string): number {
   return fallback;
 }
 
-// Persist auto-continue config to localStorage
-function saveAutoContinueToStorage(): void {
-  const data: Record<string, any> = {};
-  sessionAutoContinue.forEach((config, sessionId) => {
-    // lastSendTime / enabledAt are runtime state, not persisted
-    data[sessionId] = {
-      enabled: config.enabled,
-      messages: config.messages,
-      intervalMs: config.intervalMs,
-      commandIntervalMs: config.commandIntervalMs,
-      autoAgree: config.autoAgree,
-      autoAgreeDelaySec: config.autoAgreeDelaySec,
-      sendDelaySec: config.sendDelaySec,
-      maxDurationMs: config.maxDurationMs,
-    };
-  });
-  localStorage.setItem(AUTO_CONTINUE_STORAGE_KEY, JSON.stringify(data));
-}
-
-// Restore auto-continue config from localStorage
-function loadAutoContinueFromStorage(): void {
-  try {
-    const raw = localStorage.getItem(AUTO_CONTINUE_STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw) as Record<string, any>;
-    for (const [sessionId, config] of Object.entries(data)) {
-      // Migrate legacy message → messages
-      const msgs = Array.isArray(config.messages)
-        ? config.messages
-        : (config.message ? [config.message] : [...AUTO_CONTINUE_DEFAULT_MESSAGES]);
-      sessionAutoContinue.set(sessionId, {
-        enabled: config.enabled ?? false,
-        messages: msgs,
-        intervalMs: config.intervalMs ?? AUTO_CONTINUE_DEFAULT_INTERVAL,
-        commandIntervalMs: config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-        lastSendTime: Date.now(),
-        autoAgree: config.autoAgree ?? true,
-        autoAgreeDelaySec: config.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC,
-        sendDelaySec: config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC,
-        maxDurationMs: config.maxDurationMs ?? AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-        enabledAt: Date.now(),
-      });
-    }
-  } catch {}
-}
-
-// Restore auto-continue config and start the timer on launch
-loadAutoContinueFromStorage();
-// The old logic unconditionally wiped the on-disk config, permanently losing the user's auto-continue settings.
-// Current behavior: on cold start sessionTitles is empty → the old session-id configs written by
-// loadAutoContinueFromStorage match no current session, so the timer is a no-op. When onRemoteCreated/createPty
-// creates a new session, onSetAutoContinueConfig pushes the new config and overrides the old entries.
-// Check whether any config is enabled, and start the timer if so
-const hasEnabledConfig = Array.from(sessionAutoContinue.values()).some(c => c.enabled);
-if (hasEnabledConfig) initAutoContinueTimer();
-
-// Auto-continue timer
-let autoContinueTimer: ReturnType<typeof setInterval> | null = null;
-
-// Write to the PTY and reset the auto-continue timer
+// Write to the PTY with input tracking (recent input buffer + mouse report flagging)
 function writePtyWithAutoReset(id: string, data: string): void {
   termManager.notifyInput(id);
   // Record recently-sent input (keystrokes, xterm mouse reports, file/paste payloads all
@@ -905,242 +954,6 @@ function writePtyWithAutoReset(id: string, data: string): void {
   // that follows isn't misread as agent activity.
   if (/\x1b\[(?:M|<[0-9])/.test(data)) sessionLastMouseInputAt.set(id, Date.now());
   window.posse.writePty(id, data);
-  // Reset this session's auto-continue timer
-  const config = sessionAutoContinue.get(id);
-  if (config && config.enabled) {
-    config.lastSendTime = Date.now();
-  }
-}
-
-// Initialize the auto-continue timer
-function initAutoContinueTimer(): void {
-  if (autoContinueTimer) {
-    clearInterval(autoContinueTimer);
-  }
-  autoContinueTimer = setInterval(() => {
-    const now = Date.now();
-    const staleSessionIds: string[] = [];
-    sessionAutoContinue.forEach((config, sessionId) => {
-      if (!config.enabled) return;
-      if (!hasSessionInUI(sessionId)) {
-        staleSessionIds.push(sessionId);
-        return;
-      }
-      // Check max duration; auto-stop the loop on timeout
-      if (config.maxDurationMs > 0 && config.enabledAt > 0 && (now - config.enabledAt >= config.maxDurationMs)) {
-        console.log(`[Loop] Session ${sessionId} reached max duration ${config.maxDurationMs}ms, auto-stopping loop`);
-        config.enabled = false;
-        saveAutoContinueToStorage();
-        renderSessionList();
-        return;
-      }
-      // Check whether the interval has elapsed
-      if (now - config.lastSendTime >= config.intervalMs) {
-        const messages = config.messages || AUTO_CONTINUE_DEFAULT_MESSAGES;
-        const cmdInterval = config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL;
-        const sendDelay = (config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC) * 1000;
-        console.log(`[Loop] Sending ${messages.length} command(s) to session ${sessionId}`);
-
-        // Send each command in order, with an interval between commands
-        let cmdIdx = 0;
-        const sendNextCommand = () => {
-          if (cmdIdx >= messages.length) {
-            console.log(`[Loop] Sent all ${messages.length} command(s)`);
-            return;
-          }
-          const msg = messages[cmdIdx];
-          cmdIdx++;
-          window.posse.writePty(sessionId, msg);
-          // Send Enter after a delay
-          setTimeout(() => {
-            const enterKeys = [
-              '\r', '\n', '\r\n', '\x0d', '\x0a', '\x1b\n', '\x1b\r',
-            ];
-            let ei = 0;
-            const sendNextEnter = () => {
-              if (ei < enterKeys.length) {
-                window.posse.writePty(sessionId, enterKeys[ei]);
-                ei++;
-                setTimeout(sendNextEnter, 15);
-              } else {
-                // Enter sent for this command; move to the next command
-                setTimeout(sendNextCommand, cmdInterval);
-              }
-            };
-            sendNextEnter();
-          }, sendDelay);
-        };
-        sendNextCommand();
-        config.lastSendTime = now;
-      }
-    });
-    if (staleSessionIds.length > 0) {
-      staleSessionIds.forEach((id) => sessionAutoContinue.delete(id));
-      saveAutoContinueToStorage();
-      renderSessionList();
-    }
-  }, 1000); // Check once per second
-}
-
-// Toggle the auto-continue switch
-function toggleAutoContinue(sessionId: string, enabled: boolean): void {
-  let config = sessionAutoContinue.get(sessionId);
-  if (!config) {
-    config = {
-      enabled: false,
-      messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
-      intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
-      commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-      lastSendTime: Date.now(),
-      autoAgree: true,
-      autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
-      sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
-      maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-      enabledAt: 0,
-    };
-    sessionAutoContinue.set(sessionId, config);
-  }
-  config.enabled = enabled;
-  config.lastSendTime = Date.now();
-  if (enabled) {
-    config.enabledAt = Date.now();
-  }
-  saveAutoContinueToStorage();
-
-  // Start the timer (if not already running)
-  initAutoContinueTimer();
-
-  // Re-render the session list to reflect the switch state
-  renderSessionList();
-}
-
-// Show the auto-continue config dialog
-function showAutoContinueConfigDialog(sessionId: string): void {
-  const config = sessionAutoContinue.get(sessionId) || {
-    enabled: false,
-    messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
-    intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
-    commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-    lastSendTime: Date.now(),
-    autoAgree: true,
-    autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
-    sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
-    maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-    enabledAt: 0,
-  };
-
-  const currentMessages = config.messages || AUTO_CONTINUE_DEFAULT_MESSAGES;
-  const currentInterval = config.intervalMs || AUTO_CONTINUE_DEFAULT_INTERVAL;
-  const currentIntervalMinutes = Math.round(currentInterval / 60000);
-  const currentCommandInterval = Math.round((config.commandIntervalMs ?? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL) / 1000);
-  const currentAutoAgree = config.autoAgree ?? true;
-  const currentAutoAgreeDelay = config.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC;
-  const currentSendDelay = config.sendDelaySec ?? AUTO_CONTINUE_SEND_DELAY_SEC;
-  const currentMaxDuration = config.maxDurationMs ?? AUTO_CONTINUE_DEFAULT_MAX_DURATION;
-  const currentMaxDurationMinutes = currentMaxDuration > 0 ? Math.round(currentMaxDuration / 60000) : 0;
-
-  const overlay = document.getElementById('auto-continue-overlay')!;
-  const messageInput = document.getElementById('auto-continue-message') as HTMLTextAreaElement;
-  const intervalInput = document.getElementById('auto-continue-interval') as HTMLInputElement;
-  const commandIntervalInput = document.getElementById('auto-continue-command-interval') as HTMLInputElement;
-  const autoAgreeCheckbox = document.getElementById('auto-continue-auto-agree') as HTMLInputElement;
-  const autoAgreeDelayInput = document.getElementById('auto-continue-agree-delay') as HTMLInputElement;
-  const autoAgreeDelayRow = document.getElementById('auto-agree-delay-row')!;
-  const sendDelayInput = document.getElementById('auto-continue-send-delay') as HTMLInputElement;
-  const maxDurationInput = document.getElementById('auto-continue-max-duration') as HTMLInputElement;
-  const saveBtn = document.getElementById('auto-continue-save')!;
-  const stopBtn = document.getElementById('auto-continue-stop')!;
-  const cancelBtn = document.getElementById('auto-continue-cancel')!;
-  const closeBtn = document.getElementById('auto-continue-dialog-close')!;
-
-  messageInput.value = currentMessages.join('\n');
-  messageInput.placeholder = 'One command per line, sent in order';
-  intervalInput.value = String(currentIntervalMinutes);
-  if (commandIntervalInput) commandIntervalInput.value = String(currentCommandInterval);
-  autoAgreeCheckbox.checked = currentAutoAgree;
-  autoAgreeDelayInput.value = String(currentAutoAgreeDelay);
-  autoAgreeDelayRow.style.display = currentAutoAgree ? '' : 'none';
-  sendDelayInput.value = String(currentSendDelay);
-  maxDurationInput.value = String(currentMaxDurationMinutes);
-
-  // Set the button label and visibility based on current state
-  if (config.enabled) {
-    saveBtn.textContent = 'Save';
-    stopBtn.style.display = '';
-  } else {
-    saveBtn.textContent = 'Save and Start';
-    stopBtn.style.display = 'none';
-  }
-
-  autoAgreeCheckbox.onchange = () => {
-    autoAgreeDelayRow.style.display = autoAgreeCheckbox.checked ? '' : 'none';
-  };
-
-  overlay.classList.add('active');
-  messageInput.focus();
-
-  function close(): void {
-    overlay.classList.remove('active');
-    saveBtn.removeEventListener('click', onSave);
-    stopBtn.removeEventListener('click', onStop);
-    cancelBtn.removeEventListener('click', close);
-    closeBtn.removeEventListener('click', close);
-    autoAgreeCheckbox.onchange = null;
-  }
-
-  function onSave(): void {
-    const messages = messageInput.value.split('\n').map(m => m.trim()).filter(Boolean);
-    if (!messages.length) { messageInput.focus(); return; }
-    const intervalMinutes = parseInt(intervalInput.value, 10);
-    if (isNaN(intervalMinutes) || intervalMinutes < 1) { intervalInput.focus(); return; }
-
-    const agreeDelay = parseInt(autoAgreeDelayInput.value, 10);
-    if (autoAgreeCheckbox.checked && (isNaN(agreeDelay) || agreeDelay < 0)) { autoAgreeDelayInput.focus(); return; }
-
-    const sendDelay = parseInt(sendDelayInput.value, 10);
-    if (isNaN(sendDelay) || sendDelay < 0) { sendDelayInput.focus(); return; }
-
-    const maxDurationMinutes = parseInt(maxDurationInput.value, 10);
-    if (isNaN(maxDurationMinutes) || maxDurationMinutes < 0) { maxDurationInput.focus(); return; }
-
-    config.messages = messages;
-    config.intervalMs = intervalMinutes * 60000;
-    if (commandIntervalInput) {
-      const cmdIntervalSec = parseInt(commandIntervalInput.value, 10);
-      config.commandIntervalMs = isNaN(cmdIntervalSec) || cmdIntervalSec < 0 ? AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL : cmdIntervalSec * 1000;
-    }
-    config.lastSendTime = Date.now();
-    config.autoAgree = autoAgreeCheckbox.checked;
-    config.autoAgreeDelaySec = isNaN(agreeDelay) ? AUTO_AGREE_DEFAULT_DELAY_SEC : agreeDelay;
-    config.sendDelaySec = sendDelay;
-    config.maxDurationMs = maxDurationMinutes > 0 ? maxDurationMinutes * 60000 : 0;
-    sessionAutoContinue.set(sessionId, config);
-
-    if (!config.enabled) {
-      config.enabled = true;
-      config.enabledAt = Date.now();
-      initAutoContinueTimer();
-    }
-
-    saveAutoContinueToStorage();
-    close();
-    renderSessionList();
-  }
-
-  function onStop(): void {
-    config.enabled = false;
-    config.lastSendTime = Date.now();
-    sessionAutoContinue.set(sessionId, config);
-    saveAutoContinueToStorage();
-    initAutoContinueTimer();
-    close();
-    renderSessionList();
-  }
-
-  saveBtn.addEventListener('click', onSave);
-  stopBtn.addEventListener('click', onStop);
-  cancelBtn.addEventListener('click', close);
-  closeBtn.addEventListener('click', close);
 }
 
 // ID of the session whose title is currently being edited
@@ -1270,7 +1083,7 @@ const BUILTIN_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'claude --dangerously-skip-permissions', label: 'Claude (auto)' },
   { value: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"', label: 'Codex (auto)' },
   { value: 'copilot --allow-all --autopilot', label: 'Copilot (auto)' },
-  { value: 'devin --permission-mode bypass', label: 'Devin (auto)' },
+  { value: 'devin --permission-mode dangerous', label: 'Devin (auto)' },
   { value: 'opencode', label: 'OpenCode' },
   { value: 'kiro-cli chat --trust-all-tools', label: 'Kiro (auto)' },
 ];
@@ -1971,7 +1784,11 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
       toggleSearchClear();
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
+        const prev = projectSearchQuery;
         projectSearchQuery = searchInput.value.trim().toLowerCase();
+        // Transitioning to an empty query ends the search: drop the temporary collapse records
+        // so the user's persisted expand/collapse state is restored exactly.
+        if (prev && !projectSearchQuery) searchCollapsedProjects.clear();
         renderSessionList();
       }, 120);
     });
@@ -1981,6 +1798,7 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
     if (!searchInput) return;
     searchInput.value = '';
     projectSearchQuery = '';
+    searchCollapsedProjects.clear();
     searchClear.setAttribute('hidden', '');
     renderSessionList();
     searchInput.focus();
@@ -2033,6 +1851,23 @@ function statusDbg(event: string, id: string, detail?: string): void {
 const unreadTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // Recently received data buffer (used for prompt detection)
 const recentDataBuffer: Map<string, string> = new Map();
+// Context-usage % per live session, surfaced as a small chip on the session row. Shows "used"
+// (higher = closer to the limit), normalized from whichever phrasing the agent emits. Only agents
+// that print a context line get a value; agents with no parseable signal simply show no chip.
+const sessionContextPct: Map<string, number> = new Map();
+// Context-usage patterns. Ordered most-specific-first; first match wins. Each entry extracts a
+// percentage and a flag for whether it's "remaining"/"left" semantics (inverted to "used" on store).
+// To add a new agent: append one {re, invert} object derived from its emitted status line.
+const CONTEXT_PATTERNS: ReadonlyArray<{ re: RegExp; invert: boolean }> = [
+  // Devin structured: "Context: 157k / 200k tokens (78%)" — (78%) is used.
+  { re: /Context:\s*\d+(?:\.\d+)?[km]?\s*\/\s*\d+(?:\.\d+)?[km]?\s*tokens?\s*\((\d+)%\)/i, invert: false },
+  // Devin legacy: "72% remaining" → invert.
+  { re: /(\d+)%\s*remaining\b/i, invert: true },
+  // Claude: "87% context used (167k tokens)" / "100% context used".
+  { re: /(\d+)%\s*context\s*used\b/i, invert: false },
+  // Claude: "Context left until auto-compact: 87%" → invert.
+  { re: /context\s*(?:left|until)[^:\n]*:\s*(\d+)%/i, invert: true },
+];
 // Tiny rolling carry used ONLY for the WORKING test. Holds the last ~64 chars of raw output so a
 // spinner split across two pty chunks still matches — but small enough that a finished agent's
 // result/prompt text pushes any old spinner word OUT of the window within one or two chunks. This
@@ -2213,6 +2048,8 @@ const CLI_TAG_COLORS: Record<string, [string, string]> = {
   'Codex (auto)':   ['#56d4a0', '#1a3d2e'],
   'Copilot':       ['#7ee787', '#17361f'],
   'Copilot (auto)': ['#3fb950', '#12351f'],
+  'Devin':         ['#82aaff', '#1e2d4d'],
+  'Devin (auto)':   ['#5c7cfa', '#1a2350'],
 };
 
 function getCliTagColors(displayName: string): [string, string] {
@@ -3127,6 +2964,29 @@ function makeSessionPinButton(convKey: string): HTMLButtonElement {
   return btn;
 }
 
+// Apply the current busy/unread/waiting status to an existing live-session row's dot IN PLACE,
+// without touching the rest of the row. Used to keep other rows' dots live while renderSessionList()
+// is skipping the full rebuild because a title elsewhere is being edited (app.ts ~3283) — a busy
+// transition landing during that window must not wait for the edit to end (or the 60s relative-time
+// timer) before the dot goes orange.
+function refreshLiveDotInPlace(id: string): void {
+  const row = sessionList.querySelector(`.nav-session[data-session-id="${id}"][data-session-type="pty"]`);
+  const dot = row?.querySelector('.nav-session-dot, .nav-session-dot-warn') as HTMLElement | null;
+  if (!dot) return;
+  dot.className = 'nav-session-dot';
+  dot.textContent = '';
+  dot.style.color = '';
+  if (sessionWaiting.has(id)) {
+    dot.textContent = '⚠';
+    dot.classList.add('nav-session-dot-warn');
+    dot.style.color = '#ff5c4d';
+    dot.style.backgroundColor = 'transparent';
+  } else {
+    dot.style.backgroundColor = sessionStatusColor(id);
+    if (sessionBusy.has(id)) dot.classList.add('nav-session-dot-busy');
+  }
+}
+
 // Build a session row for a LIVE PTY session inside a project (compact: title + relative time)
 function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   const title = sessionTitles.get(id) || '';
@@ -3178,6 +3038,17 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   item.appendChild(dot);
   item.appendChild(titleSpan);
   item.appendChild(timeSpan);
+  // Context-usage chip: only when an agent emitted a parseable context line (Claude, Devin).
+  // Codex/Copilot/Kiro emit none → no chip. Color: green < 60%, amber 60–85%, red > 85%.
+  const ctxPct = sessionContextPct.get(id);
+  if (ctxPct !== undefined) {
+    const chip = document.createElement('span');
+    chip.className = 'nav-session-context-chip'
+      + (ctxPct > 85 ? ' ctx-red' : ctxPct >= 60 ? ' ctx-amber' : ' ctx-green');
+    chip.textContent = `${ctxPct}%`;
+    chip.title = `${ctxPct}% context used`;
+    item.appendChild(chip);
+  }
   item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(editBtn);
   item.appendChild(closeBtn);
@@ -3454,9 +3325,15 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
 function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   const key = normalizeCwd(p.path);
   // While searching, force-expand matching projects to reveal hits (without mutating persisted
-  // collapse state). Clearing the query restores the user's saved expand/collapse state.
+  // collapse state). Two refinements (#60): (1) only force-expand projects that have a matching
+  // CHILD — name-only matches respect the user's persisted expand state instead of dumping all
+  // their non-matching children into the list; (2) honor an explicit manual collapse during
+  // search via `searchCollapsedProjects` so the user can hide a noisy expanded project without
+  // clearing the query. Clearing the query restores the user's saved expand/collapse state.
   const searching = projectSearchQuery.length > 0;
-  const isExpanded = searching ? true : expandedProjects.has(key);
+  const isExpanded = searching
+    ? projectHasMatchingChild(p) && !searchCollapsedProjects.has(key)
+    : expandedProjects.has(key);
 
   const isSelected = selectedProjectPath != null && normalizeCwd(selectedProjectPath) === key;
   const row = document.createElement('div');
@@ -3520,11 +3397,19 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // Clicking the row (name / non-button area) both SELECTS the project (drives the RIGHT file panel)
   // and toggles its expand/collapse state. Action buttons stopPropagation so they don't toggle.
   row.addEventListener('click', () => {
+    const willExpand = !expandedProjects.has(key);
     if (expandedProjects.has(key)) {
       setProjectExpanded(key, false);
     } else {
       setProjectExpanded(key, true);
       if (!backendProjects.has(key) && !projectsDataLoading) void refreshProjectsData();
+    }
+    // During search, record an explicit collapse so it survives the next render (which would
+    // otherwise re-force-expand matching projects). Expanding again drops the record so the
+    // project re-opens. These records are cleared with the query — they never persist.
+    if (projectSearchQuery.length > 0) {
+      if (willExpand) searchCollapsedProjects.delete(key);
+      else searchCollapsedProjects.add(key);
     }
     // selectProject sets the selection + re-renders the nav (reflecting the new expand state).
     selectProject(p.path);
@@ -3626,7 +3511,7 @@ function collectPinnedSessionRows(activeId: string | null): Array<{ time: number
 // Deduped by liveSessionPinKey. A pinned live session may also appear in Pinned; that overlap
 // is intentional (not deduped across sections), so this collector does not skip pinned rows.
 function collectActiveSessionRows(activeId: string | null): Array<{ time: number; el: HTMLElement }> {
-  const out: Array<{ time: number; el: HTMLElement }> = [];
+  const out: Array<{ time: number; projectKey: string; el: HTMLElement }> = [];
   const seen = new Set<string>();
   for (const p of projects) {
     const groups = getProjectSessions(p.path);
@@ -3636,12 +3521,35 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
         if (seen.has(k)) continue;
         seen.add(k);
         const el = buildLiveSessionRow(id, activeId); appendAgentTag(el, family); appendProjectTag(el, id);
-        out.push({ time: sessionUpdateTimes.get(id) || 0, el });
+        out.push({
+          time: sessionUpdateTimes.get(id) || 0,
+          projectKey: normalizeCwd(sessionCwds.get(id) || ''),
+          el,
+        });
       }
     }
   }
-  out.sort((a, b) => b.time - a.time);
-  return out;
+
+  if (activeSessionSortMode === 'project') {
+    // Group by owning project; each group ordered by latest activity desc, and groups
+    // themselves ordered by their own most-recent activity desc (mirrors sortProjects's
+    // "Recent" semantics so the two sort controls stay conceptually consistent).
+    const groupMax = new Map<string, number>();
+    for (const row of out) {
+      const cur = groupMax.get(row.projectKey) ?? -Infinity;
+      if (row.time > cur) groupMax.set(row.projectKey, row.time);
+    }
+    out.sort((a, b) => {
+      const gDiff = (groupMax.get(b.projectKey) ?? 0) - (groupMax.get(a.projectKey) ?? 0);
+      if (gDiff !== 0) return gDiff;
+      if (a.projectKey !== b.projectKey) return a.projectKey < b.projectKey ? -1 : 1;
+      return b.time - a.time;
+    });
+  } else {
+    out.sort((a, b) => b.time - a.time);
+  }
+
+  return out.map((row) => ({ time: row.time, el: row.el }));
 }
 
 // Flatten recently-closed sessions so users can quickly reopen without drilling
@@ -3674,7 +3582,13 @@ function renderSessionList(): void {
   if (editingTitleId) {
     const existingInput = sessionList.querySelector(`input[data-session-id="${editingTitleId}"]`) as HTMLInputElement | null;
     if (existingInput && document.activeElement === existingInput) {
-      // Currently editing; skip rendering to preserve the edit state
+      // Currently editing; skip the full rebuild to preserve the edit state, but a busy/unread/
+      // waiting transition on a DIFFERENT session must still show up immediately — patch that
+      // row's dot in place instead of waiting for the edit to end or the 60s relative-time timer.
+      sessionList.querySelectorAll('.nav-session[data-session-type="pty"]').forEach((row) => {
+        const rowId = (row as HTMLElement).dataset.sessionId;
+        if (rowId && rowId !== editingTitleId) refreshLiveDotInPlace(rowId);
+      });
       return;
     }
     editingTitleId = null;
@@ -3718,6 +3632,20 @@ function renderSessionList(): void {
     label.appendChild(actIcon);
     label.appendChild(actText);
     header.appendChild(label);
+    const sortBtn = document.createElement('button');
+    sortBtn.type = 'button';
+    sortBtn.id = 'active-session-sort';
+    sortBtn.className = 'nav-section-sort-btn';
+    const sortLabel = activeSessionSortMode === 'project' ? 'Project' : 'Recent';
+    sortBtn.innerHTML = `<span class="nav-section-sort-glyph">${ICON.sort}</span><span class="nav-section-sort-label">${sortLabel}</span>`;
+    sortBtn.title = `Sort Active Sessions (current: ${sortLabel}) — click to switch`;
+    sortBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      activeSessionSortMode = activeSessionSortMode === 'recent' ? 'project' : 'recent';
+      try { localStorage.setItem(ACTIVE_SESSION_SORT_STORAGE_KEY, activeSessionSortMode); } catch { /* ignore */ }
+      renderSessionList();
+    });
+    header.appendChild(sortBtn);
     header.addEventListener('click', () => toggleSectionCollapsed('active'));
     sessionList.appendChild(header);
     if (!activeCollapsed) {
@@ -3803,6 +3731,7 @@ function renderSessionList(): void {
     e.stopPropagation();
     expandedProjects.clear();
     expandedAgentGroups.clear();
+    searchCollapsedProjects.clear();
     saveExpandState();
     renderSessionList();
   });
@@ -4156,6 +4085,7 @@ function getAgentPickerOptions(): Array<{ label: string; command: string }> {
     { label: 'Claude Code', command: 'claude --dangerously-skip-permissions' },
     { label: 'Codex', command: 'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"' },
     { label: 'Copilot', command: 'copilot --allow-all --autopilot' },
+    { label: 'Devin', command: 'devin --permission-mode dangerous' },
     { label: 'Kiro', command: 'kiro-cli chat --trust-all-tools' },
   ];
   for (const cp of getCustomPresets()) {
@@ -4210,6 +4140,17 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
   if (customPreset) {
     const isAuto = customPreset.autoFlag && presetCommand === customPreset.command + ' ' + customPreset.autoFlag;
     sessionDisplayNames.set(result.id, isAuto ? customPreset.name + ' auto' : customPreset.name);
+  }
+
+  // The user just picked an agent — switch the sidebar's agent tab to that family so the new
+  // session is visible. Without this, a non-matching active tab (e.g. 'Claude' when picking
+  // Devin) filters the whole project out via projectVisibleUnderTab and the new session never
+  // appears (#61). Fall back to 'all' if the family can't be derived or is a bare 'Terminal'.
+  const newFamily = agentFamilyFromDisplayName(sessionDisplayNames.get(result.id) || '');
+  if (newFamily && newFamily !== 'Terminal' && newFamily !== activeAgentTab) {
+    setActiveAgentTab(newFamily);
+  } else if ((!newFamily || newFamily === 'Terminal') && activeAgentTab !== 'all') {
+    setActiveAgentTab('all');
   }
 
   // Ensure the project is registered, selected & expanded so the new session is visible
@@ -4272,6 +4213,8 @@ function parseResumeCommand(cmd: string): { agent: string; id: string } | null {
   if ((m = c.match(/\bcodex\b\s+resume\s+(\S+)/))) return { agent: 'codex', id: m[1] };
   if ((m = c.match(/\bcopilot\b.*?--resume\s+(\S+)/))) return { agent: 'copilot', id: m[1] };
   if ((m = c.match(/\bkiro-cli\b.*?--resume-id\s+(\S+)/))) return { agent: 'kiro', id: m[1] };
+  // Devin: "devin -r <id>" / "devin --resume <id>"
+  if ((m = c.match(/\bdevin\b(?:\s+(?:-r|--resume))\s+([\w-]+)/))) return { agent: 'devin', id: m[1] };
   return null;
 }
 
@@ -4433,7 +4376,10 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
 
   // Validate the on-disk session exists in this cwd before resuming, else warn
   // instead of silently launching a fresh empty session.
-  if (!(await verifyResumableSession(s.agent, s.cwd, s.id))) {
+  // Prefer the true backend agent (storeAgent) when available — ClaudeHistorySession.agent
+  // is narrowed to claude/codex, but kiro/copilot/devin flow through storeAgent.
+  const verifyAgent = s.storeAgent || s.agent;
+  if (!(await verifyResumableSession(verifyAgent, s.cwd, s.id))) {
     // Definitive not-found: drop this id from the history cache so the dead row
     // disappears instead of being clickable into a failing resume.
     console.warn(`[posse] History session ${s.id} no longer exists in ${s.cwd}; removing row.`);
@@ -4609,6 +4555,7 @@ function clearSessionState(id: string): void {
   sessionLastWorkingAt.delete(id);
   sessionLastAttachAt.delete(id);
   sessionTitleLocked.delete(id);
+  sessionContextPct.delete(id);
   // NOTE: don't unpin here — pins are keyed by conversationKey (not the ephemeral
   // pty id) so a pinned session stays pinned after it closes / is resumed (#38).
   sessionCwds.delete(id);
@@ -4617,14 +4564,12 @@ function clearSessionState(id: string): void {
   sessionAgentId.delete(id);
   sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
-  sessionAutoContinue.delete(id);
   sessionAutoSwitchStatus.delete(id);
 }
 
 function destroySession(id: string): void {
   window.posse.destroyPty(id);
   clearSessionState(id);
-  saveAutoContinueToStorage();
   termManager.destroy(id);
   updateEmptyState();
   renderSessionList();
@@ -4640,7 +4585,6 @@ function destroySessions(ids: string[]): void {
     clearSessionState(id);
     termManager.destroy(id);
   }
-  saveAutoContinueToStorage();
   updateEmptyState();
   renderSessionList();
   updateSessionTitleBar();
@@ -5081,7 +5025,6 @@ function clearAllLocalSessions(): void {
     clearSessionState(id);
     termManager.destroy(id);
   }
-  saveAutoContinueToStorage();
   updateEmptyState();
   renderSessionList();
   updateSessionTitleBar();
@@ -5395,24 +5338,22 @@ window.posse.onPtyData((id, data) => {
     // Detect the AI CLI prompt after stripping ANSI escapes
     // Improvement: only match real prompts, excluding false positives like HTML tags
     const plain = recentDataBuffer.get(id)!.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-    // When the loop is on, auto-confirm the CLI's various confirmation prompts (proceed / make this edit / etc.)
-    const acConfig = sessionAutoContinue.get(id);
-    let autoAgreeFired = false;
-    if (acConfig?.enabled && (acConfig.autoAgree ?? true) && /Do you want to .*\?/.test(plain)) {
-      autoAgreeFired = true;
-      // Count the option lines (format: "  1. xxx", "  2. xxx"...)
-      const optionCount = (plain.match(/^\s+\d+\.\s/gm) || []).length;
-      // 3 options: 1=Yes, 2=Yes (always), 3=No → choose 2
-      // 2 options: 1=Yes, 2=No → choose 1
-      const choice = optionCount >= 3 ? '2' : '1';
-      const delayMs = (acConfig.autoAgreeDelaySec ?? AUTO_AGREE_DEFAULT_DELAY_SEC) * 1000;
-      setTimeout(() => {
-        window.posse.writePty(id, choice);
-        window.posse.writePty(id, String.fromCharCode(0x0d));
-        console.log(`[AutoConfirm] Session ${id} detected ${optionCount} options, choosing ${choice}, delayed ${delayMs}ms`);
-      }, delayMs);
-      // Clear the buffer to avoid re-triggering
-      recentDataBuffer.delete(id);
+
+    // Context-usage % extraction. plain is ANSI-stripped and bridges chunk boundaries via the
+    // 500-char recentDataBuffer carry, so a status line split across chunks still matches. Only
+    // re-render when the percentage actually changes (no storm on every chunk). "remaining"/"left"
+    // phrasings are inverted to "used" so the chip always means "how full".
+    for (const pat of CONTEXT_PATTERNS) {
+      const m = pat.re.exec(plain);
+      if (!m) continue;
+      let pct = Math.round(Number(m[1]));
+      if (!Number.isFinite(pct)) break;
+      pct = Math.max(0, Math.min(100, pat.invert ? 100 - pct : pct));
+      if (sessionContextPct.get(id) !== pct) {
+        sessionContextPct.set(id, pct);
+        renderSessionList();
+      }
+      break; // first match wins
     }
 
     // Prompt detection: split by line and check whether the last few lines contain a prompt
@@ -5426,8 +5367,8 @@ window.posse.onPtyData((id, data) => {
     const decisionPrompt =
       /Do you want to .*\?/.test(plain) ||
       (/^\s*❯?\s*\d+\.\s/m.test(recentLines) && /\?/.test(recentLines));
-    if (decisionPrompt && !autoAgreeFired) {
-      // Awaiting the user's decision (and NOT being auto-handled). Waiting takes priority
+    if (decisionPrompt) {
+      // Awaiting the user's decision. Waiting takes priority
       // over busy/unread.
       clearTimeout(unreadTimers.get(id));
       unreadTimers.delete(id);
@@ -5520,7 +5461,6 @@ window.posse.onChatTitleUpdate((id, title) => {
 
 window.posse.onPtyExit((id) => {
   clearSessionState(id);
-  saveAutoContinueToStorage();
   termManager.destroy(id);
   updateEmptyState();
   renderSessionList();
@@ -5630,38 +5570,6 @@ window.posse.onAutoSwitchStatus((id, status, detail) => {
   } else {
     sessionAutoSwitchStatus.set(id, { status, detail });
   }
-  renderSessionList();
-});
-
-// Auto-continue config: mobile reads the desktop config via the main process
-window.posse.onGetAutoContinueConfig((sessionId) => {
-  const config = sessionAutoContinue.get(sessionId);
-  window.posse.sendAutoContinueConfig(sessionId, config || null);
-});
-
-// Auto-continue config: mobile writes the desktop config via the main process
-window.posse.onSetAutoContinueConfig((sessionId, config) => {
-  if (!config || !hasSessionInUI(sessionId)) return;
-  const existing = sessionAutoContinue.get(sessionId) || {
-    enabled: false,
-    messages: [...AUTO_CONTINUE_DEFAULT_MESSAGES],
-    intervalMs: AUTO_CONTINUE_DEFAULT_INTERVAL,
-    commandIntervalMs: AUTO_CONTINUE_DEFAULT_COMMAND_INTERVAL,
-    lastSendTime: Date.now(),
-    autoAgree: true,
-    autoAgreeDelaySec: AUTO_AGREE_DEFAULT_DELAY_SEC,
-    sendDelaySec: AUTO_CONTINUE_SEND_DELAY_SEC,
-    maxDurationMs: AUTO_CONTINUE_DEFAULT_MAX_DURATION,
-    enabledAt: 0,
-  };
-  Object.assign(existing, config);
-  existing.lastSendTime = Date.now();
-  if (config.enabled && !existing.enabledAt) {
-    existing.enabledAt = Date.now();
-  }
-  sessionAutoContinue.set(sessionId, existing);
-  saveAutoContinueToStorage();
-  if (existing.enabled) initAutoContinueTimer();
   renderSessionList();
 });
 
@@ -6261,6 +6169,10 @@ if (hostSwitcherBtn) {
 // When the active connection changes (switch / add / remove), refetch the navigator + file
 // tree so the sidebar reflects the new host's sessions and the file panel reroots.
 window.posse.onConnectionChanged(() => {
+  // Clear the local project selection — the new connection's sessions/projects are
+  // independent, so the old selectedProjectPath would be sent to the new backend
+  // (e.g. remote fsList) where that path doesn't exist, yielding an empty file tree.
+  selectedProjectPath = null;
   void refreshHostSwitcherLabel();
   void refreshSubscriptionState().then(updateTransferAffordances);
   void refreshProjectsData();

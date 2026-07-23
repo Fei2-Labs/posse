@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "discoverDevinSessions + ProjectsAgentId type widening touch backend session-discovery + IPC contracts; confirm backend conventions before editing src/main"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "ProjectsAgentId union also lives in renderer (app.ts:401) and feeds navigator grouping; confirm state conventions before widening the type + AGENT_ID_LABEL"}
+{"file": ".trellis/spec/shared/index.md", "reason": "ProjectsAgentId is shared between main + renderer; shared layer conventions for cross-process type contracts"}

@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Active Sessions project colors must be derived from stable project identity already used in sidebar state; confirm project identity conventions before implementing hashing/color state"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "project color will be rendered on the flattened session project chip; need sidebar row/chip conventions"}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "project chip styling must stay readable and fit the current row layout while adding color"}
