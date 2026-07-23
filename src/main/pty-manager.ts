@@ -697,14 +697,10 @@ export class PtyManager {
           const maxAccounts = getDevinAccountCount();
 
           if (session.rateLimitRetryCount <= RATE_LIMIT_RETRY_MAX) {
-            // Phase 1: send "continue" within the session to try to recover
-            console.log(`[PTY] Rate limit detected (${session.rateLimitRetryCount}/${RATE_LIMIT_RETRY_MAX}); sending "continue" in ${session.rateLimitRetryCount < RATE_LIMIT_RETRY_MAX ? '5' : 8}s (session: ${id})`);
-            session.retryTimer = setTimeout(() => {
-              session.retryTimer = null;
-              if (!this.sessions.has(id)) return;
-              ptyProcess.write('continue\r');
-              console.log(`[PTY] Sent "continue" (${session.rateLimitRetryCount}/${RATE_LIMIT_RETRY_MAX}) (session: ${id})`);
-            }, session.rateLimitRetryCount < RATE_LIMIT_RETRY_MAX ? 5000 : 8000);
+            // Auto-continue is intentionally disabled: keep the user in control of prompt retries.
+            console.log(
+              `[PTY] Rate limit detected (${session.rateLimitRetryCount}/${RATE_LIMIT_RETRY_MAX}); auto-continue disabled (session: ${id})`
+            );
           } else if (session.switchAttempts >= maxAccounts) {
             // Phase 3: all accounts have been tried, give up
             const errMsg = `\n⚠️ [Posse] All ${maxAccounts} accounts are exhausted; please try again later\n`;
@@ -751,18 +747,12 @@ export class PtyManager {
             }, 3000);
           }
         }
-        // Non-rate-limit ordinary warning -> send "continue" after 8s
+        // Non-rate-limit warning: auto-continue is disabled, so keep this signal informational only.
         else if (combinedLower.includes('⚠') || combinedLower.includes('something went wrong')) {
           session.prevData = '';
           if (Date.now() > session.autoRetryCooldown) {
-            console.log(`[PTY] ⚠ warning detected; sending "continue" after 8s (session: ${id})`);
+            console.log(`[PTY] ⚠ warning detected; auto-continue disabled (session: ${id})`);
             session.autoRetryCooldown = Date.now() + 10000;
-            session.retryTimer = setTimeout(() => {
-              session.retryTimer = null;
-              if (!this.sessions.has(id)) return;
-              ptyProcess.write('continue\r');
-              session.autoRetryCooldown = 0;
-            }, 8000);
           }
         }
       } else {
