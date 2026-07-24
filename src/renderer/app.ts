@@ -3,6 +3,7 @@ import { ChatView } from './chat-view';
 import { createFilePreview, isPreviewableExt, type FilePreview } from './file-preview';
 import { getAgentLogo } from './agent-logos';
 import { cleanupStaleProjectPersistence, normalizeProjectsListPayload } from './project-persistence';
+import { BareOscColorResponseFilter } from './terminal-output-filter';
 
 // Image extensions handled by the inline preview.
 function isImageExt(ext: string): boolean {
@@ -171,6 +172,9 @@ const sessionCwds: Map<string, string> = new Map();
 const sessionDisplayNames: Map<string, string> = new Map();
 // Actual model provider used by the session (e.g. MiniMax, GLM, Anthropic)
 const sessionProviders: Map<string, string> = new Map();
+const terminalOutputFilters: Map<string, BareOscColorResponseFilter> = new Map();
+const terminalOutputFlushTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+const TERMINAL_OUTPUT_FILTER_FLUSH_DELAY_MS = 50;
 // Live PTY -> the agent's on-disk session id (uuid). Used to dedup a live session against its
 // on-disk history row, and to focus (not duplicate) an already-open session on resume.
 const sessionAgentId: Map<string, string> = new Map();
@@ -2059,6 +2063,38 @@ const termManager = new TerminalManager(terminalContent, (id, cols, rows) => {
   statusDbg('resize', id, `cols=${cols} rows=${rows}`);
   window.posse.resizePty(id, cols, rows);
 });
+
+function writeTerminalOutput(id: string, data: string): void {
+  const isDevinSession = sessionProviders.get(id) === 'Devin'
+    || agentFamilyFromDisplayName(sessionDisplayNames.get(id) || '') === 'Devin';
+  if (!isDevinSession) {
+    termManager.write(id, data);
+    return;
+  }
+
+  const existingTimer = terminalOutputFlushTimers.get(id);
+  if (existingTimer !== undefined) {
+    clearTimeout(existingTimer);
+    terminalOutputFlushTimers.delete(id);
+  }
+
+  let filter = terminalOutputFilters.get(id);
+  if (!filter) {
+    filter = new BareOscColorResponseFilter();
+    terminalOutputFilters.set(id, filter);
+  }
+  const output = filter.write(data);
+  if (output) termManager.write(id, output);
+
+  if (filter.hasPending()) {
+    terminalOutputFlushTimers.set(id, setTimeout(() => {
+      terminalOutputFlushTimers.delete(id);
+      const currentFilter = terminalOutputFilters.get(id);
+      const pending = currentFilter?.drain() || '';
+      if (pending) termManager.write(id, pending);
+    }, TERMINAL_OUTPUT_FILTER_FLUSH_DELAY_MS));
+  }
+}
 
 // Terminal clicks on previewable paths (.md/.html/images) open the preview pane.
 termManager.setPreviewHandler((filePath) => {
@@ -4297,7 +4333,7 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   sessionLastAttachAt.set(info.id, Date.now());
   termManager.create(info.id, info.themeId, info.cwd, (data) => { writePtyWithInputTracking(info.id, data); });
   if (replayRawBuffer && info.rawBuffer) {
-    termManager.write(info.id, info.rawBuffer);
+    writeTerminalOutput(info.id, info.rawBuffer);
   }
   // A live/restored session may be the only reference to this checkout.
   void refreshProjectsData();
@@ -4660,6 +4696,10 @@ function clearSessionState(id: string): void {
   sessionCwds.delete(id);
   sessionDisplayNames.delete(id);
   sessionProviders.delete(id);
+  const outputFlushTimer = terminalOutputFlushTimers.get(id);
+  if (outputFlushTimer !== undefined) clearTimeout(outputFlushTimer);
+  terminalOutputFlushTimers.delete(id);
+  terminalOutputFilters.delete(id);
   sessionAgentId.delete(id);
   sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
@@ -5291,7 +5331,7 @@ async function openSshSession(host: string): Promise<void> {
 // ========== IPC listeners ==========
 
 window.posse.onPtyData((id, data) => {
-  termManager.write(id, data);
+  writeTerminalOutput(id, data);
   if (STATUS_DBG) {
     const hex = Array.from(data.slice(0, 40)).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
     statusDbg('onPtyData', id, `len=${data.length} hex=${hex}`);

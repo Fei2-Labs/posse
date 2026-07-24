@@ -1,0 +1,3 @@
+{"file":".trellis/spec/frontend/quality.md","reason":"Review renderer changes for type safety and maintainability."}
+{"file":".trellis/spec/guides/bug-root-cause-thinking-guide.md","reason":"Verify the regression test targets the demonstrated root cause."}
+{"file":".trellis/tasks/07-24-fix-devin-resume-osc-color-leak-closes-72/research/xterm-osc-color-flow.md","reason":"Check implementation against captured byte-flow evidence."}

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend package conventions and required guidance index."}
+{"file":".trellis/spec/frontend/quality.md","reason":"Type safety and renderer code quality requirements."}
+{"file":".trellis/spec/guides/pre-implementation-checklist.md","reason":"Reuse, lifecycle, and bounded-state checks for the streaming filter."}
+{"file":".trellis/tasks/07-24-fix-devin-resume-osc-color-leak-closes-72/research/xterm-osc-color-flow.md","reason":"Verified xterm and daemon byte-flow findings that constrain the fix."}

@@ -26,6 +26,7 @@
 | [directory-structure.md](./directory-structure.md)                             | Project structure conventions                   | Reference     |
 | [css-design.md](./css-design.md)                                               | CSS organization and design tokens              | Reference     |
 | [quality.md](./quality.md)                                                     | Code quality and performance standards          | Reference     |
+| [terminal-output.md](./terminal-output.md)                               | PTY output compatibility and OSC filtering      | Reference     |
 
 ---
 
