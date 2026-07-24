@@ -1802,8 +1802,43 @@ html, body {
   box-shadow: 0 0 0 2px rgba(226, 163, 54, 0.18);
 }
 
-.nav-session-dot-busy {
-  animation: nav-dot-pulse 1.2s ease-in-out infinite;
+/* Copilot Desktop-style dual-row animated wave dots for the busy/running state.
+   The dot span becomes a 2-row × 3-col grid of tiny dots that pulse in a
+   staggered wave from top-left to bottom-right. Pure CSS, no JS timers. */
+.nav-session-dot-wave {
+  width: 10px;
+  height: 8px;
+  background: transparent !important;
+  display: grid;
+  grid-template-columns: repeat(3, 2px);
+  grid-template-rows: repeat(2, 2px);
+  gap: 1px;
+  align-items: center;
+  justify-items: center;
+}
+
+.nav-session-dot-wave .wave-dot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #e5a100;
+  opacity: 0.3;
+  transform: scale(0.8);
+  animation: wave-pulse 1.2s ease-in-out infinite;
+}
+
+/* Staggered delays: wave from top-left to bottom-right.
+   dot0=0ms, dot1=150ms, dot2=300ms, dot3=150ms, dot4=300ms, dot5=450ms */
+.nav-session-dot-wave .wave-dot:nth-child(1) { animation-delay: 0ms; }
+.nav-session-dot-wave .wave-dot:nth-child(2) { animation-delay: 150ms; }
+.nav-session-dot-wave .wave-dot:nth-child(3) { animation-delay: 300ms; }
+.nav-session-dot-wave .wave-dot:nth-child(4) { animation-delay: 150ms; }
+.nav-session-dot-wave .wave-dot:nth-child(5) { animation-delay: 300ms; }
+.nav-session-dot-wave .wave-dot:nth-child(6) { animation-delay: 450ms; }
+
+@keyframes wave-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
 }
 
 .nav-session-dot-warn {

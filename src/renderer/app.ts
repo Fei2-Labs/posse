@@ -3047,6 +3047,12 @@ function makeSessionPinButton(convKey: string): HTMLButtonElement {
   return btn;
 }
 
+// InnerHTML for the 6 wave dots (2 rows × 3 columns) rendered inside the dot span
+// when a session is busy. Pure CSS animation — no JS timers.
+function buildWaveDotsHTML(): string {
+  return '<span class="wave-dot"></span>'.repeat(6);
+}
+
 // Apply the current busy/unread/waiting status to an existing live-session row's dot IN PLACE,
 // without touching the rest of the row. Used to keep other rows' dots live while renderSessionList()
 // is skipping the full rebuild because a title elsewhere is being edited (app.ts ~3283) — a busy
@@ -3054,19 +3060,23 @@ function makeSessionPinButton(convKey: string): HTMLButtonElement {
 // timer) before the dot goes orange.
 function refreshLiveDotInPlace(id: string): void {
   const row = sessionList.querySelector(`.nav-session[data-session-id="${id}"][data-session-type="pty"]`);
-  const dot = row?.querySelector('.nav-session-dot, .nav-session-dot-warn') as HTMLElement | null;
+  const dot = row?.querySelector('.nav-session-dot, .nav-session-dot-warn, .nav-session-dot-wave') as HTMLElement | null;
   if (!dot) return;
   dot.className = 'nav-session-dot';
   dot.textContent = '';
+  dot.innerHTML = '';
   dot.style.color = '';
   if (sessionWaiting.has(id)) {
     dot.textContent = '⚠';
     dot.classList.add('nav-session-dot-warn');
     dot.style.color = '#ff5c4d';
     dot.style.backgroundColor = 'transparent';
+  } else if (sessionBusy.has(id)) {
+    dot.classList.add('nav-session-dot-wave');
+    dot.style.backgroundColor = 'transparent';
+    dot.innerHTML = buildWaveDotsHTML();
   } else {
     dot.style.backgroundColor = sessionStatusColor(id);
-    if (sessionBusy.has(id)) dot.classList.add('nav-session-dot-busy');
   }
 }
 
@@ -3088,9 +3098,13 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
     dot.classList.add('nav-session-dot-warn');
     dot.style.color = '#ff5c4d';
     dot.style.backgroundColor = 'transparent';
+  } else if (sessionBusy.has(id)) {
+    // AI working → render dual-row animated wave dots
+    dot.classList.add('nav-session-dot-wave');
+    dot.style.backgroundColor = 'transparent';
+    dot.innerHTML = buildWaveDotsHTML();
   } else {
     dot.style.backgroundColor = sessionStatusColor(id);
-    if (sessionBusy.has(id)) dot.classList.add('nav-session-dot-busy');
   }
 
   const titleSpan = document.createElement('span');
