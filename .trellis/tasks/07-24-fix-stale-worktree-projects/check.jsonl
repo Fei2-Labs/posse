@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality.md", "reason": "Check reuse, mapping consistency, and focused source changes."}
+{"file": ".trellis/spec/backend/database.md", "reason": "Verify current and legacy Copilot schema queries and unique-match safety."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify missing DB/tables/rows degrade without incorrect grouping."}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Check explicit types, no duplication, and regression coverage at the real seam."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify stale extra folders cannot recreate canonicalized history buckets."}

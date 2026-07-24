@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Preserve the canonical Git project identity contract and grouping-only aliases."}
+{"file": ".trellis/spec/backend/database.md", "reason": "Read Copilot SQLite schemas defensively across schema drift without mutating external data."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Keep metadata discovery best-effort while avoiding silent incorrect mappings."}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "Maintain explicit internal session/repository and mapping types."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Trace historical session cwd, extraFolders, backend aliases, renderer migration, and execution cwd."}
+{"file": ".trellis/tasks/07-24-group-agent-worktrees/research/worktree-canonical-root.md", "reason": "Retain Git-first identity semantics and avoid folder-name/remote heuristics for live paths."}

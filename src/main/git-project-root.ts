@@ -7,6 +7,13 @@ export type GitProjectRootResult = {
   canonicalPath: string;
 };
 
+export type CanonicalProjectPathChoice = {
+  inputPath: string;
+  gitCanonicalPath: string;
+  explicitFallbackPath?: string;
+  inputExists: boolean;
+};
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 1000;
 const cache = new Map<string, { value: string; expiresAt: number }>();
@@ -146,6 +153,43 @@ export async function resolveGitProjectRoots(inputs: string[], concurrency = 6):
   });
   await Promise.all(workers);
   return results;
+}
+
+/**
+ * Git remains authoritative for paths that still exist. Explicit provider
+ * metadata may identify a deleted checkout after Git can no longer inspect it.
+ */
+export function chooseCanonicalProjectPath(choice: CanonicalProjectPathChoice): string {
+  const normalizedInput = path.resolve(choice.inputPath);
+  const normalizedGitResult = path.resolve(choice.gitCanonicalPath || choice.inputPath);
+  const gitResolvedInputUnchanged = process.platform === 'win32'
+    ? normalizedGitResult.toLowerCase() === normalizedInput.toLowerCase()
+    : normalizedGitResult === normalizedInput;
+  if (choice.inputExists || !choice.explicitFallbackPath || !gitResolvedInputUnchanged) {
+    return choice.gitCanonicalPath || choice.inputPath;
+  }
+  return choice.explicitFallbackPath;
+}
+
+/**
+ * Apply the same Git-first fallback pipeline to every source of project paths.
+ * The caller supplies existence checks so this helper remains deterministic in
+ * tests and usable by the main-process project builder.
+ */
+export function applyExplicitProjectPathFallbacks(
+  resolved: GitProjectRootResult[],
+  explicitFallbacks: ReadonlyMap<string, string>,
+  inputExists: (inputPath: string) => boolean,
+): GitProjectRootResult[] {
+  return resolved.map((item) => ({
+    cwd: item.cwd,
+    canonicalPath: chooseCanonicalProjectPath({
+      inputPath: item.cwd,
+      gitCanonicalPath: item.canonicalPath,
+      explicitFallbackPath: explicitFallbacks.get(item.cwd),
+      inputExists: inputExists(item.cwd),
+    }),
+  }));
 }
 
 /** Pure bucketing seam used by project builders and regression tests. */

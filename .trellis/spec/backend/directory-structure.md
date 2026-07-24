@@ -157,6 +157,13 @@ path grouped under the record's canonical `path`.
 - Project aliases affect grouping/comparison only. Session cwd remains raw.
 - Sanitize inherited `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`, and
   `GIT_INDEX_FILE` before repository discovery.
+- Apply one canonical pipeline to every path source, including persisted
+  `extraFolders`; otherwise a stale saved checkout can recreate a second bucket
+  after its history session was canonicalized.
+- When a checkout was deleted, an explicit provider mapping may supply the
+  canonical path only if the input is missing and Git returned it unchanged.
+  Prefer durable checkout bindings; repository-name matching is allowed only
+  when it uniquely identifies one registered project.
 
 ### 4. Validation & Error Matrix
 
@@ -166,6 +173,9 @@ path grouped under the record's canonical `path`.
 | More than 2000 paths | HTTP 413 `too-many-paths` |
 | Empty, non-string, or >4096-char path | HTTP 400 `invalid-path` |
 | Git unavailable/non-Git/timeout | Return input cwd as `canonicalPath` |
+| Missing path + explicit unique provider mapping | Use mapped canonical path and retain missing path as alias |
+| Existing path or Git resolved a different root | Ignore provider fallback; Git wins |
+| Missing path with no/ambiguous provider mapping | Preserve input path; do not guess or delete |
 | Old remote lacks endpoint | Client falls back one-to-one to input cwd |
 | Separate clones share a remote | Keep separate; common dirs differ |
 
@@ -186,6 +196,9 @@ path grouped under the record's canonical `path`.
 - Inherited Git repository-selection environment variables do not reroot an
   unrelated cwd.
 - Bucketing exposes raw worktree aliases under one canonical path.
+- A deleted historical cwd supplied again through `extraFolders` produces one
+  canonical bucket, not a stale duplicate.
+- Unknown missing folders and ambiguous repository matches remain unchanged.
 
 ### 7. Wrong vs Correct
 

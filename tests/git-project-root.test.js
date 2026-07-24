@@ -6,7 +6,9 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+  applyExplicitProjectPathFallbacks,
   bucketPathsByCanonicalRoot,
+  chooseCanonicalProjectPath,
   resolveGitProjectRoot,
   resolveGitProjectRoots,
 } = require('../dist/main/git-project-root.js');
@@ -90,4 +92,44 @@ test('ignores inherited Git repository-selection overrides', async (t) => {
     if (previousGitDir === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = previousGitDir;
   }
+});
+
+test('coalesces a missing historical cwd and stale extra folder via explicit metadata', () => {
+  const historicalCwd = '/missing/copilot-worktree';
+  const extraFolder = historicalCwd;
+  const root = '/projects/main-checkout';
+  const resolved = applyExplicitProjectPathFallbacks(
+    [{ cwd: historicalCwd, canonicalPath: historicalCwd }],
+    new Map([[historicalCwd, root]]),
+    () => false,
+  );
+
+  const buckets = bucketPathsByCanonicalRoot(
+    [historicalCwd, extraFolder],
+    resolved,
+  );
+
+  assert.deepEqual(buckets, [{ path: root, aliases: [historicalCwd, root] }]);
+});
+
+test('uses metadata only for missing paths and preserves unknown missing folders', () => {
+  assert.equal(chooseCanonicalProjectPath({
+    inputPath: '/projects/live-worktree',
+    gitCanonicalPath: '/projects/git-root',
+    explicitFallbackPath: '/projects/stale-metadata-root',
+    inputExists: true,
+  }), '/projects/git-root');
+
+  assert.equal(chooseCanonicalProjectPath({
+    inputPath: '/missing/manual-folder',
+    gitCanonicalPath: '/missing/manual-folder',
+    inputExists: false,
+  }), '/missing/manual-folder');
+
+  assert.equal(chooseCanonicalProjectPath({
+    inputPath: '/projects/checkout-removed-after-git-ran',
+    gitCanonicalPath: '/projects/git-root',
+    explicitFallbackPath: '/projects/stale-metadata-root',
+    inputExists: false,
+  }), '/projects/git-root');
 });

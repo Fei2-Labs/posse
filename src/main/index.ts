@@ -7,7 +7,7 @@ import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
 import { RemoteServerBackend } from './remote-server-backend';
-import { resolveGitProjectRoots } from './git-project-root';
+import { applyExplicitProjectPathFallbacks, resolveGitProjectRoots } from './git-project-root';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
 import { loadSubscriptionToken, saveSubscriptionToken, clearSubscriptionToken, subscriptionTokenStatus } from './subscription-token';
 import { AIConfigManager } from './ai-config';
@@ -1250,6 +1250,8 @@ type ProjectSession = {
 // Internal flat record before bucketing
 type DiscoveredSession = ProjectSession & {
   cwd: string; // absolute project folder (may be '' / '/' when unknown)
+  // Provider-internal repository identity used only for safe stale-path grouping.
+  repository?: string;
 };
 
 type ProjectEntry = {
@@ -1565,7 +1567,7 @@ function discoverCopilotSessions(): DiscoveredSession[] {
 
     // Try node's built-in sqlite first (Node >= 22.5 with --experimental-sqlite),
     // fall back to shelling out to the `sqlite3` binary if present.
-    type Row = { id?: string; cwd?: string; summary?: string; updated_at?: string };
+    type Row = { id?: string; cwd?: string; repository?: string; summary?: string; updated_at?: string };
     let rows: Row[] = [];
 
     let usedNode = false;
@@ -1580,9 +1582,16 @@ function discoverCopilotSessions(): DiscoveredSession[] {
       if (sqlite?.DatabaseSync) {
         const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
         try {
-          rows = db.prepare(
-            'SELECT id, cwd, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100'
-          ).all() as Row[];
+          try {
+            rows = db.prepare(
+              'SELECT id, cwd, repository, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100'
+            ).all() as Row[];
+          } catch {
+            // Older Copilot schemas did not expose repository identity.
+            rows = db.prepare(
+              'SELECT id, cwd, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100'
+            ).all() as Row[];
+          }
           usedNode = true;
         } finally {
           db.close();
@@ -1593,11 +1602,20 @@ function discoverCopilotSessions(): DiscoveredSession[] {
     if (!usedNode) {
       try {
         const { execFileSync } = require('child_process') as typeof import('child_process');
-        const raw = execFileSync(
-          'sqlite3',
-          ['-json', dbPath, 'SELECT id, cwd, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100;'],
-          { encoding: 'utf-8', timeout: 5000 }
-        );
+        let raw: string;
+        try {
+          raw = execFileSync(
+            'sqlite3',
+            ['-json', dbPath, 'SELECT id, cwd, repository, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100;'],
+            { encoding: 'utf-8', timeout: 5000 }
+          );
+        } catch {
+          raw = execFileSync(
+            'sqlite3',
+            ['-json', dbPath, 'SELECT id, cwd, summary, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 100;'],
+            { encoding: 'utf-8', timeout: 5000 }
+          );
+        }
         const parsed = JSON.parse(raw || '[]') as Row[];
         if (Array.isArray(parsed)) rows = parsed;
       } catch { /* sqlite3 binary missing / query failed -> degrade to empty */ }
@@ -1621,16 +1639,17 @@ function discoverCopilotSessions(): DiscoveredSession[] {
         mtimeMs,
         resumeCommand: `copilot --resume ${id}`,
         sourcePath: '', // sqlite-backed: delete routes by id, not a file path
+        repository: typeof r.repository === 'string' ? r.repository.trim() : '',
       });
     }
   } catch { /* never throw - Copilot is best-effort */ }
   return out;
 }
 
-// --- Copilot Desktop workspace map: ~/.copilot/data.db (projects/workspaces/worktrees) ---
+// --- Copilot Desktop workspace map: ~/.copilot/data.db ---
 // Best-effort map from worktree-backed workspace cwd -> canonical repo root (main_repo_path).
-// This is only used to rebucket Copilot history sessions under the parent project.
-function discoverCopilotWorktreeProjectMap(): Map<string, string> {
+// Session repository identity is used only when exactly one registered project matches.
+function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[]): Map<string, string> {
   const mapping = new Map<string, string>();
   try {
     const dbPath = path.join(os.homedir(), '.copilot', 'data.db');
@@ -1638,11 +1657,18 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
 
     type Row = Record<string, unknown>;
     const rows: Row[] = [];
+    const projectRows: Row[] = [];
 
     const pushRows = (incoming: unknown): void => {
       if (!Array.isArray(incoming)) return;
       for (const row of incoming) {
         if (row && typeof row === 'object') rows.push(row as Row);
+      }
+    };
+    const pushProjectRows = (incoming: unknown): void => {
+      if (!Array.isArray(incoming)) return;
+      for (const row of incoming) {
+        if (row && typeof row === 'object') projectRows.push(row as Row);
       }
     };
 
@@ -1675,10 +1701,23 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
              FROM worktrees wt
              JOIN projects p ON p.id = wt.project_id
              WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL`,
+            // Durable checkout binding retained after a worktree row is removed.
+            `SELECT checkout_path AS worktree_path, repo_path AS main_repo_path
+             FROM workspace_checkout_bindings
+             WHERE checkout_path IS NOT NULL AND repo_path IS NOT NULL`,
           ];
           for (const q of queries) {
             try { pushRows(db.prepare(q).all()); } catch { /* schema drift -> try next */ }
           }
+          try {
+            pushProjectRows(db.prepare(
+              `SELECT main_repo_path, github_owner, github_repo
+               FROM projects
+               WHERE main_repo_path IS NOT NULL
+                 AND github_owner IS NOT NULL
+                 AND github_repo IS NOT NULL`
+            ).all());
+          } catch { /* schema drift -> repository fallback unavailable */ }
           usedNode = true;
         } finally {
           db.close();
@@ -1704,6 +1743,9 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
            FROM worktrees wt
            JOIN projects p ON p.id = wt.project_id
            WHERE wt.path IS NOT NULL AND p.main_repo_path IS NOT NULL;`,
+          `SELECT checkout_path AS worktree_path, repo_path AS main_repo_path
+           FROM workspace_checkout_bindings
+           WHERE checkout_path IS NOT NULL AND repo_path IS NOT NULL;`,
         ];
         for (const q of queries) {
           try {
@@ -1714,6 +1756,16 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
             pushRows(JSON.parse(raw || '[]'));
           } catch { /* query/table may be absent */ }
         }
+        try {
+          const raw = execFileSync('sqlite3', ['-json', dbPath,
+            `SELECT main_repo_path, github_owner, github_repo
+             FROM projects
+             WHERE main_repo_path IS NOT NULL
+               AND github_owner IS NOT NULL
+               AND github_repo IS NOT NULL;`
+          ], { encoding: 'utf-8', timeout: 5000 });
+          pushProjectRows(JSON.parse(raw || '[]'));
+        } catch { /* query/columns may be absent */ }
       } catch { /* sqlite3 binary missing */ }
     }
 
@@ -1729,6 +1781,28 @@ function discoverCopilotWorktreeProjectMap(): Map<string, string> {
       if (!workspacePath || !canonicalProjectPath) continue;
 
       mapping.set(workspacePath, canonicalProjectPath);
+    }
+
+    const projectsByRepository = new Map<string, string[]>();
+    for (const row of projectRows) {
+      const owner = typeof row.github_owner === 'string' ? row.github_owner.trim() : '';
+      const repo = typeof row.github_repo === 'string' ? row.github_repo.trim() : '';
+      const mainRepoRaw = typeof row.main_repo_path === 'string' ? row.main_repo_path : '';
+      if (!owner || !repo || !mainRepoRaw) continue;
+      const repository = `${owner}/${repo}`.toLowerCase();
+      const canonicalPath = normalizeRemapCwd(path.resolve(mainRepoRaw));
+      if (!canonicalPath) continue;
+      const matches = projectsByRepository.get(repository) || [];
+      matches.push(canonicalPath);
+      projectsByRepository.set(repository, matches);
+    }
+
+    for (const session of copilotSessions) {
+      if (!session.cwd || !session.repository) continue;
+      const matches = projectsByRepository.get(session.repository.trim().toLowerCase());
+      if (!matches || matches.length !== 1) continue;
+      const sessionPath = normalizeRemapCwd(path.resolve(session.cwd));
+      if (sessionPath && !mapping.has(sessionPath)) mapping.set(sessionPath, matches[0]);
     }
   } catch { /* never throw - mapping is optional enhancement */ }
   return mapping;
@@ -1840,20 +1914,16 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
 
   const archivedIds = loadArchivedSessionIds();
   const pathRemaps = loadPathRemaps();
-  const copilotWorktreeProjectMap = discoverCopilotWorktreeProjectMap();
+  const copilotWorktreeProjectMap = discoverCopilotWorktreeProjectMap(
+    discovered.filter((session) => session.agent === 'copilot'),
+  );
   const effectiveSessionCwds = new Map<DiscoveredSession, string>();
   const groupingSessionCwds = new Map<DiscoveredSession, string>();
   for (const session of discovered) {
     if (!session.cwd) continue;
     const effectiveCwd = resolveRemappedCwd(session.cwd, pathRemaps);
-    let groupingCwd = effectiveCwd;
-    // Git is authoritative while the checkout exists. The Copilot DB is only a
-    // fallback for vanished worktrees whose metadata can no longer be queried.
-    if (session.agent === 'copilot' && !fs.existsSync(effectiveCwd)) {
-      groupingCwd = copilotWorktreeProjectMap.get(normalizeRemapCwd(session.cwd)) || effectiveCwd;
-    }
     effectiveSessionCwds.set(session, effectiveCwd);
-    groupingSessionCwds.set(session, groupingCwd);
+    groupingSessionCwds.set(session, effectiveCwd);
   }
   const effectiveExtraFolders = extraFolders
     .map((folder) => String(folder || '').trim())
@@ -1864,7 +1934,17 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
     ...groupingSessionCwds.values(),
     ...effectiveExtraFolders,
   ];
-  const resolvedRoots = await resolveGitProjectRoots(pathsToResolve);
+  const explicitFallbacks = new Map<string, string>();
+  for (const inputPath of pathsToResolve) {
+    const metadataFallback = copilotWorktreeProjectMap.get(normalizeRemapCwd(inputPath));
+    if (metadataFallback) explicitFallbacks.set(inputPath, metadataFallback);
+  }
+  const gitResolvedRoots = await resolveGitProjectRoots(pathsToResolve);
+  const resolvedRoots = applyExplicitProjectPathFallbacks(
+    gitResolvedRoots,
+    explicitFallbacks,
+    fs.existsSync,
+  );
   const canonicalByPath = new Map(resolvedRoots.map((item) => [item.cwd, item.canonicalPath]));
 
   const COPILOT_NO_FOLDER = '__copilot_no_folder__';
@@ -1939,6 +2019,7 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
       const abs = resolveRemappedCwd(rawAbs, pathRemaps);
       const canonicalAbs = canonicalByPath.get(abs) || abs;
       const bucket = getBucket(canonicalAbs, canonicalAbs, path.basename(canonicalAbs) || canonicalAbs);
+      bucket.aliases.add(rawAbs);
       bucket.aliases.add(abs);
 
       const mergeIntoBucket = (sessions: DiscoveredSession[]) => {
