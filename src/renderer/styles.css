@@ -3372,3 +3372,27 @@ select.ai-form-input {
     border-radius: 6px 0 0 6px;
   }
 }
+
+/* ===== Minimal inline toast (project-add confirmation) ===== */
+.nav-toast {
+  position: fixed;
+  left: calc(var(--sidebar-width) / 2);
+  transform: translateX(-50%);
+  bottom: 24px;
+  background: var(--bg-secondary, #161d20);
+  color: var(--text-primary, #c9d1d1);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #1f2a24);
+  z-index: 1000;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.nav-toast.nav-toast-visible {
+  opacity: 1;
+}

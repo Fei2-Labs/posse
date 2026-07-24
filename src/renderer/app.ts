@@ -4078,6 +4078,24 @@ function showProjectMenu(e: MouseEvent, p: ProjectEntry): void {
   positionNavMenu(menu, e);
 }
 
+// Minimal inline toast: a transient confirmation banner pinned to the bottom of the sidebar.
+// Used for "project added" / "already in list" feedback — no general notification system, just a
+// short-lived div with a fade-in/fade-out transition that auto-removes after durationMs.
+function showToast(message: string, durationMs = 2000): void {
+  // Avoid stacking duplicates: clear any toast already on screen.
+  document.querySelectorAll('.nav-toast').forEach(el => el.remove());
+  const toast = document.createElement('div');
+  toast.className = 'nav-toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  // Trigger fade-in on the next frame so the transition runs.
+  requestAnimationFrame(() => toast.classList.add('nav-toast-visible'));
+  window.setTimeout(() => {
+    toast.classList.remove('nav-toast-visible');
+    window.setTimeout(() => toast.remove(), 250);
+  }, durationMs);
+}
+
 // "+" on the Projects header → dropdown to add a project.
 // "Start from scratch" creates a brand-new GitHub repo via `gh repo create --clone`, then adds the
 // local clone as a project. "Use an existing folder" opens the native folder picker and adds the
@@ -4095,7 +4113,18 @@ function showAddProjectMenu(e: MouseEvent): void {
       label: 'Use an existing folder',
       action: async () => {
         const folder = await window.posse.selectFolder(currentCwd || undefined);
-        if (folder) { addProject(folder); selectProject(folder); void refreshProjectsData(); }
+        if (!folder) return; // user cancelled the folder picker — silent
+        const existing = !!findProject(folder);
+        const name = folder.split('/').pop() || folder;
+        addProject(folder);
+        selectProject(folder);
+        void refreshProjectsData();
+        showToast(existing ? `Already in project list: ${name}` : `Project added: ${name}`);
+        // Scroll the newly added/selected project row into view after the re-render settles.
+        window.setTimeout(() => {
+          const row = document.querySelector('.nav-project-row.selected') as HTMLElement | null;
+          if (row) row.scrollIntoView({ block: 'nearest' });
+        }, 100);
       },
     },
   ];
