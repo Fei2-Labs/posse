@@ -3603,7 +3603,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
 }
 
 // Gather every pinned session across all projects into time-desc rows for the top
-// "Pinned" section. Pinned sessions ignore the active agent tab (always quick-access)
+// "Pinned" section. Pinned sessions are filtered by the active agent tab
 // and each row carries an agent tag since they're mixed. Deduped by conversationKey.
 function collectPinnedSessionRows(activeId: string | null): Array<{ time: number; el: HTMLElement }> {
   const out: Array<{ time: number; el: HTMLElement }> = [];
@@ -3611,6 +3611,7 @@ function collectPinnedSessionRows(activeId: string | null): Array<{ time: number
   for (const p of projects) {
     const groups = getProjectSessions(p.path);
     for (const [family, g] of groups) {
+      if (activeAgentTab !== 'all' && family !== activeAgentTab) continue;
       for (const id of g.lives) {
         const k = liveSessionPinKey(id);
         if (!isSessionPinned(k) || seen.has(k)) continue;
@@ -3639,8 +3640,8 @@ function collectPinnedSessionRows(activeId: string | null): Array<{ time: number
 }
 
 // Gather EVERY live session across all projects into time-desc rows for the top
-// "Active Sessions" section (#28). Like Pinned, it ignores the active agent tab — every live
-// session is shown — each row carrying an agent tag (mixed agents) + a project chip (#29).
+// "Active Sessions" section (#28). Like Pinned, it is filtered by the active agent tab —
+// each row carrying an agent tag (mixed agents) + a project chip (#29).
 // Deduped by liveSessionPinKey. A pinned live session may also appear in Pinned; that overlap
 // is intentional (not deduped across sections), so this collector does not skip pinned rows.
 function collectActiveSessionRows(activeId: string | null): Array<{ time: number; el: HTMLElement }> {
@@ -3649,6 +3650,7 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
   for (const p of projects) {
     const groups = getProjectSessions(p.path);
     for (const [family, g] of groups) {
+      if (activeAgentTab !== 'all' && family !== activeAgentTab) continue;
       for (const id of g.lives) {
         const k = liveSessionPinKey(id);
         if (seen.has(k)) continue;
@@ -3693,6 +3695,7 @@ function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
   const sorted = [...closedSessions].sort((a, b) => b.closedAt - a.closedAt);
   for (const cs of sorted) {
     if (cs.resumeId && removedHistoryKeys.has(conversationKey(cs.resumeId))) continue;
+    if (activeAgentTab !== 'all' && agentFamilyFromDisplayName(cs.displayName || '') !== activeAgentTab) continue;
     const k = closedSessionRecentKey(cs);
     if (seen.has(k)) continue;
     seen.add(k);
