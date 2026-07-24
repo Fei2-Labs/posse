@@ -21,6 +21,13 @@ to the canonical root project.
   `data.db.projects` GitHub owner/repo and canonical `main_repo_path`.
 - The first fix remapped discovered sessions, but canonicalized `extraFolders`
   independently. A stale localStorage path therefore recreated a second bucket.
+- A later runtime check found two additional non-single-repo cases:
+  - `master-studious-spork` is an existing non-Git collection container with
+    five child worktree checkout bindings under one Copilot workspace/project;
+    it should group under `/Users/clarezoe/My Apps/Kompany`.
+  - `multica-copilot-discovery-3817957009` is a missing macOS temporary
+    directory with no repository/workspace metadata; it is stale and cannot be
+    mapped safely.
 
 ## Ranked Hypotheses
 
@@ -43,6 +50,10 @@ to the canonical root project.
 - Preserve generated worktree paths as aliases so renderer state migrates.
 - Do not infer identity from generated folder names.
 - Do not delete unknown missing folders that lack trustworthy metadata.
+- Map explicit Copilot multi-repo collection containers to their registered
+  collection project even when the container directory still exists.
+- Hide missing system-temporary Copilot session paths that have no trustworthy
+  project metadata, and remove their stale persisted sidebar row.
 
 ## Acceptance Criteria
 
@@ -54,6 +65,9 @@ to the canonical root project.
 - [ ] The same stale path supplied as both a historical session cwd and an
       `extraFolder` produces one canonical bucket.
 - [ ] Unknown missing manually-added folders remain unchanged.
+- [ ] `master-studious-spork` groups under the registered `Kompany` collection.
+- [ ] The missing `multica-copilot-discovery-3817957009` temporary project row
+      disappears without guessing a canonical repository.
 - [ ] Existing live worktree, normal checkout, non-Git, and remote behavior
       remains intact.
 
@@ -66,6 +80,13 @@ to the canonical root project.
   extra folders; Git remains authoritative for paths that still exist.
 - Add a regression seam/test for deleted worktree + stale extra folder
   coalescing.
+- Derive an existing collection container from multiple checkout bindings tied
+  to one collection workspace/project; this explicit container mapping may
+  override an unchanged non-Git path.
+- Treat missing paths under the host OS temporary directory as ephemeral only
+  when they originate from Copilot history and have no explicit mapping.
+  Propagate enough backend state for renderer persistence cleanup without
+  deleting ordinary missing folders.
 
 ## Decision
 
@@ -77,4 +98,3 @@ not allowed, and unknown missing folders are preserved.
 - Deleting arbitrary missing folders from user project history.
 - Grouping separate clones solely by remote URL.
 - Changing PTY/resume/file cwd.
-

@@ -7,7 +7,13 @@ import { PtyBackend } from './pty-backend';
 import { PtyDaemonClient } from './pty-daemon-client';
 import { ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry';
 import { RemoteServerBackend } from './remote-server-backend';
-import { applyExplicitProjectPathFallbacks, resolveGitProjectRoots } from './git-project-root';
+import {
+  applyExplicitProjectPathFallbacks,
+  deriveCopilotCollectionProjectMappings,
+  isStaleEphemeralCopilotHistoryPath,
+  resolveGitProjectRoots,
+  type ExplicitProjectPathMapping,
+} from './git-project-root';
 import { loadOrCreatePtyDaemonConfig } from './pty-daemon-config';
 import { loadSubscriptionToken, saveSubscriptionToken, clearSubscriptionToken, subscriptionTokenStatus } from './subscription-token';
 import { AIConfigManager } from './ai-config';
@@ -1262,6 +1268,12 @@ type ProjectEntry = {
   lastActiveMs: number;
 };
 
+type ProjectsListResponse = {
+  projects: ProjectEntry[];
+  /** Backend-confirmed stale persisted paths; these are not project rows. */
+  staleProjectPaths: string[];
+};
+
 const PROJECTS_MAX_SESSIONS_PER_AGENT = 50;
 
 
@@ -1649,8 +1661,10 @@ function discoverCopilotSessions(): DiscoveredSession[] {
 // --- Copilot Desktop workspace map: ~/.copilot/data.db ---
 // Best-effort map from worktree-backed workspace cwd -> canonical repo root (main_repo_path).
 // Session repository identity is used only when exactly one registered project matches.
-function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[]): Map<string, string> {
-  const mapping = new Map<string, string>();
+function discoverCopilotWorktreeProjectMap(
+  copilotSessions: DiscoveredSession[],
+): Map<string, ExplicitProjectPathMapping> {
+  const mapping = new Map<string, ExplicitProjectPathMapping>();
   try {
     const dbPath = path.join(os.homedir(), '.copilot', 'data.db');
     if (!fs.existsSync(dbPath)) return mapping;
@@ -1658,6 +1672,7 @@ function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[])
     type Row = Record<string, unknown>;
     const rows: Row[] = [];
     const projectRows: Row[] = [];
+    const collectionRows: Row[] = [];
 
     const pushRows = (incoming: unknown): void => {
       if (!Array.isArray(incoming)) return;
@@ -1669,6 +1684,12 @@ function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[])
       if (!Array.isArray(incoming)) return;
       for (const row of incoming) {
         if (row && typeof row === 'object') projectRows.push(row as Row);
+      }
+    };
+    const pushCollectionRows = (incoming: unknown): void => {
+      if (!Array.isArray(incoming)) return;
+      for (const row of incoming) {
+        if (row && typeof row === 'object') collectionRows.push(row as Row);
       }
     };
 
@@ -1718,6 +1739,18 @@ function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[])
                  AND github_repo IS NOT NULL`
             ).all());
           } catch { /* schema drift -> repository fallback unavailable */ }
+          try {
+            pushCollectionRows(db.prepare(
+              `SELECT w.id AS workspace_id, p.container_kind, p.main_repo_path,
+                      b.checkout_path
+               FROM workspaces w
+               JOIN projects p ON p.id = w.project_id
+               JOIN workspace_checkout_bindings b ON b.workspace_id = w.id
+               WHERE p.container_kind = 'collection'
+                 AND p.main_repo_path IS NOT NULL
+                 AND b.checkout_path IS NOT NULL`
+            ).all());
+          } catch { /* schema drift -> collection fallback unavailable */ }
           usedNode = true;
         } finally {
           db.close();
@@ -1766,6 +1799,19 @@ function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[])
           ], { encoding: 'utf-8', timeout: 5000 });
           pushProjectRows(JSON.parse(raw || '[]'));
         } catch { /* query/columns may be absent */ }
+        try {
+          const raw = execFileSync('sqlite3', ['-json', dbPath,
+            `SELECT w.id AS workspace_id, p.container_kind, p.main_repo_path,
+                    b.checkout_path
+             FROM workspaces w
+             JOIN projects p ON p.id = w.project_id
+             JOIN workspace_checkout_bindings b ON b.workspace_id = w.id
+             WHERE p.container_kind = 'collection'
+               AND p.main_repo_path IS NOT NULL
+               AND b.checkout_path IS NOT NULL;`
+          ], { encoding: 'utf-8', timeout: 5000 });
+          pushCollectionRows(JSON.parse(raw || '[]'));
+        } catch { /* query/columns may be absent */ }
       } catch { /* sqlite3 binary missing */ }
     }
 
@@ -1780,7 +1826,14 @@ function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[])
       const canonicalProjectPath = normalizeRemapCwd(path.resolve(mainRepoRaw));
       if (!workspacePath || !canonicalProjectPath) continue;
 
-      mapping.set(workspacePath, canonicalProjectPath);
+      mapping.set(workspacePath, { canonicalPath: canonicalProjectPath });
+    }
+
+    for (const [container, collectionMapping] of deriveCopilotCollectionProjectMappings(collectionRows)) {
+      mapping.set(normalizeRemapCwd(container), {
+        ...collectionMapping,
+        canonicalPath: normalizeRemapCwd(collectionMapping.canonicalPath),
+      });
     }
 
     const projectsByRepository = new Map<string, string[]>();
@@ -1802,7 +1855,9 @@ function discoverCopilotWorktreeProjectMap(copilotSessions: DiscoveredSession[])
       const matches = projectsByRepository.get(session.repository.trim().toLowerCase());
       if (!matches || matches.length !== 1) continue;
       const sessionPath = normalizeRemapCwd(path.resolve(session.cwd));
-      if (sessionPath && !mapping.has(sessionPath)) mapping.set(sessionPath, matches[0]);
+      if (sessionPath && !mapping.has(sessionPath)) {
+        mapping.set(sessionPath, { canonicalPath: matches[0] });
+      }
     }
   } catch { /* never throw - mapping is optional enhancement */ }
   return mapping;
@@ -1903,7 +1958,10 @@ function discoverDevinSessions(): DiscoveredSession[] {
 
 // Bucket all discovered sessions by project cwd. Sessions with no usable folder
 // are grouped under a synthetic project (e.g. Copilot without a real cwd).
-async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEntry[]> {
+async function buildProjectsList(
+  extraFolders: string[] = [],
+  liveFolders: string[] = [],
+): Promise<ProjectsListResponse> {
   const discovered: DiscoveredSession[] = [
     ...discoverClaudeSessions(),
     ...discoverCodexSessions(),
@@ -1934,7 +1992,7 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
     ...groupingSessionCwds.values(),
     ...effectiveExtraFolders,
   ];
-  const explicitFallbacks = new Map<string, string>();
+  const explicitFallbacks = new Map<string, ExplicitProjectPathMapping>();
   for (const inputPath of pathsToResolve) {
     const metadataFallback = copilotWorktreeProjectMap.get(normalizeRemapCwd(inputPath));
     if (metadataFallback) explicitFallbacks.set(inputPath, metadataFallback);
@@ -1946,6 +2004,22 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
     fs.existsSync,
   );
   const canonicalByPath = new Map(resolvedRoots.map((item) => [item.cwd, item.canonicalPath]));
+  const staleEphemeralPaths = new Set<string>();
+  const liveFolderKeys = new Set(liveFolders.map((folder) => normalizeRemapCwd(folder)).filter(Boolean));
+  for (const session of discovered) {
+    if (!session.cwd) continue;
+    const effectiveCwd = effectiveSessionCwds.get(session) || session.cwd;
+    const normalizedCwd = normalizeRemapCwd(effectiveCwd);
+    if (isStaleEphemeralCopilotHistoryPath({
+      cwd: normalizedCwd,
+      agent: session.agent,
+      inputExists: fs.existsSync(normalizedCwd),
+      hasExplicitMapping: copilotWorktreeProjectMap.has(normalizedCwd),
+      tempRoot: os.tmpdir(),
+    }) && !liveFolderKeys.has(normalizedCwd)) {
+      staleEphemeralPaths.add(normalizedCwd);
+    }
+  }
 
   const COPILOT_NO_FOLDER = '__copilot_no_folder__';
   // bucketKey -> { path, name, agentMap }
@@ -1972,6 +2046,7 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
     if (s.cwd) {
       const effectiveCwd = effectiveSessionCwds.get(s) || s.cwd;
       const groupingCwd = groupingSessionCwds.get(s) || effectiveCwd;
+      if (staleEphemeralPaths.has(normalizeRemapCwd(groupingCwd))) continue;
       const canonicalCwd = canonicalByPath.get(groupingCwd) || groupingCwd;
       key = canonicalCwd;
       displayPath = canonicalCwd;
@@ -2017,6 +2092,7 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
       // so we don't resurrect the dead old bucket. The per-folder scan still reads the OLD
       // on-disk location (rawAbs) where the sessions physically live.
       const abs = resolveRemappedCwd(rawAbs, pathRemaps);
+      if (staleEphemeralPaths.has(normalizeRemapCwd(abs))) continue;
       const canonicalAbs = canonicalByPath.get(abs) || abs;
       const bucket = getBucket(canonicalAbs, canonicalAbs, path.basename(canonicalAbs) || canonicalAbs);
       bucket.aliases.add(rawAbs);
@@ -2077,9 +2153,8 @@ async function buildProjectsList(extraFolders: string[] = []): Promise<ProjectEn
     }
     projects.push({ path: b.path, name: b.name, aliases: Array.from(b.aliases), agents, lastActiveMs });
   }
-
   projects.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
-  return projects;
+  return { projects, staleProjectPaths: Array.from(staleEphemeralPaths) };
 }
 
 
@@ -2875,15 +2950,21 @@ function registerIPC(): void {
   // LOCAL active connection -> scan local AI-CLI stores (unchanged). REMOTE active connection ->
   // fetch the remote's live + resumable sessions and shape them into the same ProjectEntry[] so
   // the renderer's navigator renders them unchanged (see buildRemoteProjectsList()).
-  ipcMain.handle('projects:list', async (_e, opts?: { extraFolders?: string[] }) => {
+  ipcMain.handle('projects:list', async (
+    _e,
+    opts?: { extraFolders?: string[]; liveFolders?: string[] },
+  ): Promise<ProjectsListResponse> => {
     try {
       const remote = remoteBackendForEvent(_e);
       if (remote) {
-        return await buildRemoteProjectsList(remote, connectionIdForEvent(_e), opts?.extraFolders ?? []);
+        return {
+          projects: await buildRemoteProjectsList(remote, connectionIdForEvent(_e), opts?.extraFolders ?? []),
+          staleProjectPaths: [],
+        };
       }
-      return await buildProjectsList(opts?.extraFolders ?? []);
+      return await buildProjectsList(opts?.extraFolders ?? [], opts?.liveFolders ?? []);
     } catch {
-      return [];
+      return { projects: [], staleProjectPaths: [] };
     }
   });
 

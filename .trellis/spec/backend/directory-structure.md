@@ -140,6 +140,12 @@ resolveGitProjectRoots(cwds: string[]): Promise<Array<{
 POST /api/git/project-roots
 body: { paths: string[] }
 response: { roots: Array<{ cwd: string; canonicalPath: string }> }
+
+projects:list
+response: {
+  projects: ProjectEntry[];
+  staleProjectPaths: string[];
+}
 ```
 
 Project-list records include `aliases: string[]`; each alias is a raw checkout
@@ -164,6 +170,14 @@ path grouped under the record's canonical `path`.
   canonical path only if the input is missing and Git returned it unchanged.
   Prefer durable checkout bindings; repository-name matching is allowed only
   when it uniquely identifies one registered project.
+- A provider-declared multi-repository collection may map an existing non-Git
+  workspace container to its registered collection root when at least two child
+  checkout bindings share a safe common parent. Never override a Git-resolved
+  different root or accept a filesystem root/broad ancestor.
+- Missing historical Copilot cwd values under the host's actual temporary
+  directory, with no explicit mapping and no live session, are returned through
+  `staleProjectPaths`. Renderer removes only those exact paths from project,
+  expansion, archive, and agent-group persistence.
 
 ### 4. Validation & Error Matrix
 
@@ -176,6 +190,9 @@ path grouped under the record's canonical `path`.
 | Missing path + explicit unique provider mapping | Use mapped canonical path and retain missing path as alias |
 | Existing path or Git resolved a different root | Ignore provider fallback; Git wins |
 | Missing path with no/ambiguous provider mapping | Preserve input path; do not guess or delete |
+| Existing non-Git collection container with validated bindings | Map to registered collection root; retain container as alias |
+| Missing unmapped temp history path with no live session | Omit project and return exact path in `staleProjectPaths` |
+| Existing/live temp path | Preserve; never classify stale |
 | Old remote lacks endpoint | Client falls back one-to-one to input cwd |
 | Separate clones share a remote | Keep separate; common dirs differ |
 
@@ -199,6 +216,10 @@ path grouped under the record's canonical `path`.
 - A deleted historical cwd supplied again through `extraFolders` produces one
   canonical bucket, not a stale duplicate.
 - Unknown missing folders and ambiguous repository matches remain unchanged.
+- Multi-repo collection container maps to its collection root while child cwd
+  values remain unchanged.
+- Renderer cleanup removes only backend-confirmed stale temp paths and all
+  associated path-keyed persistence.
 
 ### 7. Wrong vs Correct
 

@@ -2,6 +2,7 @@ import { TerminalManager } from './terminal-manager';
 import { ChatView } from './chat-view';
 import { createFilePreview, isPreviewableExt, type FilePreview } from './file-preview';
 import { getAgentLogo } from './agent-logos';
+import { cleanupStaleProjectPersistence, normalizeProjectsListPayload } from './project-persistence';
 
 // Image extensions handled by the inline preview.
 function isImageExt(ext: string): boolean {
@@ -73,7 +74,8 @@ declare global {
       gitBranch: (cwd: string) => Promise<string>;
       gitDirty: (cwd: string) => Promise<boolean>;
       claudeSessionsList: (cwd: string) => Promise<Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: 'claude' | 'codex'; resumeCommand: string }>>;
-      projectsList: (extra?: { extraFolders?: string[] }) => Promise<Array<{
+      projectsList: (extra?: { extraFolders?: string[]; liveFolders?: string[] }) => Promise<{
+        projects: Array<{
         path: string;
         name: string;
         aliases: string[];
@@ -82,7 +84,9 @@ declare global {
           sessions: Array<{ id: string; title: string; mtimeMs: number; resumeCommand: string; agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin'; sourcePath: string; archived?: boolean; cwd?: string }>;
         }>;
         lastActiveMs: number;
-      }>>;
+        }>;
+        staleProjectPaths: string[];
+      } | BackendProject[]>;
       sessionSetArchived: (id: string, archived: boolean) => Promise<{ ok: boolean; error?: string }>;
       sessionListArchived: () => Promise<string[]>;
       sessionDelete: (meta: { id: string; agent: string; sourcePath?: string }) => Promise<{ ok: boolean; error?: string }>;
@@ -673,10 +677,38 @@ async function refreshProjectsData(): Promise<void> {
       ...sessionCwds.values(),
       ...closedSessions.map((session) => session.cwd),
     ].filter(Boolean)));
-    const list = await window.posse.projectsList({ extraFolders });
+    const response = normalizeProjectsListPayload(await window.posse.projectsList({
+      extraFolders,
+      liveFolders: Array.from(sessionCwds.values()).filter(Boolean),
+    }));
+    const stalePaths = response.staleProjectPaths;
+    const visibleList = response.projects;
+    if (stalePaths.length > 0) {
+      const cleaned = cleanupStaleProjectPersistence({
+        projects,
+        stalePaths,
+        expandedProjects,
+        searchCollapsedProjects,
+        showArchivedProjects,
+        expandedAgentGroups,
+        normalizePath: normalizeCwd,
+      });
+      projects = cleaned.projects;
+      const replaceSet = (target: Set<string>, source: Set<string>): void => {
+        target.clear();
+        for (const value of source) target.add(value);
+      };
+      replaceSet(expandedProjects, cleaned.expandedProjects);
+      replaceSet(searchCollapsedProjects, cleaned.searchCollapsedProjects);
+      replaceSet(showArchivedProjects, cleaned.showArchivedProjects);
+      replaceSet(expandedAgentGroups, cleaned.expandedAgentGroups);
+      if (selectedProjectPath && stalePaths.some((stale) =>
+        normalizeCwd(stale) === normalizeCwd(selectedProjectPath || '')
+      )) selectedProjectPath = null;
+    }
     backendProjects.clear();
     projectCanonicalAliases.clear();
-    for (const proj of list) {
+    for (const proj of visibleList) {
       const canonical = normalizeCwd(proj.path);
       backendProjects.set(canonical, proj as BackendProject);
       projectCanonicalAliases.set(canonical, canonical);
@@ -721,7 +753,7 @@ async function refreshProjectsData(): Promise<void> {
       localStorage.setItem(SHOW_ARCHIVED_KEY, JSON.stringify([...showArchivedProjects]));
     } catch { /* ignore quota errors */ }
 
-    for (const proj of list) {
+    for (const proj of visibleList) {
       // Auto-register discovered folders (with a real path) so they render in the Projects list.
       if (proj.path && !findProject(proj.path)) {
         projects.push({ path: proj.path, pinned: false, addedAt: proj.lastActiveMs || Date.now() });

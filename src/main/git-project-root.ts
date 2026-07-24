@@ -10,8 +10,31 @@ export type GitProjectRootResult = {
 export type CanonicalProjectPathChoice = {
   inputPath: string;
   gitCanonicalPath: string;
+  explicitFallback?: ExplicitProjectPathMapping;
+  /** @deprecated Use explicitFallback for mappings that carry provenance. */
   explicitFallbackPath?: string;
   inputExists: boolean;
+};
+
+export type ExplicitProjectPathMapping = {
+  canonicalPath: string;
+  /** Only collection-container metadata may opt an existing non-Git path into fallback. */
+  allowExistingNonGit?: boolean;
+};
+
+export type CopilotCollectionBindingRow = {
+  workspace_id?: unknown;
+  container_kind?: unknown;
+  main_repo_path?: unknown;
+  checkout_path?: unknown;
+};
+
+export type EphemeralCopilotHistoryPathChoice = {
+  cwd: string;
+  agent: string;
+  inputExists: boolean;
+  hasExplicitMapping: boolean;
+  tempRoot: string;
 };
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -165,10 +188,18 @@ export function chooseCanonicalProjectPath(choice: CanonicalProjectPathChoice): 
   const gitResolvedInputUnchanged = process.platform === 'win32'
     ? normalizedGitResult.toLowerCase() === normalizedInput.toLowerCase()
     : normalizedGitResult === normalizedInput;
-  if (choice.inputExists || !choice.explicitFallbackPath || !gitResolvedInputUnchanged) {
+  const explicitFallback = choice.explicitFallback || (
+    choice.explicitFallbackPath
+      ? { canonicalPath: choice.explicitFallbackPath }
+      : undefined
+  );
+  const existingNonGitCollection = choice.inputExists
+    && explicitFallback?.allowExistingNonGit === true
+    && gitResolvedInputUnchanged;
+  if ((!existingNonGitCollection && choice.inputExists) || !explicitFallback || !gitResolvedInputUnchanged) {
     return choice.gitCanonicalPath || choice.inputPath;
   }
-  return choice.explicitFallbackPath;
+  return explicitFallback.canonicalPath;
 }
 
 /**
@@ -178,18 +209,110 @@ export function chooseCanonicalProjectPath(choice: CanonicalProjectPathChoice): 
  */
 export function applyExplicitProjectPathFallbacks(
   resolved: GitProjectRootResult[],
-  explicitFallbacks: ReadonlyMap<string, string>,
+  explicitFallbacks: ReadonlyMap<string, string | ExplicitProjectPathMapping>,
   inputExists: (inputPath: string) => boolean,
 ): GitProjectRootResult[] {
+  const toMapping = (value: string | ExplicitProjectPathMapping | undefined): ExplicitProjectPathMapping | undefined =>
+    typeof value === 'string' ? { canonicalPath: value } : value;
   return resolved.map((item) => ({
     cwd: item.cwd,
     canonicalPath: chooseCanonicalProjectPath({
       inputPath: item.cwd,
       gitCanonicalPath: item.canonicalPath,
-      explicitFallbackPath: explicitFallbacks.get(item.cwd),
+      explicitFallback: toMapping(explicitFallbacks.get(item.cwd)),
       inputExists: inputExists(item.cwd),
     }),
   }));
+}
+
+function pathEquals(left: string, right: string): boolean {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function isStrictDescendant(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative !== ''
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+function commonPath(paths: string[]): string {
+  if (paths.length === 0) return '';
+  let candidate = path.dirname(path.resolve(paths[0]));
+  for (const value of paths.slice(1)) {
+    const resolved = path.resolve(value);
+    while (!pathEquals(candidate, path.parse(candidate).root) && !isStrictDescendant(candidate, resolved)) {
+      candidate = path.dirname(candidate);
+    }
+    if (!isStrictDescendant(candidate, resolved)) return '';
+  }
+  return candidate;
+}
+
+function pathDepth(value: string): number {
+  const resolved = path.resolve(value);
+  const relative = path.relative(path.parse(resolved).root, resolved);
+  return relative.split(path.sep).filter(Boolean).length;
+}
+
+/**
+ * Collection workspaces have multiple sibling child checkouts. Their common,
+ * immediate parent is the workspace container and may safely map to the
+ * collection project's registered root even though the container itself exists.
+ */
+export function deriveCopilotCollectionProjectMappings(
+  rows: CopilotCollectionBindingRow[],
+): Map<string, ExplicitProjectPathMapping> {
+  const grouped = new Map<string, { mainRepoPath: string; checkoutPaths: Set<string> }>();
+  for (const row of rows) {
+    const workspaceId = typeof row.workspace_id === 'string' ? row.workspace_id.trim() : '';
+    const containerKind = typeof row.container_kind === 'string' ? row.container_kind.trim() : '';
+    const mainRepoPath = typeof row.main_repo_path === 'string' ? row.main_repo_path.trim() : '';
+    const checkoutPath = typeof row.checkout_path === 'string' ? row.checkout_path.trim() : '';
+    if (!workspaceId || containerKind !== 'collection' || !mainRepoPath || !checkoutPath) continue;
+    const key = `${workspaceId}\0${path.resolve(mainRepoPath)}`;
+    let group = grouped.get(key);
+    if (!group) {
+      group = { mainRepoPath: path.resolve(mainRepoPath), checkoutPaths: new Set() };
+      grouped.set(key, group);
+    }
+    group.checkoutPaths.add(path.resolve(checkoutPath));
+  }
+
+  const mappings = new Map<string, ExplicitProjectPathMapping>();
+  for (const group of grouped.values()) {
+    const checkoutPaths = Array.from(group.checkoutPaths);
+    if (checkoutPaths.length < 2) continue;
+    const container = commonPath(checkoutPaths);
+    if (!container || pathDepth(container) < 2 || pathDepth(group.mainRepoPath) < 1) continue;
+    // Requiring direct children prevents an unrelated broad ancestor from
+    // becoming a collection mapping when binding rows are malformed.
+    if (!checkoutPaths.every((checkout) =>
+      isStrictDescendant(container, checkout) && pathEquals(path.dirname(checkout), container)
+    )) continue;
+    mappings.set(container, {
+      canonicalPath: group.mainRepoPath,
+      allowExistingNonGit: true,
+    });
+  }
+  return mappings;
+}
+
+/** Narrow classification for stale, unmapped Copilot history under the host temp root. */
+export function isStaleEphemeralCopilotHistoryPath(
+  choice: EphemeralCopilotHistoryPathChoice,
+): boolean {
+  if (
+    choice.agent !== 'copilot'
+    || choice.inputExists
+    || choice.hasExplicitMapping
+    || !choice.cwd
+    || !choice.tempRoot
+  ) return false;
+  return isStrictDescendant(choice.tempRoot, choice.cwd);
 }
 
 /** Pure bucketing seam used by project builders and regression tests. */

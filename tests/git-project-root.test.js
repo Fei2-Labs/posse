@@ -9,6 +9,8 @@ const {
   applyExplicitProjectPathFallbacks,
   bucketPathsByCanonicalRoot,
   chooseCanonicalProjectPath,
+  deriveCopilotCollectionProjectMappings,
+  isStaleEphemeralCopilotHistoryPath,
   resolveGitProjectRoot,
   resolveGitProjectRoots,
 } = require('../dist/main/git-project-root.js');
@@ -132,4 +134,100 @@ test('uses metadata only for missing paths and preserves unknown missing folders
     explicitFallbackPath: '/projects/stale-metadata-root',
     inputExists: false,
   }), '/projects/git-root');
+});
+
+test('maps an existing non-Git collection container only with explicit collection metadata', () => {
+  const container = '/Users/test/My Apps/copilot-worktrees/collections/example/branch name';
+  const main = '/Users/test/My Apps/Example Collection';
+  const mappings = deriveCopilotCollectionProjectMappings([
+    { workspace_id: 'workspace-1', container_kind: 'collection', main_repo_path: main, checkout_path: path.join(container, 'repo one') },
+    { workspace_id: 'workspace-1', container_kind: 'collection', main_repo_path: main, checkout_path: path.join(container, 'repo two') },
+  ]);
+
+  assert.deepEqual(mappings.get(container), {
+    canonicalPath: main,
+    allowExistingNonGit: true,
+  });
+  assert.equal(chooseCanonicalProjectPath({
+    inputPath: container,
+    gitCanonicalPath: container,
+    explicitFallback: mappings.get(container),
+    inputExists: true,
+  }), main);
+});
+
+test('does not derive collection containers from one checkout or unrelated ancestors', () => {
+  assert.equal(deriveCopilotCollectionProjectMappings([
+    { workspace_id: 'single', container_kind: 'collection', main_repo_path: '/main', checkout_path: '/tmp/container/repo' },
+  ]).size, 0);
+  assert.equal(deriveCopilotCollectionProjectMappings([
+    { workspace_id: 'spread', container_kind: 'collection', main_repo_path: '/main', checkout_path: '/tmp/one/repo' },
+    { workspace_id: 'spread', container_kind: 'collection', main_repo_path: '/main', checkout_path: '/tmp/two/repo' },
+  ]).size, 0);
+  assert.equal(deriveCopilotCollectionProjectMappings([
+    { workspace_id: 'root', container_kind: 'collection', main_repo_path: '/main', checkout_path: '/one' },
+    { workspace_id: 'root', container_kind: 'collection', main_repo_path: '/main', checkout_path: '/two' },
+  ]).size, 0);
+  assert.equal(deriveCopilotCollectionProjectMappings([
+    { workspace_id: 'bad-main', container_kind: 'collection', main_repo_path: '/', checkout_path: '/tmp/container/one' },
+    { workspace_id: 'bad-main', container_kind: 'collection', main_repo_path: '/', checkout_path: '/tmp/container/two' },
+  ]).size, 0);
+});
+
+test('Git-resolved root beats collection metadata', () => {
+  assert.equal(chooseCanonicalProjectPath({
+    inputPath: '/tmp/collection',
+    gitCanonicalPath: '/projects/git-root',
+    explicitFallback: {
+      canonicalPath: '/projects/collection-root',
+      allowExistingNonGit: true,
+    },
+    inputExists: true,
+  }), '/projects/git-root');
+});
+
+test('classifies only missing unmapped Copilot history paths inside the host temp root as stale', () => {
+  const tempHistory = path.join(os.tmpdir(), 'copilot-history-missing', 'workspace');
+  assert.equal(isStaleEphemeralCopilotHistoryPath({
+    cwd: tempHistory,
+    agent: 'copilot',
+    inputExists: false,
+    hasExplicitMapping: false,
+    tempRoot: os.tmpdir(),
+  }), true);
+  assert.equal(isStaleEphemeralCopilotHistoryPath({
+    cwd: '/Users/test/missing-manual-folder',
+    agent: 'copilot',
+    inputExists: false,
+    hasExplicitMapping: false,
+    tempRoot: os.tmpdir(),
+  }), false);
+  assert.equal(isStaleEphemeralCopilotHistoryPath({
+    cwd: tempHistory,
+    agent: 'copilot',
+    inputExists: true,
+    hasExplicitMapping: false,
+    tempRoot: os.tmpdir(),
+  }), false);
+  assert.equal(isStaleEphemeralCopilotHistoryPath({
+    cwd: tempHistory,
+    agent: 'copilot',
+    inputExists: false,
+    hasExplicitMapping: true,
+    tempRoot: os.tmpdir(),
+  }), false);
+  assert.equal(isStaleEphemeralCopilotHistoryPath({
+    cwd: `${os.tmpdir()}-sibling/copilot-history`,
+    agent: 'copilot',
+    inputExists: false,
+    hasExplicitMapping: false,
+    tempRoot: os.tmpdir(),
+  }), false);
+  assert.equal(isStaleEphemeralCopilotHistoryPath({
+    cwd: tempHistory,
+    agent: 'claude',
+    inputExists: false,
+    hasExplicitMapping: false,
+    tempRoot: os.tmpdir(),
+  }), false);
 });

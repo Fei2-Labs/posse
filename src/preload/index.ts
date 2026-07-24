@@ -73,7 +73,28 @@ contextBridge.exposeInMainWorld('posse', {
   // List a directory's native session history in Claude Code
   claudeSessionsList: (cwd: string) => ipcRenderer.invoke('claude-sessions:list', cwd),
   // Projects-first discovery: every AI-CLI session bucketed by project folder
-  projectsList: (extra?: { extraFolders?: string[] }) => ipcRenderer.invoke('projects:list', extra),
+  projectsList: (extra?: { extraFolders?: string[]; liveFolders?: string[] }) => ipcRenderer.invoke('projects:list', extra) as Promise<{
+    projects: Array<{
+    path: string;
+    name: string;
+    aliases: string[];
+    agents: Array<{
+      agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
+      sessions: Array<{
+        id: string;
+        title: string;
+        mtimeMs: number;
+        resumeCommand: string;
+        agent: 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
+        sourcePath: string;
+        archived?: boolean;
+        cwd?: string;
+      }>;
+    }>;
+    lastActiveMs: number;
+    }>;
+    staleProjectPaths: string[];
+  }>,
   // Verify a session id is resumable in the given cwd (warn before a wrong-folder resume)
   verifyResumable: (agent: string, cwd: string, sessionId: string) =>
     ipcRenderer.invoke('session:verify-resumable', agent, cwd, sessionId),
