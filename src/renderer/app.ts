@@ -3465,7 +3465,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // clearing the query. Clearing the query restores the user's saved expand/collapse state.
   const searching = projectSearchQuery.length > 0;
   const isExpanded = searching
-    ? projectHasMatchingChild(p) && !searchCollapsedProjects.has(key)
+    ? (projectHasMatchingChild(p) || expandedProjects.has(key)) && !searchCollapsedProjects.has(key)
     : expandedProjects.has(key);
 
   const isSelected = selectedProjectPath != null && canonicalProjectKey(selectedProjectPath) === key;
@@ -3556,7 +3556,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // The active agent tab scopes which families are shown; in "All", every family
   // is shown and each row carries a small agent tag.
   const groups = getProjectSessions(p.path);
-  const families = activeAgentTab === 'all'
+  const families = (activeAgentTab === 'all' || projectSearchQuery.length > 0)
     ? Array.from(groups.keys())
     : (groups.has(activeAgentTab) ? [activeAgentTab] : []);
 
@@ -3566,7 +3566,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // session is floated to the very top of its project. Closed/history use their fixed
   // closedAt/mtime (those don't change during activity).
   const rows: Array<{ time: number; active: boolean; el: HTMLElement }> = [];
-  const tagged = activeAgentTab === 'all';
+  const tagged = activeAgentTab === 'all' || projectSearchQuery.length > 0;
   for (const family of families) {
     const g = groups.get(family)!;
     // Pinned sessions are extracted into the top "Pinned" section, so skip them here.
