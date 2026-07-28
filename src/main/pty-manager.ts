@@ -85,7 +85,7 @@ function parseResumeCommand(text: string): { command: string; sessionId: string 
     // Codex: "codex resume <id>"
     { re: /\b(codex)\s+resume\s+([\w-]+)/i, build: m => `${m[1]} resume ${m[2]}` },
     // GitHub Copilot CLI: "copilot --resume <id>"
-    { re: /\b(copilot)\s+--resume(?:=|\s+)([\w-]+)/i, build: m => `${m[1]} --resume ${m[2]}` },
+    { re: /\b(copilot)\s+--resume(?:=|\s+)([\w-]+)/i, build: m => `${m[1]} --allow-all --autopilot --resume ${m[2]}` },
     // OpenCode: "opencode -s <ses_id>"
     { re: /\b(opencode)\s+-s\s+(\w+)/i, build: m => `${m[1]} -s ${m[2]}` },
     // Devin: "devin -r <session_name>"

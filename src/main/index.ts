@@ -1649,7 +1649,7 @@ function discoverCopilotSessions(): DiscoveredSession[] {
         id,
         title,
         mtimeMs,
-        resumeCommand: `copilot --resume ${id}`,
+        resumeCommand: `copilot --allow-all --autopilot --resume ${id}`,
         sourcePath: '', // sqlite-backed: delete routes by id, not a file path
         repository: typeof r.repository === 'string' ? r.repository.trim() : '',
       });
