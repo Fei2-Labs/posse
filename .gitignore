@@ -23,6 +23,9 @@ Thumbs.db
 # Trellis (internal docs — repo is public)
 .trellis/
 
+# Mobile submission screenshots (iPhone screenshots land in repo root)
+/IMG_*.png
+
 # Logs
 *.log
 npm-debug.log*
