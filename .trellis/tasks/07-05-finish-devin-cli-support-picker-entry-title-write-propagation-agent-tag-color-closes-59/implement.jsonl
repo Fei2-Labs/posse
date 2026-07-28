@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/backend/index.md", "reason": "writeDevinSessionTitle touches backend session-store write conventions (mirrors writeClaudeSessionTitle/writeCodexSessionTitle sqlite pattern)"}
-{"file": ".trellis/spec/frontend/state-management.md", "reason": "getAgentPickerOptions + CLI_TAG_COLORS are renderer module-level state/config; confirm conventions"}

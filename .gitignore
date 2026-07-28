@@ -20,6 +20,9 @@ Thumbs.db
 # Claude Code
 .claude/
 
+# Trellis (internal docs — repo is public)
+.trellis/
+
 # Logs
 *.log
 npm-debug.log*
