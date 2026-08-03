@@ -11,6 +11,9 @@ type AcpSessionInfo = {
   promptCapabilities: PromptCapabilities | null;
   status: 'initializing' | 'ready' | 'prompting' | 'idle' | 'error' | 'closed';
   errorMessage?: string;
+  startupPhase?: 'loading-adapter' | 'spawning-adapter' | 'connecting' | 'initializing-protocol' | 'creating-session' | 'loading-session' | 'applying-config' | 'ready';
+  startupTimingsMs?: Partial<Record<string, number>>;
+  supportsPromptRollback?: boolean;
 };
 
 type AcpPermissionRequest = {

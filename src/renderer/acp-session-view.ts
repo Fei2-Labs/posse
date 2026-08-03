@@ -22,6 +22,7 @@ import {
   statusConfigOptions,
 } from './acp-session-state';
 import { getAgentLogo } from './agent-logos';
+import { AcpPromptHistory, canNavigatePromptHistory } from './acp-prompt-history';
 import {
   DEFAULT_CONVERSATION_PREFERENCES,
   type ConversationPreferences,
@@ -43,6 +44,9 @@ export interface AcpSessionInfo {
   promptCapabilities?: PromptCapabilities | null;
   status: 'initializing' | 'ready' | 'prompting' | 'idle' | 'error' | 'closed';
   errorMessage?: string;
+  startupPhase?: 'loading-adapter' | 'spawning-adapter' | 'connecting' | 'initializing-protocol' | 'creating-session' | 'loading-session' | 'applying-config' | 'ready';
+  startupTimingsMs?: Partial<Record<string, number>>;
+  supportsPromptRollback?: boolean;
 }
 
 interface ToolCallState {
@@ -107,6 +111,9 @@ export class AcpSessionView {
   private planEntries: PlanEntry[] = [];
   private typingIndicatorEl: HTMLElement;
   private conversationPreferences: ConversationPreferences;
+  private promptHistory = new AcpPromptHistory();
+  private promptHistoryKey: string;
+  private startupPhase: AcpSessionInfo['startupPhase'];
 
   constructor(
     sessionId: string,
@@ -118,6 +125,8 @@ export class AcpSessionView {
     this.agentLabel = agentLabel;
     this.cwd = cwd;
     this.conversationPreferences = { ...conversationPreferences };
+    this.promptHistoryKey = this.historyStorageKey(sessionId);
+    this.promptHistory = AcpPromptHistory.load(this.promptHistoryKey);
     const agentName = Object.keys(AGENT_COLORS).find(name => agentLabel.startsWith(name));
     this.agentColor = agentName ? AGENT_COLORS[agentName] : '#6b7280';
     this.agentLogoMarkup = agentName ? getAgentLogo(agentName)?.markup || '' : '';
@@ -205,6 +214,7 @@ export class AcpSessionView {
 
     this.inputEl.addEventListener('input', () => {
       this.autoGrowInput();
+      this.promptHistory.reset();
     });
 
     this.inputEl.addEventListener('paste', (event) => this.handleImagePaste(event));
@@ -215,6 +225,24 @@ export class AcpSessionView {
     });
 
     this.inputEl.addEventListener('keydown', (e) => {
+      if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const direction = e.key === 'ArrowUp' ? 'older' : 'newer';
+        if (canNavigatePromptHistory(
+          this.inputEl.value,
+          this.inputEl.selectionStart,
+          this.inputEl.selectionEnd,
+          direction,
+        )) {
+          const recalled = this.promptHistory.navigate(direction, this.inputEl.value);
+          if (recalled !== null) {
+            e.preventDefault();
+            this.inputEl.value = recalled;
+            this.autoGrowInput();
+            this.inputEl.setSelectionRange(recalled.length, recalled.length);
+            return;
+          }
+        }
+      }
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         this.submitComposer('interrupt');
@@ -378,6 +406,10 @@ export class AcpSessionView {
       return;
     }
 
+    if (message.text) {
+      this.promptHistory.add(message.text);
+      this.promptHistory.save(this.promptHistoryKey);
+    }
     this.addUserMessage(message.text, message.images);
     this.setPrompting(true);
 
@@ -453,6 +485,14 @@ export class AcpSessionView {
   }
 
   handleStatus(info: Partial<AcpSessionInfo>): void {
+    if (info.sessionId) {
+      const stableHistoryKey = this.historyStorageKey(info.sessionId);
+      if (stableHistoryKey !== this.promptHistoryKey) {
+        this.promptHistoryKey = stableHistoryKey;
+        this.promptHistory = AcpPromptHistory.load(this.promptHistoryKey);
+      }
+    }
+    if (info.startupPhase) this.startupPhase = info.startupPhase;
     if (info.configOptions) this.configOptions = info.configOptions;
     if (info.promptCapabilities !== undefined) {
       this.supportsImages = Boolean(info.promptCapabilities?.image);
@@ -461,6 +501,10 @@ export class AcpSessionView {
       this.status = info.status;
       if (info.status === 'prompting') this.setPrompting(true);
       else if (info.status === 'idle' || info.status === 'ready') this.setPrompting(false);
+      const unavailable = info.status === 'initializing' || info.status === 'error' || info.status === 'closed';
+      this.inputEl.disabled = unavailable;
+      this.sendBtn.disabled = unavailable;
+      if (info.status === 'initializing') this.inputEl.placeholder = `${this.startupLabel()}…`;
     }
     if (info.errorMessage) {
       this.addSystemMessage(`Session error: ${info.errorMessage}`);
@@ -812,11 +856,11 @@ export class AcpSessionView {
     const ctxPct = this.usage?.used && this.usage?.size
       ? Math.min(100, (this.usage.used / this.usage.size) * 100)
       : 0;
-    const ctxColor = ctxPct > 80 ? '#ef4444' : ctxPct > 60 ? '#f59e0b' : '#22c55e';
+    const ctxColor = ctxPct > 80 ? 'var(--status-error)' : ctxPct > 60 ? 'var(--status-warning)' : 'var(--status-success)';
 
-    const statusLabel = this.status === 'prompting' ? 'Working' : this.status === 'error' ? 'Error' : this.status === 'idle' ? 'Ready' : this.status === 'closed' ? 'Closed' : 'Connecting';
+    const statusLabel = this.status === 'prompting' ? 'Working' : this.status === 'error' ? 'Error' : this.status === 'idle' ? 'Ready' : this.status === 'closed' ? 'Closed' : this.startupLabel();
     const statusDot = this.status === 'prompting' ? '●' : this.status === 'error' ? '✕' : this.status === 'idle' ? '●' : '○';
-    const statusColor = this.status === 'prompting' ? '#f59e0b' : this.status === 'error' ? '#ef4444' : this.status === 'idle' ? '#22c55e' : '#6b7280';
+    const statusColor = this.status === 'prompting' ? 'var(--status-warning)' : this.status === 'error' ? 'var(--status-error)' : this.status === 'idle' ? 'var(--status-success)' : 'var(--text-muted)';
 
     this.statusbarEl.innerHTML = `
       <div class="acp-sb-scroll">
@@ -850,6 +894,25 @@ export class AcpSessionView {
         .find(element => element.dataset.configId === option.id);
       target?.addEventListener('click', () => this.showConfigDropdown(option));
     }
+  }
+
+  private historyStorageKey(stableSessionId: string): string {
+    const scope = `${this.agentLabel}\n${this.cwd}\n${stableSessionId}`;
+    return `posse_acp_prompt_history:${encodeURIComponent(scope)}`;
+  }
+
+  private startupLabel(): string {
+    const labels: Partial<Record<NonNullable<AcpSessionInfo['startupPhase']>, string>> = {
+      'loading-adapter': 'Loading adapter',
+      'spawning-adapter': 'Starting adapter',
+      connecting: 'Connecting',
+      'initializing-protocol': 'Initializing',
+      'creating-session': 'Creating session',
+      'loading-session': 'Loading history',
+      'applying-config': 'Applying access',
+      ready: 'Ready',
+    };
+    return labels[this.startupPhase || 'connecting'] || 'Connecting';
   }
 
   private selectOptions(opt: Extract<SessionConfigOption, { type: 'select' }>): SessionConfigSelectOption[] {

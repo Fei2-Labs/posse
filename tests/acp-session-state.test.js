@@ -130,4 +130,34 @@ test('renderer starts on All and restores every persisted active ACP session', (
   assert.match(source, /async function restoreActiveAcpSessions\(\)/);
   assert.match(source, /for \(const saved of sessions\)/);
   assert.match(source, /await restoreDaemonSessions\(\);[\s\S]*await restoreActiveAcpSessions\(\);/);
+  assert.match(source, /await restoreActiveAcpSessions\(\);[\s\S]*await refreshProjectsData\(\);/);
+});
+
+test('restored recovery sections reopen and close rendering yields a paint first', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+  assert.match(source, /if \(key === 'pinned' \|\| key === 'projects'\) collapsedSections\.add\(key\)/);
+  assert.match(source, /function scheduleSessionChromeRender\([\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*window\.setTimeout/);
+  assert.match(source, /removeSessionRowsInPlace\(\[id\]\);[\s\S]*scheduleSessionChromeRender\(wasActive\)/);
+});
+
+test('app theme changes are explicit and structured sessions consume live tokens', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  assert.match(source, /document\.documentElement\.dataset\.appTheme = theme\.id/);
+  assert.match(source, /new CustomEvent\('posse:theme-changed'/);
+  assert.match(source, /'--bg-tertiary': '#f6f8fa'/);
+  assert.match(source, /'--border-default': '#d0d7de'/);
+  assert.match(styles, /\.acp-session-view \{[\s\S]*background: var\(--bg-primary/);
+  assert.match(styles, /\.acp-session-view \{[\s\S]*color: var\(--text-primary/);
+  assert.match(styles, /\.acp-msg-images img \{[\s\S]*background: var\(--bg-tertiary, var\(--bg-primary/);
+});
+
+test('ACP startup reports measured phases and does not advertise fake rollback', () => {
+  const client = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
+  const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  assert.match(client, /startupTimingsMs/);
+  assert.match(client, /'initializing-protocol'/);
+  assert.match(client, /'loading-session'/);
+  assert.match(client, /supportsPromptRollback: false/);
+  assert.match(view, /'loading-session': 'Loading history'/);
 });

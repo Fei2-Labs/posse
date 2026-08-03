@@ -3,6 +3,7 @@ import type { ChildProcess } from 'child_process';
 import { Writable, Readable } from 'node:stream';
 import * as os from 'os';
 import * as path from 'path';
+import { performance } from 'node:perf_hooks';
 import type {
   ClientContext,
   ContentBlock,
@@ -163,7 +164,26 @@ export interface AcpSessionInfo {
   promptCapabilities: PromptCapabilities | null;
   status: 'initializing' | 'ready' | 'prompting' | 'idle' | 'error' | 'closed';
   errorMessage?: string;
+  startupPhase?: AcpStartupPhase;
+  startupTimingsMs?: Partial<Record<AcpStartupPhase, number>>;
+  supportsPromptRollback?: boolean;
 }
+
+export type AcpStartupPhase =
+  | 'loading-adapter'
+  | 'spawning-adapter'
+  | 'connecting'
+  | 'initializing-protocol'
+  | 'creating-session'
+  | 'loading-session'
+  | 'applying-config'
+  | 'ready';
+
+type StartupTracker = {
+  phase: AcpStartupPhase;
+  phaseStartedAt: number;
+  timings: Partial<Record<AcpStartupPhase, number>>;
+};
 
 type AcpUpdateHandler = (id: string, update: SessionUpdate) => void;
 type AcpStatusHandler = (id: string, info: Partial<AcpSessionInfo>) => void;
@@ -198,6 +218,34 @@ export class AcpManager {
     this.onUpdate = onUpdate;
     this.onStatus = onStatus;
     this.onPermissionRequest = onPermissionRequest;
+  }
+
+  private startStartup(id: string): StartupTracker {
+    const now = performance.now();
+    const tracker: StartupTracker = { phase: 'loading-adapter', phaseStartedAt: now, timings: {} };
+    this.onStatus(id, { status: 'initializing', startupPhase: tracker.phase, startupTimingsMs: {} });
+    return tracker;
+  }
+
+  private advanceStartup(
+    id: string,
+    tracker: StartupTracker,
+    phase: AcpStartupPhase,
+    info?: AcpSessionInfo,
+  ): void {
+    const now = performance.now();
+    tracker.timings[tracker.phase] = Math.round(now - tracker.phaseStartedAt);
+    tracker.phase = phase;
+    tracker.phaseStartedAt = now;
+    if (info) {
+      info.startupPhase = phase;
+      info.startupTimingsMs = { ...tracker.timings };
+    }
+    this.onStatus(id, {
+      status: phase === 'ready' ? 'idle' : 'initializing',
+      startupPhase: phase,
+      startupTimingsMs: { ...tracker.timings },
+    });
   }
 
   private requestPermission(
@@ -265,13 +313,22 @@ export class AcpManager {
   }
 
   async create(id: string, agentLabel: string, cwd: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
+    const startup = this.startStartup(id);
     const acp = await loadAcpSdk();
+    this.advanceStartup(id, startup, 'spawning-adapter');
     const acpCmd = getAcpCommand(agentLabel);
     if (!acpCmd) {
       throw new Error(`No ACP command for agent: ${agentLabel}`);
     }
 
-    const env = { ...process.env, ...providerEnv, PATH: augmentedPath(process.env.PATH) };
+    const env = {
+      ...process.env,
+      ...providerEnv,
+      PATH: augmentedPath(process.env.PATH),
+      // npx-backed adapters should use an already-populated npm cache immediately and
+      // only contact the registry when the package is absent.
+      NPM_CONFIG_PREFER_OFFLINE: 'true',
+    };
     // npx is a shell script, not a binary — needs shell:true to resolve on macOS.
     // System-installed agents (copilot, kiro-cli, opencode) are real binaries but
     // shell:true is harmless for them too and ensures PATH resolution.
@@ -295,6 +352,9 @@ export class AcpManager {
       modes: null,
       promptCapabilities: null,
       status: 'initializing',
+      startupPhase: 'spawning-adapter',
+      startupTimingsMs: { ...startup.timings },
+      supportsPromptRollback: false,
     };
 
     this.sessions.set(id, {
@@ -302,6 +362,7 @@ export class AcpManager {
       context: null,
       info,
     });
+    this.advanceStartup(id, startup, 'connecting', info);
 
     // Set up the ACP client and connect
     const input = Writable.toWeb(childProcess.stdin!);
@@ -339,9 +400,9 @@ export class AcpManager {
       }, 30000);
 
       client.connectWith(stream, async (ctx) => {
-        clearTimeout(timeout);
         try {
           // Initialize
+          this.advanceStartup(id, startup, 'initializing-protocol', info);
           const initialized = await ctx.request(acp.methods.agent.initialize, {
             protocolVersion: acp.PROTOCOL_VERSION,
             clientCapabilities: {
@@ -352,6 +413,7 @@ export class AcpManager {
           info.promptCapabilities = initialized.agentCapabilities?.promptCapabilities || null;
 
           // Create a new session
+          this.advanceStartup(id, startup, 'creating-session', info);
           const session = await ctx.request(acp.methods.agent.session.new, {
             cwd,
             mcpServers: [],
@@ -367,13 +429,20 @@ export class AcpManager {
           info.modes = session.modes || null;
           info.status = 'idle';
 
+          this.advanceStartup(id, startup, 'applying-config', info);
           await this.applyDefaultFullAccess(id, info);
+          this.advanceStartup(id, startup, 'ready', info);
+          clearTimeout(timeout);
+          console.info(`[ACP ${id}] startup timings`, info.startupTimingsMs);
 
           this.onStatus(id, {
             sessionId: session.sessionId,
             configOptions: info.configOptions,
             modes: info.modes,
             promptCapabilities: info.promptCapabilities,
+            supportsPromptRollback: false,
+            startupPhase: info.startupPhase,
+            startupTimingsMs: info.startupTimingsMs,
             status: 'idle',
           });
 
@@ -487,13 +556,20 @@ export class AcpManager {
 
   /** Load an existing ACP session by sessionId (for resume). */
   async load(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
+    const startup = this.startStartup(id);
     const acp = await loadAcpSdk();
+    this.advanceStartup(id, startup, 'spawning-adapter');
     const acpCmd = getAcpCommand(agentLabel);
     if (!acpCmd) {
       throw new Error(`No ACP command for agent: ${agentLabel}`);
     }
 
-    const env = { ...process.env, ...providerEnv, PATH: augmentedPath(process.env.PATH) };
+    const env = {
+      ...process.env,
+      ...providerEnv,
+      PATH: augmentedPath(process.env.PATH),
+      NPM_CONFIG_PREFER_OFFLINE: 'true',
+    };
     // npx is a shell script, not a binary — needs shell:true to resolve on macOS.
     // System-installed agents (copilot, kiro-cli, opencode) are real binaries but
     // shell:true is harmless for them too and ensures PATH resolution.
@@ -517,6 +593,9 @@ export class AcpManager {
       modes: null,
       promptCapabilities: null,
       status: 'initializing',
+      startupPhase: 'spawning-adapter',
+      startupTimingsMs: { ...startup.timings },
+      supportsPromptRollback: false,
     };
 
     this.sessions.set(id, {
@@ -524,6 +603,7 @@ export class AcpManager {
       context: null,
       info,
     });
+    this.advanceStartup(id, startup, 'connecting', info);
 
     const input = Writable.toWeb(childProcess.stdin!);
     const output = Readable.toWeb(childProcess.stdout!) as unknown as ReadableStream<Uint8Array>;
@@ -553,8 +633,8 @@ export class AcpManager {
       }, 30000);
 
       client.connectWith(stream, async (ctx) => {
-        clearTimeout(timeout);
         try {
+          this.advanceStartup(id, startup, 'initializing-protocol', info);
           const initialized = await ctx.request(acp.methods.agent.initialize, {
             protocolVersion: acp.PROTOCOL_VERSION,
             clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
@@ -562,6 +642,7 @@ export class AcpManager {
           info.promptCapabilities = initialized.agentCapabilities?.promptCapabilities || null;
 
           // Load the existing session
+          this.advanceStartup(id, startup, 'loading-session', info);
           const loadResp = await ctx.request(acp.methods.agent.session.load, {
             sessionId: acpSessionId,
             mcpServers: [],
@@ -577,13 +658,20 @@ export class AcpManager {
           info.modes = loadResp.modes || null;
           info.status = 'idle';
 
+          this.advanceStartup(id, startup, 'applying-config', info);
           await this.applyDefaultFullAccess(id, info);
+          this.advanceStartup(id, startup, 'ready', info);
+          clearTimeout(timeout);
+          console.info(`[ACP ${id}] load timings`, info.startupTimingsMs);
 
           this.onStatus(id, {
             sessionId: info.sessionId,
             configOptions: info.configOptions,
             modes: info.modes,
             promptCapabilities: info.promptCapabilities,
+            supportsPromptRollback: false,
+            startupPhase: info.startupPhase,
+            startupTimingsMs: info.startupTimingsMs,
             status: 'idle',
           });
 
