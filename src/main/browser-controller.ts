@@ -9,12 +9,20 @@ import {
 } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { browserSecurityState, normalizeBrowserUrl } from './browser-url';
+import { scaleAndClampBrowserBounds, type BrowserRawBounds } from './browser-geometry';
+import {
+  getRbwLogin,
+  getRbwTotp,
+  listRbwCredentials,
+  matchRbwEntries,
+  type CredentialCandidate,
+} from './browser-credentials';
 
 const BROWSER_PARTITION = 'persist:posse-browser-default';
 const EMPTY_URL = 'about:blank';
 const ALLOWED_PERMISSIONS = new Set(['media', 'geolocation', 'notifications']);
 
-export type EmbeddedBrowserBounds = Rectangle & { visible: boolean };
+export type EmbeddedBrowserBounds = BrowserRawBounds;
 
 export type EmbeddedBrowserState = {
   url: string;
@@ -32,6 +40,14 @@ export type EmbeddedBrowserPermission = {
   origin: string;
 };
 
+export type EmbeddedBrowserCredentialCandidate = CredentialCandidate & { token: string };
+export type EmbeddedBrowserCredentialList =
+  | { ok: true; candidates: EmbeddedBrowserCredentialCandidate[] }
+  | { ok: false; code: string };
+export type EmbeddedBrowserCredentialAction =
+  | { ok: true; status: 'filled' | 'submitted' | 'site-submitted' }
+  | { ok: false; code: string };
+
 type PendingPermission = {
   ownerId: number;
   contentId: number;
@@ -39,6 +55,64 @@ type PendingPermission = {
   origin: string;
   callback: (allowed: boolean) => void;
 };
+
+type CredentialToken = { id: string; origin: string };
+
+const CREDENTIAL_WORLD_ID = 42;
+
+function credentialOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) ? url.origin : null;
+  } catch { return null; }
+}
+
+function buildCredentialFillScript(username: string | undefined, password: string | undefined, totp: string | undefined, submit: boolean): string {
+  const payload = JSON.stringify({ username, password, totp, submit });
+  return `(async () => {
+    const payload = ${payload};
+    const visible = (node) => {
+      if (!(node instanceof HTMLElement) || node.disabled || node.readOnly || (node instanceof HTMLInputElement && node.type === 'hidden')) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const inputs = Array.from(document.querySelectorAll('input')).filter(visible);
+    const byAutocomplete = (value) => inputs.filter((node) => node.autocomplete === value);
+    const usernameFields = byAutocomplete('username').concat(inputs.filter((node) => /user|email|login/i.test(node.name + ' ' + node.id + ' ' + node.type)));
+    const passwordFields = byAutocomplete('current-password').concat(inputs.filter((node) => node.type === 'password'));
+    const otpFields = byAutocomplete('one-time-code').concat(inputs.filter((node) => /otp|one.time|verification|auth/i.test(node.name + ' ' + node.id + ' ' + node.inputMode)));
+    const otpField = otpFields.length === 1 ? otpFields[0] : null;
+    const otpForm = otpField ? otpField.form : null;
+    let siteSubmitted = false;
+    const onSubmit = () => { siteSubmitted = true; };
+    if (payload.totp !== undefined && otpField && otpForm) otpForm.addEventListener('submit', onSubmit, { capture: true, once: true });
+    const setValue = (node, value) => {
+      if (!node || value === undefined) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(node, value); else node.value = value;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    let filled = 0;
+    if (payload.username !== undefined && usernameFields[0]) filled += Number(setValue(usernameFields[0], payload.username));
+    if (payload.password !== undefined && passwordFields[0]) filled += Number(setValue(passwordFields[0], payload.password));
+    if (payload.totp !== undefined && otpFields.length === 1) filled += Number(setValue(otpFields[0], payload.totp));
+    if (payload.totp === undefined || otpFields.length !== 1 || !payload.submit) return { status: 'filled', filled };
+    await Promise.resolve();
+    if (siteSubmitted) return { status: 'site-submitted', filled };
+    const form = otpForm;
+    const submitButtons = (form ? Array.from(form.querySelectorAll('button,input')) : []).filter((node) => {
+      if (!visible(node)) return false;
+      const type = node instanceof HTMLButtonElement ? node.type : node.type;
+      return type === 'submit' || /verify|continue|sign.?in|log.?in/i.test(node.textContent || node.value || '');
+    });
+    if (submitButtons.length !== 1) return { status: 'filled', filled };
+    if (form && typeof form.requestSubmit === 'function') form.requestSubmit(submitButtons[0]);
+    else submitButtons[0].click();
+    return { status: siteSubmitted ? 'site-submitted' : 'submitted', filled };
+  })()`;
+}
 
 function browserWebPreferences() {
   return {
@@ -70,7 +144,9 @@ export class EmbeddedBrowserController {
   private readonly manager: EmbeddedBrowserManager;
   private readonly view: WebContentsView;
   private readonly popups = new Set<BrowserWindow>();
+  private readonly credentialTokens = new Map<string, CredentialToken>();
   private isAttached = false;
+  private rawBounds: EmbeddedBrowserBounds | null = null;
   private state: EmbeddedBrowserState = {
     url: '',
     title: 'Browser',
@@ -95,17 +171,22 @@ export class EmbeddedBrowserController {
   currentState(): EmbeddedBrowserState { return { ...this.state }; }
 
   setBounds(bounds: EmbeddedBrowserBounds): void {
-    if (!bounds.visible || bounds.width < 1 || bounds.height < 1) {
+    this.rawBounds = { ...bounds };
+    this.applyRawBounds();
+  }
+
+  private applyRawBounds(): void {
+    const bounds = this.rawBounds;
+    if (!bounds) return;
+    const safeBounds = scaleAndClampBrowserBounds(
+      bounds,
+      this.owner.webContents.getZoomFactor(),
+      this.owner.getContentBounds(),
+    );
+    if (!safeBounds) {
       this.detach();
       return;
     }
-    const contentBounds = this.owner.getContentBounds();
-    const safeBounds: Rectangle = {
-      x: Math.max(0, Math.min(Math.round(bounds.x), contentBounds.width - 1)),
-      y: Math.max(0, Math.min(Math.round(bounds.y), contentBounds.height - 1)),
-      width: Math.max(1, Math.min(Math.round(bounds.width), contentBounds.width - Math.max(0, Math.round(bounds.x)))),
-      height: Math.max(1, Math.min(Math.round(bounds.height), contentBounds.height - Math.max(0, Math.round(bounds.y)))),
-    };
     if (!this.isAttached) {
       this.owner.contentView.addChildView(this.view);
       this.isAttached = true;
@@ -116,6 +197,7 @@ export class EmbeddedBrowserController {
   async navigate(input: string): Promise<{ ok: boolean; error?: string }> {
     const normalized = normalizeBrowserUrl(input);
     if (normalized.ok === false) return normalized;
+    this.invalidateCredentialTokens();
     this.patchState({ error: undefined });
     try {
       await this.view.webContents.loadURL(normalized.url);
@@ -161,6 +243,7 @@ export class EmbeddedBrowserController {
   }
 
   async resetToBlank(): Promise<void> {
+    this.invalidateCredentialTokens();
     for (const popup of Array.from(this.popups)) {
       if (!popup.isDestroyed()) popup.close();
     }
@@ -170,6 +253,7 @@ export class EmbeddedBrowserController {
   }
 
   destroy(): void {
+    this.invalidateCredentialTokens();
     this.detach();
     for (const popup of Array.from(this.popups)) {
       if (!popup.isDestroyed()) popup.close();
@@ -186,10 +270,17 @@ export class EmbeddedBrowserController {
 
   private bindEvents(): void {
     const contents = this.view.webContents;
+    this.owner.webContents.on('zoom-changed', () => this.applyRawBounds());
     contents.on('did-start-loading', () => this.patchState({ isLoading: true, error: undefined }));
     contents.on('did-stop-loading', () => this.refreshNavigationState());
-    contents.on('did-navigate', (_event, url) => this.patchState({ url, security: browserSecurityState(url), error: undefined }));
-    contents.on('did-navigate-in-page', (_event, url) => this.patchState({ url, security: browserSecurityState(url), error: undefined }));
+    contents.on('did-navigate', (_event, url) => {
+      this.invalidateCredentialTokens();
+      this.patchState({ url, security: browserSecurityState(url), error: undefined });
+    });
+    contents.on('did-navigate-in-page', (_event, url) => {
+      this.invalidateCredentialTokens();
+      this.patchState({ url, security: browserSecurityState(url), error: undefined });
+    });
     contents.on('page-title-updated', (_event, title) => this.patchState({ title: title || 'Browser' }));
     contents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
@@ -239,6 +330,68 @@ export class EmbeddedBrowserController {
     this.state = { ...this.state, ...patch };
     if (this.owner.isDestroyed()) return;
     this.owner.webContents.send('browser:state', this.state);
+  }
+
+  async listCredentialCandidates(): Promise<EmbeddedBrowserCredentialList> {
+    const origin = credentialOrigin(this.view.webContents.getURL());
+    if (!origin) return { ok: false, code: 'no-match' };
+    const listed = await listRbwCredentials();
+    if (!listed.ok) return listed;
+    const matched = matchRbwEntries(listed.value, this.view.webContents.getURL());
+    if (!matched.ok) return matched;
+    this.invalidateCredentialTokens();
+    const candidates = matched.value.map((candidate) => {
+      const token = randomUUID();
+      this.credentialTokens.set(token, { id: candidate.id, origin });
+      return { ...candidate, token };
+    });
+    return { ok: true, candidates };
+  }
+
+  async fillLogin(token: string): Promise<EmbeddedBrowserCredentialAction> {
+    const target = this.resolveCredentialToken(token);
+    if (!target) return { ok: false, code: 'no-match' };
+    const secret = await getRbwLogin(target.id);
+    if (!secret.ok) return secret;
+    const result = await this.executeCredentialFill(secret.value.username, secret.value.password, undefined, false);
+    return result;
+  }
+
+  async fillTotp(token: string, autoSubmit: boolean): Promise<EmbeddedBrowserCredentialAction> {
+    const target = this.resolveCredentialToken(token);
+    if (!target) return { ok: false, code: 'no-match' };
+    const secret = await getRbwTotp(target.id);
+    if (!secret.ok) return secret;
+    const result = await this.executeCredentialFill(undefined, undefined, secret.value, autoSubmit);
+    const currentOrigin = credentialOrigin(this.view.webContents.getURL());
+    if (currentOrigin !== target.origin) return { ok: true, status: 'filled' };
+    return result;
+  }
+
+  private resolveCredentialToken(token: string): CredentialToken | null {
+    if (typeof token !== 'string') return null;
+    const target = this.credentialTokens.get(token);
+    if (!target || credentialOrigin(this.view.webContents.getURL()) !== target.origin) return null;
+    return target;
+  }
+
+  private async executeCredentialFill(username: string | undefined, password: string | undefined, totp: string | undefined, submit: boolean): Promise<EmbeddedBrowserCredentialAction> {
+    try {
+      const result = await this.view.webContents.executeJavaScriptInIsolatedWorld(CREDENTIAL_WORLD_ID, [{
+        code: buildCredentialFillScript(username, password, totp, submit),
+        url: 'posse://browser-credentials',
+      }], true) as { status?: string } | undefined;
+      if (result?.status === 'submitted' || result?.status === 'site-submitted') {
+        return { ok: true, status: result.status };
+      }
+      return { ok: true, status: 'filled' };
+    } catch {
+      return { ok: false, code: 'failed' };
+    }
+  }
+
+  private invalidateCredentialTokens(): void {
+    this.credentialTokens.clear();
   }
 }
 

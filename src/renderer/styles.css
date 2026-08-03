@@ -711,6 +711,28 @@ html, body {
   opacity: 0.32;
 }
 
+.browser-credentials-menu {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+.browser-credentials-menu[hidden] { display: none; }
+.browser-credentials-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--text-primary); font-size: 11px; }
+.browser-credentials-heading span { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
+#browser-credentials-list { display: flex; flex-direction: column; gap: 4px; }
+.browser-credential-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; }
+.browser-credential-label { display: flex; min-width: 0; flex-direction: column; gap: 1px; color: var(--text-primary); font-size: 11px; }
+.browser-credential-label span { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.browser-credential-actions { display: flex; flex: 0 0 auto; gap: 4px; }
+.browser-credential-action { min-height: 26px; padding: 3px 8px; border: 1px solid var(--border-color); border-radius: 5px; background: var(--bg-primary); color: var(--text-secondary); font: inherit; font-size: 10px; cursor: pointer; }
+.browser-credential-action:hover { border-color: var(--accent); color: var(--text-primary); }
+
 #browser-permission {
   display: flex;
   flex: 0 0 auto;

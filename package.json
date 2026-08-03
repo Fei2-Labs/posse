@@ -58,7 +58,7 @@
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.1",
     "concurrently": "^10.0.3",
-    "electron": "^33.0.0",
+    "electron": "^41.6.0",
     "electron-builder": "^25.1.8",
     "electron-rebuild": "^3.2.9",
     "esbuild": "^0.27.3",
@@ -107,7 +107,7 @@
     ]
   },
   "allowScripts": {
-    "electron@33.4.11": true,
+    "electron@41.6.0": true,
     "esbuild@0.27.3": true,
     "lzma-native@8.0.6": true,
     "node-pty@1.1.0": true,

@@ -31,6 +31,8 @@ import {
   EmbeddedBrowserManager,
   type EmbeddedBrowserBounds,
   type EmbeddedBrowserState,
+  type EmbeddedBrowserCredentialList,
+  type EmbeddedBrowserCredentialAction,
 } from './browser-controller';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
@@ -2328,6 +2330,21 @@ function registerIPC(): void {
     const browser = browserForEvent(event);
     if (!browser || typeof input !== 'string') return { ok: false, error: 'Browser is unavailable.' };
     return browser.controller.navigate(input);
+  });
+  ipcMain.handle('browser:credential-candidates', async (event): Promise<EmbeddedBrowserCredentialList> => {
+    const browser = browserForEvent(event);
+    if (!browser) return { ok: false, code: 'failed' };
+    return browser.controller.listCredentialCandidates();
+  });
+  ipcMain.handle('browser:credential-fill-login', async (event, token: string): Promise<EmbeddedBrowserCredentialAction> => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof token !== 'string') return { ok: false, code: 'no-match' };
+    return browser.controller.fillLogin(token);
+  });
+  ipcMain.handle('browser:credential-fill-totp', async (event, token: string, autoSubmit: boolean): Promise<EmbeddedBrowserCredentialAction> => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof token !== 'string' || typeof autoSubmit !== 'boolean') return { ok: false, code: 'no-match' };
+    return browser.controller.fillTotp(token, autoSubmit);
   });
   ipcMain.on('browser:back', (event) => { browserForEvent(event)?.controller.goBack(); });
   ipcMain.on('browser:forward', (event) => { browserForEvent(event)?.controller.goForward(); });

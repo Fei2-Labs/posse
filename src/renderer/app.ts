@@ -97,6 +97,9 @@ declare global {
       browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
       browserGetState: () => Promise<EmbeddedBrowserState | null>;
       browserNavigate: (input: string) => Promise<{ ok: boolean; error?: string }>;
+      browserCredentialCandidates: () => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' }> }>;
+      browserCredentialFillLogin: (token: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
+      browserCredentialFillTotp: (token: string, autoSubmit: boolean) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
       browserBack: () => void;
       browserForward: () => void;
       browserReloadOrStop: () => void;
@@ -2008,6 +2011,7 @@ const browserForwardBtn = requiredBrowserElement<HTMLButtonElement>('browser-for
 const browserReloadBtn = requiredBrowserElement<HTMLButtonElement>('browser-reload');
 const browserExternalBtn = requiredBrowserElement<HTMLButtonElement>('browser-external');
 const browserDevToolsBtn = requiredBrowserElement<HTMLButtonElement>('browser-devtools');
+const browserCredentialsBtn = requiredBrowserElement<HTMLButtonElement>('browser-credentials');
 const browserExpandBtn = requiredBrowserElement<HTMLButtonElement>('browser-expand');
 const browserClearBtn = requiredBrowserElement<HTMLButtonElement>('browser-clear');
 const browserCloseBtn = requiredBrowserElement<HTMLButtonElement>('browser-close');
@@ -2022,6 +2026,10 @@ const browserPermissionTitle = requiredBrowserElement<HTMLElement>('browser-perm
 const browserPermissionOrigin = requiredBrowserElement<HTMLElement>('browser-permission-origin');
 const browserPermissionAllow = requiredBrowserElement<HTMLButtonElement>('browser-permission-allow');
 const browserPermissionDeny = requiredBrowserElement<HTMLButtonElement>('browser-permission-deny');
+const browserCredentialsMenu = requiredBrowserElement<HTMLElement>('browser-credentials-menu');
+const browserCredentialsList = requiredBrowserElement<HTMLElement>('browser-credentials-list');
+const browserCredentialsStatus = requiredBrowserElement<HTMLElement>('browser-credentials-status');
+const browserPasskeyExternal = requiredBrowserElement<HTMLButtonElement>('browser-passkey-external');
 
 const BROWSER_RELOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';
 const BROWSER_STOP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>';
@@ -2054,6 +2062,7 @@ function renderBrowserState(): void {
   browserForwardBtn.disabled = !browserState.canGoForward;
   browserExternalBtn.disabled = !browserState.url;
   browserDevToolsBtn.disabled = !browserState.url;
+  browserCredentialsBtn.disabled = !browserState.url;
   browserReloadBtn.innerHTML = browserState.isLoading ? BROWSER_STOP_ICON : BROWSER_RELOAD_ICON;
   browserReloadBtn.title = browserState.isLoading ? 'Stop loading' : 'Reload';
   browserReloadBtn.setAttribute('aria-label', browserReloadBtn.title);
@@ -2068,6 +2077,63 @@ function renderBrowserState(): void {
   browserError.hidden = !browserState.error;
   browserErrorMessage.textContent = browserState.error || '';
   scheduleBrowserBoundsSync();
+}
+
+function credentialActionLabel(code: string | undefined): string {
+  if (code === 'missing') return 'rbw is not installed';
+  if (code === 'locked') return 'Unlock rbw, then try again';
+  if (code === 'not-configured') return 'Configure rbw first';
+  if (code === 'no-match') return 'No login matches this origin';
+  if (code === 'timeout') return 'rbw timed out';
+  return code ? 'Credential provider unavailable' : 'Find a matching login';
+}
+
+async function loadBrowserCredentials(): Promise<void> {
+  browserCredentialsList.replaceChildren();
+  browserCredentialsStatus.textContent = 'Looking up matching logins...';
+  const result = await window.posse.browserCredentialCandidates();
+  if (!result.ok || !result.candidates?.length) {
+    browserCredentialsStatus.textContent = credentialActionLabel(result.code);
+    return;
+  }
+  browserCredentialsStatus.textContent = `${result.candidates.length} matching login${result.candidates.length === 1 ? '' : 's'}`;
+  for (const candidate of result.candidates) {
+    const row = document.createElement('div');
+    row.className = 'browser-credential-row';
+    const label = document.createElement('div');
+    label.className = 'browser-credential-label';
+    label.textContent = candidate.name;
+    const detail = document.createElement('span');
+    detail.textContent = candidate.username || candidate.match;
+    label.append(detail);
+    const actions = document.createElement('div');
+    actions.className = 'browser-credential-actions';
+    const fill = document.createElement('button');
+    fill.className = 'browser-credential-action';
+    fill.type = 'button';
+    fill.textContent = 'Fill login';
+    fill.addEventListener('click', async () => {
+      fill.disabled = true;
+      const action = await window.posse.browserCredentialFillLogin(candidate.token);
+      fill.disabled = false;
+      browserCredentialsStatus.textContent = action.ok ? 'Login fields filled' : credentialActionLabel(action.code);
+    });
+    const totp = document.createElement('button');
+    totp.className = 'browser-credential-action';
+    totp.type = 'button';
+    totp.textContent = 'Fill TOTP';
+    totp.addEventListener('click', async () => {
+      totp.disabled = true;
+      const action = await window.posse.browserCredentialFillTotp(candidate.token, true);
+      totp.disabled = false;
+      browserCredentialsStatus.textContent = action.ok
+        ? (action.status === 'submitted' ? 'TOTP filled and submitted' : action.status === 'site-submitted' ? 'Site submitted the code' : 'TOTP filled only')
+        : credentialActionLabel(action.code);
+    });
+    actions.append(fill, totp);
+    row.append(label, actions);
+    browserCredentialsList.append(row);
+  }
 }
 
 function syncBrowserBounds(): void {
@@ -2136,6 +2202,16 @@ browserExternalBtn.addEventListener('click', async () => {
   if (!result.ok && result.error) showNavToast(result.error);
 });
 browserDevToolsBtn.addEventListener('click', () => window.posse.browserOpenDevTools());
+browserCredentialsBtn.addEventListener('click', async () => {
+  const open = browserCredentialsMenu.hidden;
+  browserCredentialsMenu.hidden = !open;
+  if (open) await loadBrowserCredentials();
+  scheduleBrowserBoundsSync();
+});
+browserPasskeyExternal.addEventListener('click', async () => {
+  const result = await window.posse.browserOpenExternal();
+  if (!result.ok && result.error) browserCredentialsStatus.textContent = result.error;
+});
 browserExpandBtn.addEventListener('click', () => {
   browserExpanded = !browserExpanded;
   fileTreePanel.classList.toggle('browser-expanded', browserExpanded);
@@ -2151,6 +2227,8 @@ browserClearBtn.addEventListener('click', async () => {
     'Clear data',
   );
   if (!confirmed) return;
+  browserCredentialsMenu.hidden = true;
+  browserCredentialsList.replaceChildren();
   await resolveBrowserPermission(false);
   browserHasPage = false;
   browserState = { url: '', title: 'Browser', isLoading: false, canGoBack: false, canGoForward: false, security: 'neutral' };
@@ -2179,6 +2257,8 @@ browserPermissionDeny.addEventListener('click', () => { void resolveBrowserPermi
 
 window.posse.onBrowserState((state) => {
   browserState = state;
+  browserCredentialsMenu.hidden = true;
+  browserCredentialsList.replaceChildren();
   if (state.url) browserHasPage = true;
   renderBrowserState();
 });

@@ -89,6 +89,15 @@ contextBridge.exposeInMainWorld('posse', {
   } | null>,
   browserNavigate: (input: string) =>
     ipcRenderer.invoke('browser:navigate', input) as Promise<{ ok: boolean; error?: string }>,
+  browserCredentialCandidates: () => ipcRenderer.invoke('browser:credential-candidates') as Promise<{
+    ok: boolean;
+    code?: string;
+    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' }>;
+  }>,
+  browserCredentialFillLogin: (token: string) =>
+    ipcRenderer.invoke('browser:credential-fill-login', token) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
+  browserCredentialFillTotp: (token: string, autoSubmit: boolean) =>
+    ipcRenderer.invoke('browser:credential-fill-totp', token, autoSubmit) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
   browserBack: () => ipcRenderer.send('browser:back'),
   browserForward: () => ipcRenderer.send('browser:forward'),
   browserReloadOrStop: () => ipcRenderer.send('browser:reload-or-stop'),
