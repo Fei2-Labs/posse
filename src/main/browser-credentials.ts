@@ -42,6 +42,7 @@ function classifyFailure(error: unknown): CredentialErrorCode {
   const value = error as { code?: string; killed?: boolean; signal?: string; stderr?: string };
   const stderr = typeof value.stderr === 'string' ? value.stderr.toLowerCase() : '';
   if (value.code === 'ENOENT') return 'missing';
+  if (value.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'invalid-output';
   if (value.killed || value.signal === 'SIGTERM') return 'timeout';
   if (stderr.includes('locked') || stderr.includes('unlock')) return 'locked';
   if (stderr.includes('not configured') || stderr.includes('config')) return 'not-configured';
