@@ -1649,11 +1649,11 @@ html, body {
 .nav-session {
   display: flex;
   align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 8px 0 24px;
-  margin: 1px 6px 1px 16px;
-  border-radius: 7px;
+  gap: 5px;
+  height: 28px;
+  padding: 0 7px 0 8px;
+  margin: 1px 6px;
+  border-radius: 6px;
   /* The row is clamped to #project-nav's content width; min-width:0 lets the
      flex title shrink (it has min-width:0 + ellipsis) instead of forcing the
      row to its intrinsic content width. */
@@ -1780,7 +1780,6 @@ html, body {
   width: 6px;
   height: 6px;
 }
-}
 
 /* Owning-project chip on FLATTENED session rows (Pinned / Active Sessions) (#29).
    Subtler than the agent tag: outlined + muted so the two chips stay distinguishable. */
@@ -1878,7 +1877,8 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.25;
   color: var(--text-primary);
 }
 
@@ -1888,7 +1888,7 @@ html, body {
 
 .nav-session-time {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--text-secondary, #888);
 }
 

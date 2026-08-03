@@ -21,6 +21,7 @@ function loadSessionSelectionModule() {
 
 const { resolveActiveLiveSessionId } = loadSessionSelectionModule();
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+const stylesSource = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
 
 test('ACP resume owns sidebar selection over a still-active background PTY', () => {
   assert.equal(resolveActiveLiveSessionId(null, 'acp-codex-resume', 'pty-previous'), 'acp-codex-resume');
@@ -61,4 +62,15 @@ test('resuming a closed session redraws Recent after its persisted row is remove
   const returnAt = acpResumeBranch.indexOf('return;', removeAt);
   assert.ok(removeAt >= 0, 'expected persisted Recent row removal');
   assert.ok(redrawAt > removeAt && redrawAt < returnAt, 'expected redraw after removal and before return');
+});
+
+test('Active and Recent session rows share the compact sidebar grid', () => {
+  const rowRule = stylesSource.match(/\.nav-session \{([\s\S]*?)\}/)?.[1] || '';
+  const titleRule = stylesSource.match(/(?:^|\n)\.nav-session-title \{([\s\S]*?)\}/)?.[1] || '';
+  assert.match(rowRule, /gap:\s*5px;/);
+  assert.match(rowRule, /height:\s*28px;/);
+  assert.match(rowRule, /padding:\s*0 7px 0 8px;/);
+  assert.match(rowRule, /margin:\s*1px 6px;/);
+  assert.match(titleRule, /font-size:\s*11\.5px;/);
+  assert.match(titleRule, /text-overflow:\s*ellipsis;/);
 });
