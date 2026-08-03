@@ -52,3 +52,12 @@ test('requires the selected rbw id and login password', () => {
   const result = parseRbwLogin(JSON.stringify({ id: 'expected', login: { username: 'a', password: 'b' } }), 'expected');
   assert.deepEqual(result, { ok: true, value: { id: 'expected', username: 'a', password: 'b' } });
 });
+
+test('parses rbw 1.15 login fields from the data object', () => {
+  const result = parseRbwLogin(JSON.stringify({
+    id: 'expected',
+    data: { username: 'a', password: 'b', totp: null, uris: [] },
+    fields: [],
+  }), 'expected');
+  assert.deepEqual(result, { ok: true, value: { id: 'expected', username: 'a', password: 'b' } });
+});

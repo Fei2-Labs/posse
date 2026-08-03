@@ -152,12 +152,14 @@ export function matchRbwEntries(entries: RbwEntryMetadata[], pageUrl: string): C
 export function parseRbwLogin(raw: string, expectedId: string): CredentialResult<RbwLoginSecret> {
   try {
     const value: unknown = JSON.parse(raw);
-    if (!isRecord(value) || value.id !== expectedId || !isRecord(value.login) || typeof value.login.password !== 'string') {
+    if (!isRecord(value) || value.id !== expectedId) {
       return { ok: false, code: 'invalid-output' };
     }
+    const login = isRecord(value.data) ? value.data : value.login;
+    if (!isRecord(login) || typeof login.password !== 'string') return { ok: false, code: 'invalid-output' };
     return {
       ok: true,
-      value: { id: expectedId, username: typeof value.login.username === 'string' ? value.login.username : undefined, password: value.login.password },
+      value: { id: expectedId, username: typeof login.username === 'string' ? login.username : undefined, password: login.password },
     };
   } catch { return { ok: false, code: 'invalid-output' }; }
 }
