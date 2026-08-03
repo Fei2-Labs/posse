@@ -550,6 +550,11 @@ html, body {
   opacity: 0;
 }
 
+#file-tree-panel.browser-expanded {
+  width: min(72vw, 1100px) !important;
+  max-width: none;
+}
+
 #inspector-tabs {
   height: 38px;
   display: flex;
@@ -559,7 +564,10 @@ html, body {
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-toolbar);
   flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+#inspector-tabs::-webkit-scrollbar { display: none; }
 
 .inspector-tab {
   border: 0;
@@ -606,6 +614,147 @@ html, body {
   color: var(--text-primary);
   font-size: 13px;
 }
+
+/* Isolated in-app browser chrome. The native WebContentsView is positioned over
+   #browser-viewport; all controls remain in Posse's trusted renderer. */
+#inspector-browser-panel {
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+#browser-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 5px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-toolbar);
+}
+
+#browser-address-form,
+#browser-actions {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+#browser-address-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+#browser-address-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+#browser-security {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+#browser-security svg { width: 14px; height: 14px; }
+#browser-security[data-security="secure"] { color: var(--status-success, #22c55e); }
+#browser-security[data-security="local"] { color: var(--accent); }
+#browser-security[data-security="insecure"] { color: var(--status-warning, #f59e0b); }
+
+#browser-address {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+#browser-address::placeholder { color: var(--text-muted); }
+
+#browser-actions {
+  min-height: 28px;
+  padding-left: 2px;
+}
+
+#browser-origin-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#browser-toolbar .toolbar-icon-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+
+#browser-toolbar .toolbar-icon-btn:disabled {
+  cursor: default;
+  opacity: 0.32;
+}
+
+#browser-permission {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--status-warning, #f59e0b);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 11.5px;
+}
+#browser-permission[hidden] { display: none; }
+#browser-permission > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+#browser-permission-origin { overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.browser-permission-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.browser-permission-actions button { min-height: 28px; padding: 4px 10px; }
+
+#browser-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 120px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.browser-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.browser-state[hidden] { display: none; }
+.browser-state strong { color: var(--text-primary); font-size: 13px; }
+.browser-state span { max-width: 44ch; }
 
 #file-tree-header {
   height: 34px;
@@ -3491,6 +3640,10 @@ select.ai-form-input {
     overflow: visible;
     opacity: 1;
     transform: translateX(100%);
+  }
+
+  #file-tree-panel.browser-expanded {
+    width: calc(100vw - 44px) !important;
   }
 
   #file-tree-toggle {

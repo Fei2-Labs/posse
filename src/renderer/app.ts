@@ -46,6 +46,16 @@ const ICON: Record<string, string> = {
 
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
 
+type EmbeddedBrowserState = {
+  url: string;
+  title: string;
+  isLoading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  security: 'secure' | 'local' | 'insecure' | 'neutral';
+  error?: string;
+};
+
 type PtySessionInfo = {
   id: string;
   title: string;
@@ -84,6 +94,18 @@ declare global {
       readFileBase64: (filePath: string) => Promise<{ ok: boolean; dataUrl?: string; size?: number; ext?: string; error?: string }>;
       inspectorRegisterProjectRoot: (rootPath: string) => Promise<{ ok: boolean; token?: string; rootName?: string; error?: string }>;
       inspectorProjectPreviewUrl: (token: string, relativePath: string) => Promise<{ ok: boolean; url?: string; error?: string }>;
+      browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
+      browserGetState: () => Promise<EmbeddedBrowserState | null>;
+      browserNavigate: (input: string) => Promise<{ ok: boolean; error?: string }>;
+      browserBack: () => void;
+      browserForward: () => void;
+      browserReloadOrStop: () => void;
+      browserOpenExternal: () => Promise<{ ok: boolean; error?: string }>;
+      browserOpenDevTools: () => void;
+      browserClearProfile: () => Promise<{ ok: boolean; error?: string }>;
+      browserResolvePermission: (requestId: string, allow: boolean) => Promise<boolean>;
+      onBrowserState: (cb: (state: EmbeddedBrowserState) => void) => void;
+      onBrowserPermission: (cb: (request: { id: string; permission: string; origin: string }) => void) => void;
       remoteUploadFiles: (args: { destDir: string }) => Promise<{ ok: boolean; uploaded: string[]; skipped?: string[]; error?: string }>;
       remoteDownloadFile: (args: { remotePath: string }) => Promise<{ ok: boolean; savedTo?: string; error?: string }>;
       gitBranch: (cwd: string) => Promise<string>;
@@ -1673,9 +1695,10 @@ const inspectorTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.
 const inspectorPanels: Record<InspectorTab, HTMLElement> = {
   files: document.getElementById('inspector-files-panel')!,
   preview: document.getElementById('inspector-preview-panel')!,
+  browser: document.getElementById('inspector-browser-panel')!,
   git: document.getElementById('inspector-git-panel')!,
 };
-type InspectorTab = 'files' | 'preview' | 'git';
+type InspectorTab = 'files' | 'preview' | 'browser' | 'git';
 let activeInspectorTab: InspectorTab = 'files';
 
 function setInspectorTab(tab: InspectorTab, persist = true): void {
@@ -1690,6 +1713,7 @@ function setInspectorTab(tab: InspectorTab, persist = true): void {
     panel.hidden = name !== tab;
   }
   if (persist) localStorage.setItem('posse_inspector_tab', tab);
+  requestAnimationFrame(() => scheduleBrowserBoundsSync());
 }
 
 inspectorTabs.forEach((button, index) => {
@@ -1708,7 +1732,7 @@ inspectorTabs.forEach((button, index) => {
 });
 
 const savedInspectorTab = localStorage.getItem('posse_inspector_tab');
-if (savedInspectorTab === 'files' || savedInspectorTab === 'preview' || savedInspectorTab === 'git') {
+if (savedInspectorTab === 'files' || savedInspectorTab === 'preview' || savedInspectorTab === 'browser' || savedInspectorTab === 'git') {
   setInspectorTab(savedInspectorTab, false);
 }
 
@@ -1969,6 +1993,225 @@ const terminalArea = document.getElementById('terminal-area')!;
 const terminalContent = document.getElementById('terminal-content')!;
 const acpContent = document.getElementById('acp-content')!;
 const emptyState = document.getElementById('empty-state')!;
+
+function requiredBrowserElement<T extends HTMLElement>(id: string): T {
+  const element = document.getElementById(id);
+  if (!element) throw new Error(`Browser UI is missing #${id}`);
+  return element as T;
+}
+
+const browserViewport = requiredBrowserElement<HTMLElement>('browser-viewport');
+const browserAddressForm = requiredBrowserElement<HTMLFormElement>('browser-address-form');
+const browserAddress = requiredBrowserElement<HTMLInputElement>('browser-address');
+const browserBackBtn = requiredBrowserElement<HTMLButtonElement>('browser-back');
+const browserForwardBtn = requiredBrowserElement<HTMLButtonElement>('browser-forward');
+const browserReloadBtn = requiredBrowserElement<HTMLButtonElement>('browser-reload');
+const browserExternalBtn = requiredBrowserElement<HTMLButtonElement>('browser-external');
+const browserDevToolsBtn = requiredBrowserElement<HTMLButtonElement>('browser-devtools');
+const browserExpandBtn = requiredBrowserElement<HTMLButtonElement>('browser-expand');
+const browserClearBtn = requiredBrowserElement<HTMLButtonElement>('browser-clear');
+const browserCloseBtn = requiredBrowserElement<HTMLButtonElement>('browser-close');
+const browserSecurity = requiredBrowserElement<HTMLElement>('browser-security');
+const browserOriginLabel = requiredBrowserElement<HTMLElement>('browser-origin-label');
+const browserEmpty = requiredBrowserElement<HTMLElement>('browser-empty');
+const browserError = requiredBrowserElement<HTMLElement>('browser-error');
+const browserErrorMessage = requiredBrowserElement<HTMLElement>('browser-error-message');
+const browserRetryBtn = requiredBrowserElement<HTMLButtonElement>('browser-retry');
+const browserPermission = requiredBrowserElement<HTMLElement>('browser-permission');
+const browserPermissionTitle = requiredBrowserElement<HTMLElement>('browser-permission-title');
+const browserPermissionOrigin = requiredBrowserElement<HTMLElement>('browser-permission-origin');
+const browserPermissionAllow = requiredBrowserElement<HTMLButtonElement>('browser-permission-allow');
+const browserPermissionDeny = requiredBrowserElement<HTMLButtonElement>('browser-permission-deny');
+
+const BROWSER_RELOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';
+const BROWSER_STOP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>';
+const BROWSER_EXPAND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>';
+const BROWSER_CONTRACT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></svg>';
+
+let browserState: EmbeddedBrowserState = {
+  url: '', title: 'Browser', isLoading: false, canGoBack: false, canGoForward: false, security: 'neutral',
+};
+let browserHasPage = false;
+let browserExpanded = false;
+let browserBoundsFrame: number | null = null;
+let browserPermissionRequest: { id: string; permission: string; origin: string } | null = null;
+let browserOverlayOpen = false;
+
+function browserOrigin(url: string): string {
+  try { return new URL(url).origin; }
+  catch { return 'No page loaded'; }
+}
+
+function browserSecurityLabel(state: EmbeddedBrowserState['security']): string {
+  if (state === 'secure') return 'Secure HTTPS page';
+  if (state === 'local') return 'Local development page';
+  if (state === 'insecure') return 'Not secure: HTTP page';
+  return 'No page loaded';
+}
+
+function renderBrowserState(): void {
+  browserBackBtn.disabled = !browserState.canGoBack;
+  browserForwardBtn.disabled = !browserState.canGoForward;
+  browserExternalBtn.disabled = !browserState.url;
+  browserDevToolsBtn.disabled = !browserState.url;
+  browserReloadBtn.innerHTML = browserState.isLoading ? BROWSER_STOP_ICON : BROWSER_RELOAD_ICON;
+  browserReloadBtn.title = browserState.isLoading ? 'Stop loading' : 'Reload';
+  browserReloadBtn.setAttribute('aria-label', browserReloadBtn.title);
+  browserSecurity.dataset.security = browserState.security;
+  const securityLabel = browserSecurityLabel(browserState.security);
+  browserSecurity.title = securityLabel;
+  browserSecurity.setAttribute('aria-label', securityLabel);
+  browserOriginLabel.textContent = browserState.url ? browserOrigin(browserState.url) : 'No page loaded';
+  browserOriginLabel.title = browserState.url || '';
+  if (document.activeElement !== browserAddress && browserState.url) browserAddress.value = browserState.url;
+  browserEmpty.hidden = browserHasPage || Boolean(browserState.error);
+  browserError.hidden = !browserState.error;
+  browserErrorMessage.textContent = browserState.error || '';
+  scheduleBrowserBoundsSync();
+}
+
+function syncBrowserBounds(): void {
+  browserBoundsFrame = null;
+  if (activeInspectorTab !== 'browser' && browserExpanded) {
+    browserExpanded = false;
+    fileTreePanel.classList.remove('browser-expanded');
+    browserExpandBtn.innerHTML = BROWSER_EXPAND_ICON;
+    browserExpandBtn.title = 'Expand browser';
+    browserExpandBtn.setAttribute('aria-label', 'Expand browser');
+  }
+  const rect = browserViewport.getBoundingClientRect();
+  const visible = activeInspectorTab === 'browser'
+    && !fileTreePanel.classList.contains('collapsed')
+    && browserHasPage
+    && !browserState.error
+    && !browserOverlayOpen;
+  window.posse.browserSetBounds({
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height,
+    visible,
+  });
+}
+
+function scheduleBrowserBoundsSync(): void {
+  if (browserBoundsFrame !== null) return;
+  browserBoundsFrame = requestAnimationFrame(syncBrowserBounds);
+}
+
+function permissionLabel(permission: string): string {
+  if (permission === 'media') return 'Use camera or microphone';
+  if (permission === 'geolocation') return 'Use your location';
+  if (permission === 'notifications') return 'Show notifications';
+  return `Use ${permission}`;
+}
+
+async function resolveBrowserPermission(allow: boolean): Promise<void> {
+  const request = browserPermissionRequest;
+  if (!request) return;
+  browserPermissionRequest = null;
+  browserPermission.hidden = true;
+  await window.posse.browserResolvePermission(request.id, allow);
+  scheduleBrowserBoundsSync();
+}
+
+browserAddressForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = browserAddress.value.trim();
+  if (!input) return;
+  browserHasPage = true;
+  browserState = { ...browserState, error: undefined, isLoading: true };
+  renderBrowserState();
+  const result = await window.posse.browserNavigate(input);
+  if (!result.ok) {
+    browserState = { ...browserState, isLoading: false, error: result.error || 'The page could not be opened.' };
+    renderBrowserState();
+  }
+});
+browserBackBtn.addEventListener('click', () => window.posse.browserBack());
+browserForwardBtn.addEventListener('click', () => window.posse.browserForward());
+browserReloadBtn.addEventListener('click', () => window.posse.browserReloadOrStop());
+browserExternalBtn.addEventListener('click', async () => {
+  const result = await window.posse.browserOpenExternal();
+  if (!result.ok && result.error) showNavToast(result.error);
+});
+browserDevToolsBtn.addEventListener('click', () => window.posse.browserOpenDevTools());
+browserExpandBtn.addEventListener('click', () => {
+  browserExpanded = !browserExpanded;
+  fileTreePanel.classList.toggle('browser-expanded', browserExpanded);
+  browserExpandBtn.innerHTML = browserExpanded ? BROWSER_CONTRACT_ICON : BROWSER_EXPAND_ICON;
+  browserExpandBtn.title = browserExpanded ? 'Restore browser width' : 'Expand browser';
+  browserExpandBtn.setAttribute('aria-label', browserExpandBtn.title);
+  scheduleBrowserBoundsSync();
+});
+browserClearBtn.addEventListener('click', async () => {
+  const confirmed = await confirmDangerDialog(
+    'Clear browser profile?',
+    'This signs you out of sites and removes cookies, cache, and browser storage. Posse sessions and projects are not affected.',
+    'Clear data',
+  );
+  if (!confirmed) return;
+  await resolveBrowserPermission(false);
+  browserHasPage = false;
+  browserState = { url: '', title: 'Browser', isLoading: false, canGoBack: false, canGoForward: false, security: 'neutral' };
+  browserAddress.value = '';
+  renderBrowserState();
+  const result = await window.posse.browserClearProfile();
+  showNavToast(result.ok ? 'Browser profile cleared' : (result.error || 'Could not clear browser profile'));
+});
+browserCloseBtn.addEventListener('click', () => setInspectorTab('files'));
+browserRetryBtn.addEventListener('click', async () => {
+  const input = browserAddress.value.trim();
+  if (!input) {
+    browserAddress.focus();
+    return;
+  }
+  browserState = { ...browserState, error: undefined, isLoading: true };
+  renderBrowserState();
+  const result = await window.posse.browserNavigate(input);
+  if (!result.ok) {
+    browserState = { ...browserState, isLoading: false, error: result.error || 'The page could not be opened.' };
+    renderBrowserState();
+  }
+});
+browserPermissionAllow.addEventListener('click', () => { void resolveBrowserPermission(true); });
+browserPermissionDeny.addEventListener('click', () => { void resolveBrowserPermission(false); });
+
+window.posse.onBrowserState((state) => {
+  browserState = state;
+  if (state.url) browserHasPage = true;
+  renderBrowserState();
+});
+window.posse.onBrowserPermission((request) => {
+  if (browserPermissionRequest) void window.posse.browserResolvePermission(browserPermissionRequest.id, false);
+  browserPermissionRequest = request;
+  browserPermissionTitle.textContent = permissionLabel(request.permission);
+  browserPermissionOrigin.textContent = request.origin;
+  browserPermissionOrigin.title = request.origin;
+  browserPermission.hidden = false;
+  scheduleBrowserBoundsSync();
+});
+
+const browserResizeObserver = new ResizeObserver(scheduleBrowserBoundsSync);
+browserResizeObserver.observe(browserViewport);
+browserResizeObserver.observe(fileTreePanel);
+window.addEventListener('resize', scheduleBrowserBoundsSync);
+function updateBrowserOverlayState(): void {
+  const overlayOpen = newSessionOverlay.classList.contains('active')
+    || Boolean(document.querySelector('.confirm-overlay, .settings-dialog__overlay'));
+  if (overlayOpen === browserOverlayOpen) return;
+  browserOverlayOpen = overlayOpen;
+  scheduleBrowserBoundsSync();
+}
+const browserOverlayObserver = new MutationObserver(updateBrowserOverlayState);
+browserOverlayObserver.observe(document.body, { childList: true });
+browserOverlayObserver.observe(newSessionOverlay, { attributes: true, attributeFilter: ['class'] });
+void window.posse.browserGetState().then((state) => {
+  if (!state) return;
+  browserState = state;
+  browserHasPage = Boolean(state.url);
+  renderBrowserState();
+});
 // The Sessions tab now renders the Codex-style project navigator into this container.
 const sessionList = document.getElementById('project-nav')!;
 const chatContent = document.getElementById('chat-content')!;

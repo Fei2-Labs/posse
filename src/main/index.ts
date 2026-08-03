@@ -27,6 +27,11 @@ import {
   revokeProjectPreviewRoots,
   createProjectPreviewUrl,
 } from './project-preview';
+import {
+  EmbeddedBrowserManager,
+  type EmbeddedBrowserBounds,
+  type EmbeddedBrowserState,
+} from './browser-controller';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
 import { AcpManager, getAcpCommand, isAcpEligible } from './acp-client';
@@ -690,6 +695,7 @@ function parseShellExports(content: string): Map<string, string> {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let embeddedBrowserManager: EmbeddedBrowserManager | null = null;
 
 // ACP (Agent Client Protocol) manager — structured agent sessions for ACP-compatible agents
 const acpManager = new AcpManager(
@@ -964,6 +970,7 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
     // Closing a window NEVER kills its connection (remote daemons keep running 24/7). Just drop
     // the binding so its frames stop routing here.
     revokeProjectPreviewRoots(windowWebContentsId);
+    embeddedBrowserManager?.destroyFor(win);
     unbindWindow(win);
     if (win === mainWindow) {
       mainWindow = null;
@@ -2293,6 +2300,59 @@ function registerIPC(): void {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win) win.setTitle(title);
     else if (mainWindow) mainWindow.setTitle(title);
+  });
+
+  const browserForEvent = (event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || owner.isDestroyed() || !embeddedBrowserManager) return null;
+    return { owner, controller: embeddedBrowserManager.controllerFor(owner) };
+  };
+
+  ipcMain.on('browser:set-bounds', (event, rawBounds: EmbeddedBrowserBounds) => {
+    const browser = browserForEvent(event);
+    if (!browser || !rawBounds || typeof rawBounds !== 'object') return;
+    const values = [rawBounds.x, rawBounds.y, rawBounds.width, rawBounds.height];
+    if (!values.every(value => Number.isFinite(value))) return;
+    browser.controller.setBounds({
+      x: rawBounds.x,
+      y: rawBounds.y,
+      width: rawBounds.width,
+      height: rawBounds.height,
+      visible: rawBounds.visible === true,
+    });
+  });
+  ipcMain.handle('browser:get-state', (event): EmbeddedBrowserState | null => {
+    return browserForEvent(event)?.controller.currentState() ?? null;
+  });
+  ipcMain.handle('browser:navigate', async (event, input: string) => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof input !== 'string') return { ok: false, error: 'Browser is unavailable.' };
+    return browser.controller.navigate(input);
+  });
+  ipcMain.on('browser:back', (event) => { browserForEvent(event)?.controller.goBack(); });
+  ipcMain.on('browser:forward', (event) => { browserForEvent(event)?.controller.goForward(); });
+  ipcMain.on('browser:reload-or-stop', (event) => { browserForEvent(event)?.controller.reloadOrStop(); });
+  ipcMain.on('browser:devtools', (event) => { browserForEvent(event)?.controller.openDevTools(); });
+  ipcMain.handle('browser:open-external', async (event) => {
+    const browser = browserForEvent(event);
+    if (!browser) return { ok: false, error: 'Browser is unavailable.' };
+    return browser.controller.openExternal();
+  });
+  ipcMain.handle('browser:clear-profile', async (event) => {
+    if (!BrowserWindow.fromWebContents(event.sender) || !embeddedBrowserManager) {
+      return { ok: false, error: 'Browser is unavailable.' };
+    }
+    try {
+      await embeddedBrowserManager.clearProfile();
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Could not clear the browser profile.' };
+    }
+  });
+  ipcMain.handle('browser:resolve-permission', (event, requestId: string, allow: boolean) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || !embeddedBrowserManager || typeof requestId !== 'string' || typeof allow !== 'boolean') return false;
+    return embeddedBrowserManager.resolvePermission(owner, requestId, allow);
   });
 
   // ========== Status-dot debug logger IPC (permanent, default-OFF) ==========
@@ -3725,6 +3785,7 @@ app.whenReady().then(async () => {
   }
   createTray();
 
+  embeddedBrowserManager = new EmbeddedBrowserManager();
   registerIPC();
   cloudflaredManager = new CloudflaredManager(path.join(__dirname, '../..'));
   createWindow(appIcon);

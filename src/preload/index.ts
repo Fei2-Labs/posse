@@ -81,6 +81,28 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('inspector:register-project-root', rootPath) as Promise<{ ok: boolean; token?: string; rootName?: string; error?: string }>,
   inspectorProjectPreviewUrl: (token: string, relativePath: string) =>
     ipcRenderer.invoke('inspector:project-preview-url', token, relativePath) as Promise<{ ok: boolean; url?: string; error?: string }>,
+  browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) =>
+    ipcRenderer.send('browser:set-bounds', bounds),
+  browserGetState: () => ipcRenderer.invoke('browser:get-state') as Promise<{
+    url: string; title: string; isLoading: boolean; canGoBack: boolean; canGoForward: boolean;
+    security: 'secure' | 'local' | 'insecure' | 'neutral'; error?: string;
+  } | null>,
+  browserNavigate: (input: string) =>
+    ipcRenderer.invoke('browser:navigate', input) as Promise<{ ok: boolean; error?: string }>,
+  browserBack: () => ipcRenderer.send('browser:back'),
+  browserForward: () => ipcRenderer.send('browser:forward'),
+  browserReloadOrStop: () => ipcRenderer.send('browser:reload-or-stop'),
+  browserOpenExternal: () => ipcRenderer.invoke('browser:open-external') as Promise<{ ok: boolean; error?: string }>,
+  browserOpenDevTools: () => ipcRenderer.send('browser:devtools'),
+  browserClearProfile: () => ipcRenderer.invoke('browser:clear-profile') as Promise<{ ok: boolean; error?: string }>,
+  browserResolvePermission: (requestId: string, allow: boolean) =>
+    ipcRenderer.invoke('browser:resolve-permission', requestId, allow) as Promise<boolean>,
+  onBrowserState: (cb: (state: {
+    url: string; title: string; isLoading: boolean; canGoBack: boolean; canGoForward: boolean;
+    security: 'secure' | 'local' | 'insecure' | 'neutral'; error?: string;
+  }) => void) => ipcRenderer.on('browser:state', (_event, state) => cb(state)),
+  onBrowserPermission: (cb: (request: { id: string; permission: string; origin: string }) => void) =>
+    ipcRenderer.on('browser:permission', (_event, request) => cb(request)),
   // Desktop -> remote upload: native multi-select dialog, then write the picked file(s)
   // into destDir on the active connection (remote over HTTP, or local copy). 50MB/file cap.
   remoteUploadFiles: (args: { destDir: string }) =>
