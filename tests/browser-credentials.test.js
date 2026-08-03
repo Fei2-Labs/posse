@@ -25,6 +25,18 @@ test('parses only non-secret rbw list metadata', () => {
   });
 });
 
+test('accepts rbw 1.15 null URI lists and normalizes entry types', () => {
+  const result = parseRbwList(JSON.stringify([
+    { id: '11111111-1111-1111-1111-111111111111', name: 'Login', user: null, folder: null, uris: null, type: 'Login' },
+    { id: '22222222-2222-2222-2222-222222222222', name: 'Note', user: null, folder: null, uris: [], type: 'Note' },
+  ]));
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value.map((entry) => ({ uris: entry.uris, type: entry.type })), [
+    { uris: [], type: 'login' },
+    { uris: [], type: 'note' },
+  ]);
+});
+
 test('matches exact origin before same-host candidates and rejects unrelated hosts', () => {
   const result = matchRbwEntries([
     { id: '1', name: 'same', uris: ['https://example.com/account'], type: 'login' },

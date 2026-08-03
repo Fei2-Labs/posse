@@ -2085,6 +2085,8 @@ function credentialActionLabel(code: string | undefined): string {
   if (code === 'not-configured') return 'Configure rbw first';
   if (code === 'no-match') return 'No login matches this origin';
   if (code === 'timeout') return 'rbw timed out';
+  if (code === 'invalid-output') return 'rbw returned an unsupported response';
+  if (code === 'auth-failed') return 'rbw authentication failed';
   return code ? 'Credential provider unavailable' : 'Find a matching login';
 }
 

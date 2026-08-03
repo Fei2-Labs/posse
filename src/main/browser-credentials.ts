@@ -98,18 +98,22 @@ export function parseRbwList(raw: string): CredentialResult<RbwEntryMetadata[]> 
     if (!Array.isArray(value) || value.length > 2_000) return { ok: false, code: 'invalid-output' };
     const entries: RbwEntryMetadata[] = [];
     for (const item of value) {
-      if (!isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string' || !Array.isArray(item.uris)) {
+      if (!isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string') {
         return { ok: false, code: 'invalid-output' };
       }
-      const uris = item.uris.filter((uri): uri is string => typeof uri === 'string');
-      if (uris.length !== item.uris.length || uris.length > 100) return { ok: false, code: 'invalid-output' };
+      if (item.uris !== null && item.uris !== undefined && !Array.isArray(item.uris)) {
+        return { ok: false, code: 'invalid-output' };
+      }
+      const rawUris = Array.isArray(item.uris) ? item.uris : [];
+      const uris = rawUris.filter((uri): uri is string => typeof uri === 'string');
+      if (uris.length !== rawUris.length || uris.length > 100) return { ok: false, code: 'invalid-output' };
       entries.push({
         id: item.id,
         name: item.name,
         username: typeof item.user === 'string' ? item.user : undefined,
         folder: typeof item.folder === 'string' ? item.folder : undefined,
         uris,
-        type: typeof item.type === 'string' ? item.type : 'login',
+        type: typeof item.type === 'string' ? item.type.toLowerCase() : 'login',
       });
     }
     return { ok: true, value: entries };
