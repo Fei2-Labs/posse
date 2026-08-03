@@ -1,4 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { ContentBlock, PermissionOption, PromptCapabilities, SessionConfigOption, SessionModeState, SessionUpdate } from '@agentclientprotocol/sdk';
+
+type AcpSessionInfo = {
+  id: string;
+  agentLabel: string;
+  cwd: string;
+  sessionId: string | null;
+  configOptions: SessionConfigOption[];
+  modes: SessionModeState | null;
+  promptCapabilities: PromptCapabilities | null;
+  status: 'initializing' | 'ready' | 'prompting' | 'idle' | 'error' | 'closed';
+  errorMessage?: string;
+};
+
+type AcpPermissionRequest = {
+  toolCallId: string;
+  toolName: string;
+  options: PermissionOption[];
+};
 
 contextBridge.exposeInMainWorld('posse', {
   // Set window title
@@ -249,4 +268,30 @@ contextBridge.exposeInMainWorld('posse', {
   // Enable without rebuild: `touch ~/.posse-debug/ON` then reopen Posse. Log: ~/.posse-debug/status.log
   debugStatusEnabled: () => ipcRenderer.invoke('debug:status-enabled') as Promise<boolean>,
   debugStatusLog: (line: string) => ipcRenderer.send('debug:status-log', line),
+
+  // ========== ACP (Agent Client Protocol) — structured agent sessions ==========
+  acpCheck: (presetCommand: string) =>
+    ipcRenderer.invoke('acp:check', presetCommand) as Promise<boolean>,
+  acpCreate: (id: string, agentLabel: string, cwd: string, providerEnv?: Record<string, string>) =>
+    ipcRenderer.invoke('acp:create', id, agentLabel, cwd, providerEnv) as Promise<AcpSessionInfo>,
+  acpPrompt: (id: string, content: string | ContentBlock[]) =>
+    ipcRenderer.invoke('acp:prompt', id, content) as Promise<boolean>,
+  acpCancel: (id: string) =>
+    ipcRenderer.invoke('acp:cancel', id) as Promise<boolean>,
+  acpSetConfigOption: (id: string, configId: string, value: string | boolean) =>
+    ipcRenderer.invoke('acp:set-config-option', id, configId, value) as Promise<SessionConfigOption[]>,
+  acpInfo: (id: string) =>
+    ipcRenderer.invoke('acp:info', id) as Promise<AcpSessionInfo | null>,
+  acpDestroy: (id: string) =>
+    ipcRenderer.send('acp:destroy', id),
+  acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) =>
+    ipcRenderer.invoke('acp:load', id, agentLabel, cwd, acpSessionId, providerEnv) as Promise<AcpSessionInfo>,
+  acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) =>
+    ipcRenderer.invoke('acp:resolve-permission', id, toolCallId, outcome, optionId) as Promise<boolean>,
+  onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) =>
+    ipcRenderer.on('acp:update', (_e, id, update) => cb(id, update)),
+  onAcpStatus: (cb: (id: string, info: Partial<AcpSessionInfo>) => void) =>
+    ipcRenderer.on('acp:status', (_e, id, info) => cb(id, info)),
+  onAcpPermission: (cb: (id: string, request: AcpPermissionRequest) => void) =>
+    ipcRenderer.on('acp:permission', (_e, id, request) => cb(id, request)),
 });

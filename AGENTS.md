@@ -38,3 +38,14 @@ Rule of thumb:
 
 State the verdict on each version handoff, e.g. "v1.2.X installed — app-only restart" or
 "v1.2.X — restart app AND daemon (touched pty-manager.ts)".
+
+github account - clarezoe
+
+### GitHub identity for this repo
+This repo (Fei2-Labs/posse) belongs to the `clarezoe` GitHub account. All git/GitHub
+operations (push, PR creation, gh CLI calls) for this repo must be done as `clarezoe`,
+NOT whatever account the Copilot CLI/session happens to be logged in as (e.g.
+`feifei-kosonen_volvo`, which lacks push access here). If a push/PR fails with a 403
+permission error tied to the session's default identity, that's the cause — don't retry
+as that account; use `clarezoe`'s credentials instead (or hand off to the user to push
+locally with their own credentials).

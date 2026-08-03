@@ -85,6 +85,9 @@
         <button id="toolbar-restart-daemon-btn" class="topbar-icon-btn" title="Restart the background terminal daemon (live sessions are saved as resumable)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
         </button>
+        <button id="toolbar-settings-btn" class="topbar-icon-btn" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
         <select id="app-theme-select" class="topbar-theme-select" title="App color theme — pick by mood"></select>
       </div>
       <!-- Remote server connection info -->
@@ -93,7 +96,16 @@
           <span class="remote-info-chevron">▸</span><span>Mobile Access</span>
         </button>
         <div class="remote-info-body" id="remote-info-body" hidden>
-          <div class="remote-info-qr"><img class="remote-info-qr-img" alt="Scan to connect" /></div>
+          <div class="remote-info-qr-group">
+            <div class="remote-info-qr remote-info-qr-ts" style="display:none;">
+              <img class="remote-info-qr-img-ts" alt="Scan Tailscale URL to connect" />
+              <div class="remote-info-qr-label">Tailscale (off-LAN)</div>
+            </div>
+            <div class="remote-info-qr remote-info-qr-lan" style="display:none;">
+              <img class="remote-info-qr-img-lan" alt="Scan LAN URL to connect" />
+              <div class="remote-info-qr-label">LAN (same Wi-Fi)</div>
+            </div>
+          </div>
           <div class="remote-info-scan-hint">Scan with your phone to connect</div>
           <div class="remote-info-url" title="Tap to copy"></div>
           <div class="remote-info-lan"></div>
@@ -126,6 +138,9 @@
     <div id="terminal-area">
       <div id="terminal-content">
         <div id="empty-state">Select a working directory, then click "New Terminal" to start</div>
+      </div>
+      <div id="acp-content" style="display:none;">
+        <!-- ACP session views are dynamically inserted here -->
       </div>
       <div id="chat-content" style="display:none;">
         <div id="chat-empty-state" class="chat-empty-state">

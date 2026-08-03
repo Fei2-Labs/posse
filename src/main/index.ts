@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, globalShortcut, Tray, Menu } from 'electron';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -28,6 +29,7 @@ import {
 } from './project-preview';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
+import { AcpManager, getAcpCommand, isAcpEligible } from './acp-client';
 import { autoUpdater } from 'electron-updater';
 import buildStamp from './build-stamp.json';
 import {
@@ -688,6 +690,19 @@ function parseShellExports(content: string): Map<string, string> {
 }
 
 let mainWindow: BrowserWindow | null = null;
+
+// ACP (Agent Client Protocol) manager — structured agent sessions for ACP-compatible agents
+const acpManager = new AcpManager(
+  (id, update) => {
+    mainWindow?.webContents.send('acp:update', id, update);
+  },
+  (id, info) => {
+    mainWindow?.webContents.send('acp:status', id, info);
+  },
+  (id, toolCallId, toolName, options) => {
+    mainWindow?.webContents.send('acp:permission', id, { toolCallId, toolName, options });
+  },
+);
 
 // Connection registry — the seam for multi-host. Holds connections keyed by id
 // (only 'local' today) and tracks the active one. Populated in setupPtyManager()
@@ -2411,6 +2426,64 @@ function registerIPC(): void {
     }));
   });
 
+  // ========== ACP (Agent Client Protocol) handlers ==========
+  // Check if a preset command is ACP-compatible (renderer uses this to decide ACP vs PTY).
+  // ACP is LOCAL-ONLY: remote connections always use PTY (the agent must run on the
+  // local machine where the cwd exists). The renderer also checks, but this is the
+  // authoritative gate.
+  ipcMain.handle('acp:check', (_e, presetCommand: string) => {
+    if (remoteBackendForEvent(_e)) return false;
+    return isAcpEligible(presetCommand);
+  });
+
+  // Create an ACP session (local connections only)
+  ipcMain.handle('acp:create', async (_e, id: string, agentLabel: string, cwd: string, providerEnv?: Record<string, string>) => {
+    if (remoteBackendForEvent(_e)) {
+      throw new Error('ACP sessions are not supported on remote connections');
+    }
+    return acpManager.create(id, agentLabel, cwd, providerEnv);
+  });
+
+  // Send a prompt to an ACP session
+  ipcMain.handle('acp:prompt', async (_e, id: string, content: string | ContentBlock[]) => {
+    await acpManager.prompt(id, content);
+    return true;
+  });
+
+  // Cancel an ongoing ACP prompt
+  ipcMain.handle('acp:cancel', async (_e, id: string) => {
+    await acpManager.cancel(id);
+    return true;
+  });
+
+  // Set a config option (model, mode, etc.)
+  ipcMain.handle('acp:set-config-option', async (_e, id: string, configId: string, value: string | boolean) => {
+    return acpManager.setConfigOption(id, configId, value);
+  });
+
+  // Get ACP session info
+  ipcMain.handle('acp:info', (_e, id: string) => {
+    return acpManager.getSession(id) ?? null;
+  });
+
+  // Destroy an ACP session
+  ipcMain.on('acp:destroy', (_e, id: string) => {
+    acpManager.destroy(id);
+  });
+
+  // Load (resume) an existing ACP session by sessionId
+  ipcMain.handle('acp:load', async (_e, id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => {
+    if (remoteBackendForEvent(_e)) {
+      throw new Error('ACP sessions are not supported on remote connections');
+    }
+    return acpManager.load(id, agentLabel, cwd, acpSessionId, providerEnv);
+  });
+
+  // Resolve a permission prompt from the renderer
+  ipcMain.handle('acp:resolve-permission', async (_e, id: string, toolCallId: string, outcome: string, optionId?: string) => {
+    return acpManager.resolvePermission(id, toolCallId, outcome, optionId);
+  });
+
   // Gracefully restart the background PTY daemon.
   // Saves every live session as resumable FIRST so nothing is lost, then
   // stops the old daemon and starts a fresh one (picks up new daemon code).
@@ -3572,7 +3645,28 @@ function registerIPC(): void {
   });
 
   // Renderer proactively fetches remote server info (resolves the race where IPC messages arrive before the renderer loads)
-  ipcMain.handle('remote:get-server-info', () => cachedRemoteServerInfo);
+  // Re-fetch Tailscale info each time — Tailscale may come online after the server started,
+  // and the cached info from startup would be stale (no tailscaleUrl/tailscaleHttpUrl).
+  ipcMain.handle('remote:get-server-info', () => {
+    if (cachedRemoteServerInfo) {
+      const ts = getTailscaleInfo();
+      const tailscaleUrl = ts && ts.dnsName ? `https://${ts.dnsName}` : null;
+      const tailscaleHttpUrl = ts && ts.ip ? `http://${ts.ip}:${cachedRemoteServerInfo.port}` : null;
+      const updated = {
+        ...cachedRemoteServerInfo,
+        tailscaleUrl,
+        tailscaleHttpUrl,
+      };
+      // Only update cache + notify if Tailscale info actually changed
+      if (tailscaleUrl !== cachedRemoteServerInfo.tailscaleUrl ||
+          tailscaleHttpUrl !== cachedRemoteServerInfo.tailscaleHttpUrl) {
+        cachedRemoteServerInfo = updated;
+        safeSend('remote:server-info', updated);
+      }
+      return updated;
+    }
+    return cachedRemoteServerInfo;
+  });
 
   // Called by remote-server: read session status (busy/unread/idle)
   // The renderer syncs status here via IPC
@@ -3681,6 +3775,22 @@ app.whenReady().then(async () => {
     }
   }, listResumableSessions);
 
+  // Periodic Tailscale watcher: Tailscale may come online after the server started.
+  // Re-check every 10s and push updated server info to the renderer when Tailscale state changes.
+  let lastTsUrl: string | null = null;
+  let lastTsHttpUrl: string | null = null;
+  setInterval(() => {
+    if (!cachedRemoteServerInfo) return;
+    const ts = getTailscaleInfo();
+    const tailscaleUrl = ts && ts.dnsName ? `https://${ts.dnsName}` : null;
+    const tailscaleHttpUrl = ts && ts.ip ? `http://${ts.ip}:${cachedRemoteServerInfo.port}` : null;
+    if (tailscaleUrl === lastTsUrl && tailscaleHttpUrl === lastTsHttpUrl) return;
+    lastTsUrl = tailscaleUrl;
+    lastTsHttpUrl = tailscaleHttpUrl;
+    cachedRemoteServerInfo = { ...cachedRemoteServerInfo, tailscaleUrl, tailscaleHttpUrl };
+    safeSend('remote:server-info', cachedRemoteServerInfo);
+  }, 10000);
+
   // The AI config is already saved in the preference file; no extra restore needed
 
 });
@@ -3700,6 +3810,8 @@ app.on('activate', () => {
 app.on('before-quit', async () => {
   globalShortcut.unregisterAll();
   cloudflaredManager?.stopOwnedProcess();
+  // App shutdown is not a user close: renderer restores these resumable ACP sessions next launch.
+  acpManager.destroyAll(false);
   tray?.destroy();
   tray = null;
 });

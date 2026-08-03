@@ -216,23 +216,46 @@ function resolveTailscaleCli(): string | null {
 }
 
 // 读取本机 Tailscale 节点信息（MagicDNS 名 + 100.x IPv4），失败返回 null
+// NOTE: The macOS Tailscale GUI CLI (`/Applications/Tailscale.app/.../Tailscale status --json`)
+// fails with "Tailscale.CLIError error 3" when spawned from another signed app (Posse) due to
+// macOS app-transaction / IPC restrictions. So we detect the Tailscale IP directly from
+// network interfaces (100.x.x.x is the CGNAT range Tailscale always uses), and derive the
+// DNS name from the hostname. The CLI path remains as a fallback for non-GUI (Homebrew) installs.
 export function getTailscaleInfo(): { dnsName: string; ip: string } | null {
+  // Method 1: Detect 100.x Tailscale IP from network interfaces (always works, no CLI needed)
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    // Tailscale interface is typically named "utun<n>" on macOS, but the IP is the reliable signal
+    for (const iface of interfaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal && iface.address.startsWith('100.')) {
+        // Derive a DNS name from hostname — Tailscale MagicDNS uses lowercase-hyphenated hostname
+        const dnsName = os.hostname().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+        console.log(`[getTailscaleInfo] Found Tailscale IP ${iface.address} on interface ${name}`);
+        return { dnsName: dnsName || 'tailscale', ip: iface.address };
+      }
+    }
+  }
+
+  // Method 2: Fallback to Tailscale CLI (works for Homebrew installs, not GUI app)
   const cli = resolveTailscaleCli();
-  if (!cli) return null;
+  if (!cli) {
+    console.log('[getTailscaleInfo] No 100.x IP found and no Tailscale CLI available');
+    return null;
+  }
   try {
     const out = execFileSync(cli, ['status', '--json'], { encoding: 'utf8', timeout: 5000 });
     const status = JSON.parse(out);
     const self = status?.Self;
     if (!self) return null;
-    // DNSName 形如 "host.tailnet.ts.net."，去掉末尾单个点
     const rawDns = typeof self.DNSName === 'string' ? self.DNSName : '';
     const dnsName = rawDns.replace(/\.$/, '');
     if (!dnsName) return null;
-    // TailscaleIPs 里挑 IPv4（100.x，不含冒号）
     const ips: string[] = Array.isArray(self.TailscaleIPs) ? self.TailscaleIPs : [];
     const ip = ips.find(a => typeof a === 'string' && !a.includes(':')) || '';
+    console.log(`[getTailscaleInfo] CLI OK: dnsName=${dnsName} ip=${ip}`);
     return { dnsName, ip };
-  } catch {
+  } catch (e: any) {
+    console.log(`[getTailscaleInfo] CLI failed (${e?.message?.split('\n')[0] || 'unknown'}), no 100.x IP detected`);
     return null;
   }
 }

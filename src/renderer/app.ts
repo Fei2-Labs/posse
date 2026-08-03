@@ -1,9 +1,23 @@
 import { TerminalManager } from './terminal-manager';
 import { ChatView } from './chat-view';
+import { AcpSessionView, type AcpSessionInfo } from './acp-session-view';
+import type { ContentBlock, PermissionOption, SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk';
 import { createFilePreview, isPreviewableExt, type FilePreview } from './file-preview';
 import { getAgentLogo } from './agent-logos';
 import { cleanupStaleProjectPersistence, normalizeProjectsListPayload } from './project-persistence';
 import { BareOscColorResponseFilter } from './terminal-output-filter';
+import { resolveActiveLiveSessionId } from './session-selection';
+import {
+  parsePersistedAcpForeground,
+  parsePersistedActiveAcpSessions,
+  type PersistedAcpForeground,
+  type PersistedActiveAcpSession,
+} from './acp-session-state';
+import {
+  loadConversationPreferences,
+  saveConversationPreferences,
+  type ConversationPreferences,
+} from './conversation-preferences';
 
 // Image extensions handled by the inline preview.
 function isImageExt(ext: string): boolean {
@@ -151,6 +165,19 @@ declare global {
       // Status-dot debug logger (permanent, default-OFF, zero-cost when off)
       debugStatusEnabled: () => Promise<boolean>;
       debugStatusLog: (line: string) => void;
+      // ACP (Agent Client Protocol)
+      acpCheck: (presetCommand: string) => Promise<boolean>;
+      acpCreate: (id: string, agentLabel: string, cwd: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
+      acpPrompt: (id: string, content: string | ContentBlock[]) => Promise<boolean>;
+      acpCancel: (id: string) => Promise<boolean>;
+      acpSetConfigOption: (id: string, configId: string, value: string | boolean) => Promise<SessionConfigOption[]>;
+      acpInfo: (id: string) => Promise<AcpSessionInfo | null>;
+      acpDestroy: (id: string) => void;
+      acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
+      acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) => Promise<boolean>;
+      onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) => void;
+      onAcpStatus: (cb: (id: string, info: Partial<AcpSessionInfo>) => void) => void;
+      onAcpPermission: (cb: (id: string, request: { toolCallId: string; toolName: string; options: PermissionOption[] }) => void) => void;
     };
   }
 }
@@ -159,6 +186,7 @@ declare global {
 const savedCwd = localStorage.getItem('posse_cwd') || '';
 let currentCwd = savedCwd;
 let lastPreset = localStorage.getItem('posse_preset') || '';
+let conversationPreferences = loadConversationPreferences();
 // One-time cleanup: remove the stale legacy Loop config from previous versions.
 const LEGACY_LOOP_STORAGE_KEY = ['posse', 'auto', 'continue'].join('_');
 try { localStorage.removeItem(LEGACY_LOOP_STORAGE_KEY); } catch { /* ignore */ }
@@ -190,6 +218,88 @@ const chatViews: Map<string, ChatView> = new Map();
 const chatSessionTitles: Map<string, string> = new Map(); // chat session id → title
 const chatSessionCreateTimes: Map<string, number> = new Map();
 let activeChatId: string | null = null;
+
+// ========== ACP session state ==========
+const acpViews: Map<string, AcpSessionView> = new Map();
+const acpSessionIds: Set<string> = new Set(); // sessions that are ACP (not PTY)
+const durableAcpSessionIds: Set<string> = new Set();
+const acpPresetCommands: Map<string, string> = new Map();
+let activeAcpId: string | null = null;
+const LAST_FOREGROUND_SESSION_KEY = 'posse_last_foreground_session';
+const ACTIVE_ACP_SESSIONS_KEY = 'posse_active_acp_sessions_v1';
+const acpPersistTimers = new Map<string, number>();
+
+function loadPersistedActiveAcpSessions(): PersistedActiveAcpSession[] {
+  try { return parsePersistedActiveAcpSessions(localStorage.getItem(ACTIVE_ACP_SESSIONS_KEY)); }
+  catch { return []; }
+}
+
+function writePersistedActiveAcpSessions(sessions: PersistedActiveAcpSession[]): void {
+  try { localStorage.setItem(ACTIVE_ACP_SESSIONS_KEY, JSON.stringify(sessions)); } catch { /* ignore */ }
+}
+
+function persistActiveAcpSession(id: string): void {
+  if (!durableAcpSessionIds.has(id)) return;
+  const sessionId = sessionResumeId.get(id);
+  const presetCommand = acpPresetCommands.get(id);
+  const cwd = sessionCwds.get(id);
+  if (!sessionId || !presetCommand || !cwd) return;
+  const next: PersistedActiveAcpSession = {
+    kind: 'acp',
+    presetCommand,
+    sessionId,
+    cwd,
+    displayName: sessionDisplayNames.get(id) || presetCommand,
+    title: sessionTitles.get(id) || '',
+    createdAt: sessionCreateTimes.get(id) || Date.now(),
+    updatedAt: sessionUpdateTimes.get(id) || Date.now(),
+  };
+  const sessions = loadPersistedActiveAcpSessions()
+    .filter(item => !(item.sessionId === sessionId && item.presetCommand === presetCommand && item.cwd === cwd));
+  sessions.push(next);
+  writePersistedActiveAcpSessions(sessions);
+}
+
+function schedulePersistActiveAcpSession(id: string): void {
+  const existing = acpPersistTimers.get(id);
+  if (existing !== undefined) window.clearTimeout(existing);
+  acpPersistTimers.set(id, window.setTimeout(() => {
+    acpPersistTimers.delete(id);
+    persistActiveAcpSession(id);
+  }, 400));
+}
+
+function removePersistedActiveAcpSession(id: string): void {
+  const sessionId = sessionResumeId.get(id);
+  const presetCommand = acpPresetCommands.get(id);
+  const cwd = sessionCwds.get(id);
+  if (!sessionId) return;
+  writePersistedActiveAcpSessions(loadPersistedActiveAcpSessions().filter(item =>
+    !(item.sessionId === sessionId && item.presetCommand === presetCommand && item.cwd === cwd)
+  ));
+}
+
+function saveAcpForeground(id: string): void {
+  if (!durableAcpSessionIds.has(id)) return;
+  const sessionId = sessionResumeId.get(id);
+  const presetCommand = acpPresetCommands.get(id);
+  const cwd = sessionCwds.get(id);
+  if (!sessionId || !presetCommand || !cwd) return;
+  const foreground: PersistedAcpForeground = {
+    kind: 'acp',
+    presetCommand,
+    sessionId,
+    cwd,
+    displayName: sessionDisplayNames.get(id) || presetCommand,
+    title: sessionTitles.get(id) || '',
+  };
+  try { localStorage.setItem(LAST_FOREGROUND_SESSION_KEY, JSON.stringify(foreground)); } catch { /* ignore */ }
+  persistActiveAcpSession(id);
+}
+
+function clearSavedAcpForeground(): void {
+  try { localStorage.removeItem(LAST_FOREGROUND_SESSION_KEY); } catch { /* ignore */ }
+}
 
 // ========== Closed sessions (resumable) ==========
 interface ClosedSessionInfo {
@@ -432,9 +542,7 @@ const AGENT_ID_LABEL: Record<ProjectsAgentId, string> = {
 // at the top of the sidebar scopes the whole list to one agent (or All), so the
 // list stays short and one agent's work never mixes with another's.
 const AGENT_TAB_STORAGE_KEY = 'posse_agent_tab';
-let activeAgentTab: string = (() => {
-  try { return localStorage.getItem(AGENT_TAB_STORAGE_KEY) || 'all'; } catch { return 'all'; }
-})();
+let activeAgentTab = 'all';
 function setActiveAgentTab(tab: string): void {
   activeAgentTab = tab;
   try { localStorage.setItem(AGENT_TAB_STORAGE_KEY, tab); } catch { /* ignore */ }
@@ -1181,10 +1289,12 @@ function withToken(base: string, token: string): string {
   return `${base}${sep}token=${encodeURIComponent(token)}`;
 }
 
-// Track the last URL we rendered a QR for, to avoid redundant async regeneration
+// Track the last URLs we rendered QRs for, to avoid redundant async regeneration
 let lastQrUrl = '';
+let lastQrTsUrl = '';
+let lastQrLanUrl = '';
 
-// Render remote server connection info: QR (priority Tailscale > LAN) + connect URL + token
+// Render remote server connection info: dual QR (Tailscale + LAN) + connect URL + token
 function renderRemoteServerInfo(): void {
   if (!remoteServerInfo) {
     remoteServerInfoEl.style.display = 'none';
@@ -1192,8 +1302,10 @@ function renderRemoteServerInfo(): void {
   }
   remoteServerInfoEl.style.display = 'block';
 
-  const qrWrapEl = remoteServerInfoEl.querySelector('.remote-info-qr') as HTMLElement;
-  const qrImgEl = remoteServerInfoEl.querySelector('.remote-info-qr-img') as HTMLImageElement;
+  const qrTsWrapEl = remoteServerInfoEl.querySelector('.remote-info-qr-ts') as HTMLElement;
+  const qrTsImgEl = remoteServerInfoEl.querySelector('.remote-info-qr-img-ts') as HTMLImageElement;
+  const qrLanWrapEl = remoteServerInfoEl.querySelector('.remote-info-qr-lan') as HTMLElement;
+  const qrLanImgEl = remoteServerInfoEl.querySelector('.remote-info-qr-img-lan') as HTMLImageElement;
   const scanHintEl = remoteServerInfoEl.querySelector('.remote-info-scan-hint') as HTMLElement;
   const urlEl = remoteServerInfoEl.querySelector('.remote-info-url') as HTMLElement;
   const lanEl = remoteServerInfoEl.querySelector('.remote-info-lan') as HTMLElement;
@@ -1205,15 +1317,14 @@ function renderRemoteServerInfo(): void {
   const tailscaleUrl = remoteServerInfo.tailscaleUrl || null;
   const lanUrl = remoteServerInfo.lanUrl || null;
 
-  // URL priority (most → least stable):
-  //   1. tailscaleHttpUrl — http://<100.x>:<port>, the stable Tailscale IP. Always reachable on
-  //      the tailnet (WireGuard-encrypted underneath) WITHOUT `tailscale serve`, and the IP never
-  //      changes with DHCP. Preferred for reliability — this fixes #58 (no more dynamic LAN IP).
-  //   2. tailscaleUrl — https://<dnsName>, only works if `tailscale serve` https is configured.
-  //   3. lanUrl — http://<192.168.x>:<port>, dynamic LAN IP (changes on DHCP). Last resort.
-  // All carry the embedded token.
-  const bestBase = tailscaleHttpUrl || tailscaleUrl || lanUrl;
-  const usingTailscale = !!(tailscaleHttpUrl || tailscaleUrl);
+  // Tailscale QR: prefer the stable 100.x HTTP URL, fall back to https DNS name
+  const tsBase = tailscaleHttpUrl || tailscaleUrl || null;
+  const tsConnectUrl = tsBase ? withToken(`${tsBase}/`, token) : null;
+  // LAN QR: the dynamic LAN IP
+  const lanConnectUrl = lanUrl ? withToken(`${lanUrl}/`, token) : null;
+
+  // Primary text URL: Tailscale preferred, LAN fallback
+  const bestBase = tsBase || lanUrl;
   const bestConnectUrl = bestBase ? withToken(`${bestBase}/`, token) : null;
 
   // Primary connect URL (selectable, tap-to-copy). Show base without token for readability.
@@ -1226,9 +1337,8 @@ function renderRemoteServerInfo(): void {
     urlEl.style.display = 'none';
   }
 
-  // If a Tailscale address is the primary/QR target, still surface the LAN URL as a secondary
-  // text line (for the same-LAN, no-Tailscale-on-phone case).
-  if (usingTailscale && lanUrl && lanUrl !== bestBase) {
+  // LAN text line: show if we have Tailscale (as secondary info) or if no Tailscale
+  if (lanUrl) {
     lanEl.textContent = `LAN: ${lanUrl}`;
     lanEl.style.display = 'block';
   } else {
@@ -1248,26 +1358,45 @@ function renderRemoteServerInfo(): void {
     setupHintEl.style.display = 'none';
   }
 
-  // QR code: encode the best connect URL with embedded token. Regenerate only on change.
-  if (bestConnectUrl) {
-    qrWrapEl.style.display = 'block';
+  // Tailscale QR code
+  if (tsConnectUrl) {
+    qrTsWrapEl.style.display = 'block';
     scanHintEl.style.display = 'block';
-    if (bestConnectUrl !== lastQrUrl) {
-      lastQrUrl = bestConnectUrl;
-      QRCode.toDataURL(bestConnectUrl, { margin: 1, width: 320 })
+    if (tsConnectUrl !== lastQrTsUrl) {
+      lastQrTsUrl = tsConnectUrl;
+      QRCode.toDataURL(tsConnectUrl, { margin: 1, width: 280 })
         .then((dataUrl) => {
-          // Guard against a later info update having changed the target URL
-          if (lastQrUrl === bestConnectUrl) qrImgEl.src = dataUrl;
+          if (lastQrTsUrl === tsConnectUrl) qrTsImgEl.src = dataUrl;
         })
-        .catch((err) => {
-          console.warn('[Renderer] QR generation failed:', err);
-        });
+        .catch((err) => console.warn('[Renderer] Tailscale QR generation failed:', err));
     }
   } else {
-    qrWrapEl.style.display = 'none';
+    qrTsWrapEl.style.display = 'none';
+    qrTsImgEl.removeAttribute('src');
+    lastQrTsUrl = '';
+  }
+
+  // LAN QR code
+  if (lanConnectUrl) {
+    qrLanWrapEl.style.display = 'block';
+    scanHintEl.style.display = 'block';
+    if (lanConnectUrl !== lastQrLanUrl) {
+      lastQrLanUrl = lanConnectUrl;
+      QRCode.toDataURL(lanConnectUrl, { margin: 1, width: 280 })
+        .then((dataUrl) => {
+          if (lastQrLanUrl === lanConnectUrl) qrLanImgEl.src = dataUrl;
+        })
+        .catch((err) => console.warn('[Renderer] LAN QR generation failed:', err));
+    }
+  } else {
+    qrLanWrapEl.style.display = 'none';
+    qrLanImgEl.removeAttribute('src');
+    lastQrLanUrl = '';
+  }
+
+  // Hide scan hint if neither QR is shown
+  if (!tsConnectUrl && !lanConnectUrl) {
     scanHintEl.style.display = 'none';
-    qrImgEl.removeAttribute('src');
-    lastQrUrl = '';
   }
 }
 
@@ -1831,6 +1960,7 @@ const fileTreeToggle = document.getElementById('file-tree-toggle')!;
 const fileTreeResizer = document.getElementById('file-tree-resizer')!;
 const terminalArea = document.getElementById('terminal-area')!;
 const terminalContent = document.getElementById('terminal-content')!;
+const acpContent = document.getElementById('acp-content')!;
 const emptyState = document.getElementById('empty-state')!;
 // The Sessions tab now renders the Codex-style project navigator into this container.
 const sessionList = document.getElementById('project-nav')!;
@@ -2367,11 +2497,12 @@ function friendlyTime(ts: number): string {
 }
 
 function updateEmptyState(): void {
-  emptyState.style.display = termManager.hasInstances() ? 'none' : 'flex';
+  const hasContent = termManager.hasInstances() || acpViews.size > 0;
+  emptyState.style.display = hasContent ? 'none' : 'flex';
 }
 
 function updateSessionTitleBar(): void {
-  const activeId = termManager.getActiveId();
+  const activeId = activeAcpId || termManager.getActiveId();
   if (activeId) {
     const cwd = sessionCwds.get(activeId) || '';
     // Top of the left file tree: show the last directory name
@@ -2409,7 +2540,7 @@ function updateSessionTitleBar(): void {
 }
 
 function getActiveSessionId(): string | null {
-  return termManager.getActiveId();
+  return resolveActiveLiveSessionId(activeChatId, activeAcpId, termManager.getActiveId());
 }
 
 function getActiveSessionCwd(): string {
@@ -3687,11 +3818,25 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
   return out.map((row) => ({ time: row.time, el: row.el }));
 }
 
-// Flatten recently-closed sessions so users can quickly reopen without drilling
-// into project folders. Dedup by conversation id and hide sessions known deleted.
+// Flatten the nine most recently active conversations across live and closed sessions.
+// Live wins when the same resumable conversation also has a stale closed record.
 function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
   const out: Array<{ time: number; el: HTMLElement }> = [];
   const seen = new Set<string>();
+
+  for (const id of sessionTitles.keys()) {
+    const family = agentFamilyFromDisplayName(sessionDisplayNames.get(id) || '');
+    if (activeAgentTab !== 'all' && family !== activeAgentTab) continue;
+    const resumeId = sessionResumeId.get(id) || sessionAgentId.get(id);
+    const k = resumeId ? `resume:${conversationKey(resumeId)}` : `live:${id}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const el = buildLiveSessionRow(id, getActiveSessionId());
+    appendAgentTag(el, family);
+    appendProjectTag(el, id);
+    out.push({ time: sessionUpdateTimes.get(id) || sessionCreateTimes.get(id) || 0, el });
+  }
+
   const sorted = [...closedSessions].sort((a, b) => b.closedAt - a.closedAt);
   for (const cs of sorted) {
     if (cs.resumeId && removedHistoryKeys.has(conversationKey(cs.resumeId))) continue;
@@ -3704,11 +3849,12 @@ function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
     appendProjectTagForCwd(el, cs.cwd || '');
     out.push({ time: cs.closedAt || 0, el });
   }
-  return out;
+  out.sort((a, b) => b.time - a.time);
+  return out.slice(0, 9);
 }
 
 function renderSessionList(): void {
-  const activeId = termManager.getActiveId();
+  const activeId = getActiveSessionId();
   statusDbg('render', activeId || '', `liveCount=${sessionTitles.size}`);
 
   // Sync session status to the main process (read by the mobile client)
@@ -3790,7 +3936,7 @@ function renderSessionList(): void {
   }
 
   // ========== Recent section ==========
-  // Quick-access closed-session list (most-recent-first), deduped by conversation id.
+  // Quick-access live/closed list (most-recent-first), deduped by conversation id.
   const recentSessionRows = collectRecentSessionRows();
   if (recentSessionRows.length > 0) {
     const recentCollapsed = collapsedSections.has('recent');
@@ -4293,6 +4439,71 @@ function positionNavMenu(menu: HTMLElement, e: MouseEvent): void {
 async function createSessionInProject(cwd: string, presetCommand: string): Promise<void> {
   if (!cwd) return;
   addRecentCwd(cwd);
+
+  // Check if this agent supports ACP (structured session view)
+  const isAcp = await window.posse.acpCheck(presetCommand);
+
+  if (isAcp) {
+    // Create an ACP session instead of a PTY session
+    const acpId = `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Derive a display name from the preset command (e.g. "claude" → "Claude")
+    const lower = presetCommand.toLowerCase();
+    let agentLabel = presetCommand;
+    if (lower.includes('claude')) agentLabel = 'Claude';
+    else if (lower.includes('codex')) agentLabel = 'Codex';
+    else if (lower.includes('copilot')) agentLabel = 'Copilot';
+    else if (lower.includes('kiro')) agentLabel = 'Kiro';
+    else if (lower.includes('opencode')) agentLabel = 'OpenCode';
+    // Check for auto/bypass flags
+    if (lower.includes('dangerously-skip') || lower.includes('full-auto') || lower.includes('allow-all') || lower.includes('trust-all')) {
+      agentLabel += ' (auto)';
+    }
+    acpSessionIds.add(acpId);
+    acpPresetCommands.set(acpId, presetCommand);
+    sessionDisplayNames.set(acpId, agentLabel);
+    sessionTitles.set(acpId, `${agentLabel} — ${cwd.split('/').pop()}`);
+    sessionCwds.set(acpId, cwd);
+    sessionCreateTimes.set(acpId, Date.now());
+    sessionUpdateTimes.set(acpId, Date.now());
+
+    // Create the ACP session view
+    const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences);
+    acpViews.set(acpId, view);
+    acpContent.appendChild(view.getElement());
+
+    // Start the ACP agent process
+    window.posse.acpCreate(acpId, presetCommand, cwd, undefined).then((info) => {
+      if (info.sessionId) {
+        sessionResumeId.set(acpId, info.sessionId);
+        sessionAgentId.set(acpId, info.sessionId);
+        durableAcpSessionIds.add(acpId);
+        persistActiveAcpSession(acpId);
+      }
+      view.handleStatus(info);
+    }).catch((err) => {
+      view.handleStatus({ status: 'error', errorMessage: err instanceof Error ? err.message : String(err) });
+    });
+
+    // Switch to the ACP view
+    switchToAcp(acpId);
+
+    // Update sidebar
+    if (activeAgentTab !== 'all') setActiveAgentTab('all');
+    if (!findProject(cwd)) {
+      projects.push({ path: cwd, pinned: false, addedAt: Date.now() });
+      saveProjects();
+    }
+    setProjectExpanded(normalizeCwd(cwd), true);
+    selectedProjectPath = cwd;
+
+    updateEmptyState();
+    renderSessionList();
+    updateSessionTitleBar();
+    void renderFileTree();
+    return;
+  }
+
+  // PTY fallback (existing path)
   const themeId = resolveThemeId(currentThemeId, cwd);
   const result = await window.posse.createPty(cwd, presetCommand, themeId, undefined, useSubscriptionFlag());
   const now = Date.now();
@@ -4369,6 +4580,73 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   }
   // A live/restored session may be the only reference to this checkout.
   void refreshProjectsData();
+}
+
+// Resume a session via ACP session/load instead of PTY --resume.
+// Returns true if the ACP path was taken, false to fall back to PTY.
+async function tryResumeViaAcp(
+  cwd: string,
+  presetCommand: string,
+  acpSessionId: string,
+  displayName: string,
+  title?: string,
+  restore?: { activate?: boolean; createdAt?: number; updatedAt?: number },
+): Promise<boolean> {
+  // Only local connections support ACP
+  if (activeConnectionIsRemote) return false;
+  // Check if the preset command is ACP-eligible
+  const isAcp = await window.posse.acpCheck(presetCommand);
+  if (!isAcp) return false;
+
+  const acpId = `acp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  // Derive agent label
+  const lower = presetCommand.toLowerCase();
+  let agentLabel = displayName || presetCommand;
+  if (lower.includes('claude')) agentLabel = 'Claude';
+  else if (lower.includes('codex')) agentLabel = 'Codex';
+  else if (lower.includes('copilot')) agentLabel = 'Copilot';
+  else if (lower.includes('kiro')) agentLabel = 'Kiro';
+  else if (lower.includes('opencode')) agentLabel = 'OpenCode';
+
+  acpSessionIds.add(acpId);
+  acpPresetCommands.set(acpId, presetCommand);
+  sessionDisplayNames.set(acpId, agentLabel);
+  sessionTitles.set(acpId, title || `${agentLabel} — ${(cwd || '').split('/').pop()}`);
+  sessionCwds.set(acpId, cwd);
+  sessionCreateTimes.set(acpId, restore?.createdAt || Date.now());
+  sessionUpdateTimes.set(acpId, restore?.updatedAt || Date.now());
+  sessionResumeId.set(acpId, acpSessionId);
+  sessionAgentId.set(acpId, acpSessionId);
+  durableAcpSessionIds.add(acpId);
+
+  const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences);
+  acpViews.set(acpId, view);
+  acpContent.appendChild(view.getElement());
+
+  // Load the existing ACP session
+  window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then((info) => {
+    view.handleStatus(info);
+  }).catch((err) => {
+    view.handleStatus({ status: 'error', errorMessage: err instanceof Error ? err.message : String(err) });
+  });
+
+  if (restore?.activate !== false) {
+    switchToAcp(acpId);
+    saveAcpForeground(acpId);
+  } else {
+    view.getElement().style.display = 'none';
+    persistActiveAcpSession(acpId);
+  }
+
+  // Update sidebar
+  if (activeAgentTab !== 'all') setActiveAgentTab('all');
+  if (cwd) { selectedProjectPath = cwd; setProjectExpanded(canonicalProjectKey(cwd), true); }
+
+  updateEmptyState();
+  renderSessionList();
+  updateSessionTitleBar();
+  void renderFileTree();
+  return true;
 }
 
 // Extract the agent + session id from a captured resume command, so we can
@@ -4461,6 +4739,20 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   // Decide between a true resume vs a fresh re-open in the original folder.
   let command: string;
   const hasResume = Boolean(cs.resumeId || cs.resumeCommand);
+
+  // Try ACP session/load for ACP-eligible agents with a resume id
+  if (hasResume && cs.resumeId && cs.presetCommand) {
+    const presetForAcp = cs.presetCommand;
+    const resumedViaAcp = await tryResumeViaAcp(cwd, presetForAcp, cs.resumeId, cs.displayName, cs.title);
+    if (resumedViaAcp) {
+      // Remove from the closed list — ACP took over
+      try { closedSessions = await window.posse.closedSessionsRemove(cs.id); } catch { /* ignore */ }
+      renderSessionList();
+      return;
+    }
+    // ACP not available (remote or not eligible) — fall through to PTY
+  }
+
   if (hasResume) {
     // Prefer the full resume command captured from terminal output, fall back to building one
     command = cs.resumeCommand
@@ -4557,6 +4849,16 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
     return;
   }
 
+  // Try ACP session/load for ACP-eligible agents
+  // Extract the preset command from the resume command (strip --resume <id>)
+  const presetFromResume = s.resumeCommand
+    ? s.resumeCommand.replace(/\s+--resume\s+\S+/, '').replace(/\s+resume\s+\S+/, '').replace(/\s+--resume-id\s+\S+/, '').trim()
+    : '';
+  if (presetFromResume) {
+    const resumedViaAcp = await tryResumeViaAcp(s.cwd, presetFromResume, s.id, s.title || s.agent, s.title);
+    if (resumedViaAcp) return;
+  }
+
   const themeId = resolveThemeId(currentThemeId, s.cwd);
   const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId, undefined, useSubscriptionFlag());
   const now = Date.now();
@@ -4615,35 +4917,30 @@ async function createSession(): Promise<boolean> {
 
   addRecentCwd(currentCwd);
   const preset = presetSelect.value;
-  const themeId = resolveThemeId(currentThemeId, currentCwd);
   lastPreset = preset;
   localStorage.setItem('posse_preset', preset);
-  const result = await window.posse.createPty(currentCwd, preset, themeId, undefined, useSubscriptionFlag());
-  const now = Date.now();
-  attachPtySession(result, now);
-  // Custom preset: override the backend fallback with the user-defined name
-  const customPreset = getCustomPresets().find(p =>
-    preset === p.command || (p.autoFlag && preset === p.command + ' ' + p.autoFlag)
-  );
-  if (customPreset) {
-    const isAuto = customPreset.autoFlag && preset === customPreset.command + ' ' + customPreset.autoFlag;
-    const displayName = isAuto ? customPreset.name + ' auto' : customPreset.name;
-    sessionDisplayNames.set(result.id, displayName);
-  }
-  updateEmptyState();
-  renderSessionList();
-  updateSessionTitleBar();
-  void renderFileTree();
-  setTimeout(() => {
-    const dims = termManager.getActiveDimensions();
-    if (dims) window.posse.resizePty(result.id, dims.cols, dims.rows);
-  }, 100);
+  await createSessionInProject(currentCwd, preset);
   return true;
 }
 
 function switchSession(id: string): void {
+  // If this is an ACP session, switch to the ACP view
+  if (acpSessionIds.has(id)) {
+    switchToAcp(id);
+    statusDbg('switchSession', id, 'acp');
+    const sessCwd = sessionCwds.get(id);
+    if (sessCwd) { selectedProjectPath = sessCwd; void fetchDirty(sessCwd); }
+    sessionUnread.delete(id);
+    sessionWaiting.delete(id);
+    renderSessionList();
+    updateSessionTitleBar();
+    void renderFileTree();
+    renderFileStatusbar();
+    return;
+  }
+
   statusDbg('switchSession', id, `from=${termManager.getActiveId()?.slice(0, 6) || '-'}`);
-  // Ensure we switch back from the chat view to the terminal view
+  // Ensure we switch back from the chat/ACP view to the terminal view
   switchToTerminal();
 
   // Switching TO a session activates + refits its terminal, which makes the agent emit a
@@ -4682,6 +4979,7 @@ async function handleCloseClick(id: string): Promise<void> {
   const title = sessionTitles.get(id) || 'Terminal';
   const action = await showConfirmDialog(title);
   if (action === 'cancel') return;
+  if (acpSessionIds.has(id)) clearSavedAcpForeground();
   destroySession(id);
 }
 
@@ -4697,6 +4995,11 @@ async function closeCurrentSession(): Promise<void> {
 
   if (activeChatId) {
     await handleChatCloseClick(activeChatId);
+    return;
+  }
+
+  if (activeAcpId) {
+    await handleCloseClick(activeAcpId);
     return;
   }
 
@@ -4735,9 +5038,30 @@ function clearSessionState(id: string): void {
   sessionAgentId.delete(id);
   sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
+  acpPresetCommands.delete(id);
+  durableAcpSessionIds.delete(id);
 }
 
 function destroySession(id: string): void {
+  // ACP session cleanup
+  if (acpSessionIds.has(id)) {
+    removePersistedActiveAcpSession(id);
+    const view = acpViews.get(id);
+    if (view) view.destroy();
+    acpViews.delete(id);
+    acpSessionIds.delete(id);
+    clearSessionState(id);
+    if (activeAcpId === id) {
+      activeAcpId = null;
+      switchToTerminal();
+    }
+    updateEmptyState();
+    renderSessionList();
+    updateSessionTitleBar();
+    void renderFileTree();
+    return;
+  }
+
   window.posse.destroyPty(id);
   clearSessionState(id);
   termManager.destroy(id);
@@ -4751,9 +5075,21 @@ function destroySessions(ids: string[]): void {
   const uniqIds = Array.from(new Set(ids)).filter(id => sessionTitles.has(id));
   if (uniqIds.length === 0) return;
   for (const id of uniqIds) {
-    window.posse.destroyPty(id);
+    if (acpSessionIds.has(id)) {
+      removePersistedActiveAcpSession(id);
+      const view = acpViews.get(id);
+      if (view) view.destroy();
+      acpViews.delete(id);
+      acpSessionIds.delete(id);
+    } else {
+      window.posse.destroyPty(id);
+      termManager.destroy(id);
+    }
     clearSessionState(id);
-    termManager.destroy(id);
+  }
+  if (activeAcpId && uniqIds.includes(activeAcpId)) {
+    activeAcpId = null;
+    switchToTerminal();
   }
   updateEmptyState();
   renderSessionList();
@@ -4779,8 +5115,9 @@ async function createChatSession(workspace?: string): Promise<void> {
 }
 
 function switchToChat(id: string): void {
-  // Hide the terminal area, show the chat area
+  // Hide the terminal and ACP areas, show the chat area
   terminalContent.style.display = 'none';
+  acpContent.style.display = 'none';
   chatContent.style.display = 'flex';
   chatContent.style.flexDirection = 'column';
   chatContent.style.height = '100%';
@@ -4794,6 +5131,8 @@ function switchToChat(id: string): void {
   }
 
   activeChatId = id;
+  activeAcpId = null;
+  clearSavedAcpForeground();
 
   // Create or restore the chat view
   let view = chatViews.get(id);
@@ -4809,11 +5148,38 @@ function switchToChat(id: string): void {
   view.focus();
 }
 
-function switchToTerminal(): void {
+function switchToTerminal(preserveSavedAcp = false): void {
   chatContent.style.display = 'none';
+  acpContent.style.display = 'none';
   terminalContent.style.display = '';
   activeChatId = null;
+  activeAcpId = null;
+  if (!preserveSavedAcp) clearSavedAcpForeground();
   updateEmptyState();
+}
+
+function switchToAcp(id: string): void {
+  // Hide terminal and chat, show ACP
+  terminalContent.style.display = 'none';
+  chatContent.style.display = 'none';
+  acpContent.style.display = 'flex';
+  acpContent.style.flexDirection = 'column';
+  acpContent.style.height = '100%';
+  activeChatId = null;
+  activeAcpId = id;
+  saveAcpForeground(id);
+
+  // Hide all ACP views, show the selected one
+  for (const [viewId, view] of acpViews) {
+    view.getElement().style.display = viewId === id ? 'flex' : 'none';
+  }
+
+  // Follow the session's project
+  const sessCwd = sessionCwds.get(id);
+  if (sessCwd) { selectedProjectPath = sessCwd; void fetchDirty(sessCwd); }
+
+  updateEmptyState();
+  renderFileStatusbar();
 }
 
 function destroyChatSession(id: string): void {
@@ -5655,7 +6021,14 @@ async function restoreDaemonSessions(): Promise<void> {
   try {
     const sessions = await window.posse.getSessions();
     const now = Date.now();
-    for (const info of sessions) {
+    // Sort by lastActivityMs descending so the most-recently-active session is restored LAST
+    // (termManager.create() calls switchTo() internally, so the last-created becomes active).
+    // Without this, the daemon's arbitrary iteration order decides which session gets focus on
+    // startup — often an old session instead of the user's most recent one.
+    const sorted = [...sessions].sort((a, b) =>
+      (a.lastActivityMs ?? 0) - (b.lastActivityMs ?? 0)
+    );
+    for (const info of sorted) {
       if (sessionTitles.has(info.id)) continue;
       attachPtySession(info, now, true);
     }
@@ -5673,7 +6046,53 @@ async function restoreDaemonSessions(): Promise<void> {
   }
 }
 
-void restoreDaemonSessions();
+async function restoreActiveAcpSessions(): Promise<void> {
+  if (activeConnectionIsRemote) return;
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(LAST_FOREGROUND_SESSION_KEY); } catch { /* ignore */ }
+  const foreground = parsePersistedAcpForeground(raw);
+  let sessions = loadPersistedActiveAcpSessions();
+  if (sessions.length === 0 && foreground) {
+    const now = Date.now();
+    sessions = [{ ...foreground, createdAt: now, updatedAt: now }];
+  }
+  if (sessions.length === 0) return;
+
+  sessions.sort((a, b) => a.updatedAt - b.updatedAt);
+  const target = sessions.find(item => foreground
+    && item.sessionId === foreground.sessionId
+    && item.presetCommand === foreground.presetCommand
+    && item.cwd === foreground.cwd) || sessions[sessions.length - 1];
+  const survivors: PersistedActiveAcpSession[] = [];
+  for (const saved of sessions) {
+    try {
+      const restored = await tryResumeViaAcp(
+        saved.cwd,
+        saved.presetCommand,
+        saved.sessionId,
+        saved.displayName,
+        saved.title,
+        {
+          activate: saved === target,
+          createdAt: saved.createdAt,
+          updatedAt: saved.updatedAt,
+        },
+      );
+      if (restored) survivors.push(saved);
+    } catch (error) {
+      console.error('[Renderer] Failed to restore ACP session:', saved.sessionId, error);
+    }
+  }
+  writePersistedActiveAcpSessions(survivors);
+  if (survivors.length === 0) clearSavedAcpForeground();
+}
+
+async function restoreStartupSessions(): Promise<void> {
+  await restoreDaemonSessions();
+  await restoreActiveAcpSessions();
+}
+
+void restoreStartupSessions();
 
 // Load the multi-agent project list (Claude/Codex/Kiro/Copilot history + user-added folders) so the
 // Projects navigator is populated on launch even before any session is opened.
@@ -5834,6 +6253,70 @@ setTimeout(() => { refreshDirtyForVisibleProjects(); }, 1500);
 // writing to ~/.posse-debug/status.log. Toggling ON at runtime requires reopening Posse so the
 // renderer re-fetches this value.
 window.posse.debugStatusEnabled().then((v) => { STATUS_DBG = v; }).catch(() => { /* default OFF */ });
+
+// ========== ACP event listeners ==========
+const ACP_SIDEBAR_RENDER_INTERVAL_MS = 250;
+let acpSidebarRenderTimer: number | null = null;
+let lastAcpSidebarRenderAt = 0;
+
+function scheduleAcpSidebarRender(): void {
+  if (acpSidebarRenderTimer !== null) return;
+  const elapsed = Date.now() - lastAcpSidebarRenderAt;
+  const delay = Math.max(0, ACP_SIDEBAR_RENDER_INTERVAL_MS - elapsed);
+  acpSidebarRenderTimer = window.setTimeout(() => {
+    acpSidebarRenderTimer = null;
+    lastAcpSidebarRenderAt = Date.now();
+    renderSessionList();
+  }, delay);
+}
+
+window.posse.onAcpUpdate((id, update) => {
+  const view = acpViews.get(id);
+  if (view) view.handleUpdate(update);
+  durableAcpSessionIds.add(id);
+  // Update session recency timestamp so sidebar sort treats ACP sessions like PTY ones
+  sessionUpdateTimes.set(id, Date.now());
+  schedulePersistActiveAcpSession(id);
+  if (activeAcpId === id) saveAcpForeground(id);
+  scheduleAcpSidebarRender();
+});
+
+window.posse.onAcpStatus((id, info) => {
+  const view = acpViews.get(id);
+  if (view) view.handleStatus(info);
+  // Update sidebar status indicators for ACP sessions
+  if (info.status === 'prompting') {
+    sessionBusy.add(id);
+    renderSessionList();
+  } else if (info.status === 'idle' || info.status === 'error' || info.status === 'closed') {
+    sessionBusy.delete(id);
+    renderSessionList();
+  }
+  // When an ACP session closes, clean up the view and switch away
+  if (info.status === 'closed' || info.status === 'error') {
+    if (info.status === 'closed') {
+      removePersistedActiveAcpSession(id);
+      const v = acpViews.get(id);
+      if (v) v.getElement().remove();
+      acpViews.delete(id);
+      acpSessionIds.delete(id);
+      if (activeAcpId === id) {
+        activeAcpId = null;
+        switchToTerminal(true);
+      }
+      clearSessionState(id);
+      updateEmptyState();
+      renderSessionList();
+      updateSessionTitleBar();
+    }
+  }
+});
+
+// Permission request from agent → forward to the ACP session view
+window.posse.onAcpPermission((id, request) => {
+  const view = acpViews.get(id);
+  if (view) view.showPermissionPrompt(request.toolCallId, request.toolName, request.options);
+});
 
 // ========== Sidebar arrow-key session switching ==========
 
@@ -6325,6 +6808,118 @@ if (hostSwitcherBtn) {
     else void openHostMenu();
   });
 }
+
+// ========== Application Settings ==========
+
+const toolbarSettingsBtn = document.getElementById('toolbar-settings-btn') as HTMLButtonElement | null;
+
+function updateConversationPreferences(next: ConversationPreferences): void {
+  conversationPreferences = { ...next };
+  saveConversationPreferences(conversationPreferences);
+  for (const view of acpViews.values()) view.setConversationPreferences(conversationPreferences);
+}
+
+function openSettingsDialog(): void {
+  const existing = document.getElementById('app-settings-overlay');
+  if (existing) return;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'app-settings-overlay';
+  overlay.className = 'settings-dialog__overlay';
+
+  const dialog = document.createElement('section');
+  dialog.className = 'settings-dialog';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'settings-dialog-title');
+  dialog.innerHTML = `
+    <header class="settings-dialog__header">
+      <div>
+        <h2 id="settings-dialog-title">Settings</h2>
+        <p>Preferences for this Posse installation.</p>
+      </div>
+      <button type="button" class="settings-dialog__close" aria-label="Close settings" title="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+    <div class="settings-dialog__body">
+      <section class="settings-section" aria-labelledby="settings-conversation-title">
+        <div class="settings-section__heading">
+          <h3 id="settings-conversation-title">Conversation</h3>
+          <p>Choose how much agent activity is shown when a conversation opens.</p>
+        </div>
+        <label class="settings-toggle">
+          <span class="settings-toggle__copy">
+            <span class="settings-toggle__title">Expand thoughts by default</span>
+            <span class="settings-toggle__description">Show reasoning details without opening each Thought row.</span>
+          </span>
+          <input type="checkbox" data-setting="thoughts" ${conversationPreferences.expandThoughtsByDefault ? 'checked' : ''}>
+          <span class="settings-toggle__control" aria-hidden="true"></span>
+        </label>
+        <label class="settings-toggle">
+          <span class="settings-toggle__copy">
+            <span class="settings-toggle__title">Expand tool activity by default</span>
+            <span class="settings-toggle__description">Show command and tool output as soon as it arrives.</span>
+          </span>
+          <input type="checkbox" data-setting="tools" ${conversationPreferences.expandToolsByDefault ? 'checked' : ''}>
+          <span class="settings-toggle__control" aria-hidden="true"></span>
+        </label>
+      </section>
+    </div>`;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  const closeButton = dialog.querySelector<HTMLButtonElement>('.settings-dialog__close');
+  const thoughtInput = dialog.querySelector<HTMLInputElement>('[data-setting="thoughts"]');
+  const toolInput = dialog.querySelector<HTMLInputElement>('[data-setting="tools"]');
+
+  const cleanup = (): void => {
+    overlay.remove();
+    toolbarSettingsBtn?.focus();
+  };
+
+  closeButton?.addEventListener('click', cleanup);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) cleanup();
+  });
+  thoughtInput?.addEventListener('change', () => {
+    updateConversationPreferences({
+      ...conversationPreferences,
+      expandThoughtsByDefault: thoughtInput.checked,
+    });
+  });
+  toolInput?.addEventListener('change', () => {
+    updateConversationPreferences({
+      ...conversationPreferences,
+      expandToolsByDefault: toolInput.checked,
+    });
+  });
+
+  dialog.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cleanup();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button, input, [tabindex]:not([tabindex="-1"])'));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  thoughtInput?.focus();
+}
+
+toolbarSettingsBtn?.addEventListener('click', openSettingsDialog);
 
 // When the active connection changes (switch / add / remove), refetch the navigator + file
 // tree so the sidebar reflects the new host's sessions and the file panel reroots.
