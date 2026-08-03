@@ -794,13 +794,17 @@ export class AcpSessionView {
   // ========== Status bar ==========
   private renderStatusbar(): void {
     const configControls = statusConfigOptions(this.configOptions);
-    const configHtml = configControls.map(option => `
+    const configHtml = configControls.map(option => {
+      const controlLabel = configControlLabel(option);
+      const valueLabel = configValueLabel(option);
+      const accessibleLabel = `${controlLabel}: ${valueLabel}`;
+      return `
       <span class="acp-sb-divider"></span>
-      <button type="button" class="acp-sb-item acp-sb-clickable" data-config-id="${this.escapeHtml(option.id)}" title="${this.escapeHtml(configControlLabel(option))}" aria-haspopup="listbox">
-        <span class="acp-sb-label">${this.escapeHtml(configControlLabel(option))}</span>
-        <span class="acp-sb-value">${this.escapeHtml(configValueLabel(option))}</span>
-        <span class="acp-sb-caret">▾</span>
-      </button>`).join('');
+      <button type="button" class="acp-sb-item acp-sb-clickable" data-config-id="${this.escapeHtml(option.id)}" title="${this.escapeHtml(accessibleLabel)}" aria-label="${this.escapeHtml(accessibleLabel)}" aria-haspopup="listbox">
+        <span class="acp-sb-value">${this.escapeHtml(valueLabel)}</span>
+        <span class="acp-sb-caret" aria-hidden="true">▾</span>
+      </button>`;
+    }).join('');
 
     const ctxLabel = this.usage?.used && this.usage?.size
       ? `${this.formatTokens(this.usage.used)}/${this.formatTokens(this.usage.size)}`
@@ -810,6 +814,7 @@ export class AcpSessionView {
       : 0;
     const ctxColor = ctxPct > 80 ? '#ef4444' : ctxPct > 60 ? '#f59e0b' : '#22c55e';
 
+    const statusLabel = this.status === 'prompting' ? 'Working' : this.status === 'error' ? 'Error' : this.status === 'idle' ? 'Ready' : this.status === 'closed' ? 'Closed' : 'Connecting';
     const statusDot = this.status === 'prompting' ? '●' : this.status === 'error' ? '✕' : this.status === 'idle' ? '●' : '○';
     const statusColor = this.status === 'prompting' ? '#f59e0b' : this.status === 'error' ? '#ef4444' : this.status === 'idle' ? '#22c55e' : '#6b7280';
 
@@ -831,7 +836,7 @@ export class AcpSessionView {
       </div>
       <div class="acp-sb-trailing">
         ${ctxLabel ? `<span class="acp-sb-divider"></span><span class="acp-sb-item acp-sb-ctx"><div class="acp-sb-ctx-bar"><div class="acp-sb-ctx-fill" style="width:${ctxPct}%;background:${ctxColor}"></div></div><span class="acp-sb-value">${ctxLabel}</span></span>` : ''}
-        <span class="acp-sb-status" style="color:${statusColor}">${statusDot}</span>
+        <span class="acp-sb-status" style="color:${statusColor}" role="status" title="${statusLabel}" aria-label="${statusLabel}">${statusDot}</span>
       </div>
     `;
 

@@ -4064,7 +4064,10 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   font: inherit;
 }
 .acp-sb-value { color: var(--text-secondary, #8b949e); }
-.acp-sb-label { color: var(--text-muted, #6e7681); }
+.acp-statusbar .acp-sb-value {
+  color: var(--text-primary, #e6edf3);
+  opacity: 0.78;
+}
 .acp-sb-divider {
   width: 1px;
   height: 12px;
@@ -4081,6 +4084,11 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   transition: background 0.15s;
 }
 .acp-sb-clickable:hover { background: var(--bg-tertiary, #0d1117); }
+.acp-sb-clickable:focus-visible,
+.acp-composer-tool:focus-visible {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: -1px;
+}
 .acp-sb-caret { font-size: 9px; opacity: 0.6; }
 .acp-sb-status { font-size: 14px; flex-shrink: 0; }
 

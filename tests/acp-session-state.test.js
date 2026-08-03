@@ -97,6 +97,17 @@ test('ACP context usage stays outside the scrollable status controls', () => {
   assert.match(styles, /\.acp-sb-ctx \{ flex-shrink: 0;/);
 });
 
+test('ACP status controls keep compact values with accessible labels', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  assert.match(source, /const accessibleLabel = `\$\{controlLabel\}: \$\{valueLabel\}`;/);
+  assert.match(source, /aria-label="\$\{this\.escapeHtml\(accessibleLabel\)\}"/);
+  assert.doesNotMatch(source, /class="acp-sb-label">\$\{this\.escapeHtml\(configControlLabel\(option\)\)\}/);
+  assert.match(source, /class="acp-sb-status"[\s\S]*role="status"[\s\S]*aria-label="\$\{statusLabel\}"/);
+  assert.match(styles, /\.acp-statusbar \.acp-sb-value \{[\s\S]*opacity: 0\.78;/);
+  assert.match(styles, /\.acp-sb-clickable:focus-visible/);
+});
+
 test('ACP tool calls render as compact rows without card borders', () => {
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
   const toolCallRule = styles.match(/\.acp-tool-call \{([\s\S]*?)\}/)?.[1] || '';
