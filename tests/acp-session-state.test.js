@@ -115,6 +115,21 @@ test('ACP tool calls render as compact rows without card borders', () => {
   assert.doesNotMatch(toolCallRule, /border:\s*1px/);
 });
 
+test('ACP prose wraps naturally while long tokens and code stay contained', () => {
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  const messageBodyRule = styles.match(/\.acp-msg-body \{([\s\S]*?)\}/)?.[1] || '';
+  const codeRule = styles.match(/\.acp-msg-body pre \{([\s\S]*?)\}/)?.[1] || '';
+  assert.match(messageBodyRule, /word-break:\s*normal;/);
+  assert.match(messageBodyRule, /overflow-wrap:\s*break-word;/);
+  assert.match(messageBodyRule, /hyphens:\s*none;/);
+  assert.doesNotMatch(messageBodyRule, /break-all/);
+  assert.match(styles, /\.acp-inline-code \{[\s\S]*?overflow-wrap:\s*anywhere;/);
+  assert.match(styles, /\.acp-msg-body a \{[\s\S]*?overflow-wrap:\s*anywhere;/);
+  assert.match(codeRule, /overflow-x:\s*auto;/);
+  assert.match(codeRule, /white-space:\s*pre;/);
+  assert.match(codeRule, /overflow-wrap:\s*normal;/);
+});
+
 test('ACP activity is grouped into a single collapsible summary', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');

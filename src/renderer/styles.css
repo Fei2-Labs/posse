@@ -3605,8 +3605,10 @@ select.ai-form-input {
   max-width: 82ch;
   min-width: 0;
   color: var(--text-primary, #e6edf3);
-  word-wrap: break-word;
+  word-break: normal;
   overflow-wrap: break-word;
+  hyphens: none;
+  text-wrap: pretty;
 }
 .acp-msg-agent .acp-msg-body { width: 100%; }
 .acp-msg-user {
@@ -3626,11 +3628,15 @@ select.ai-form-input {
 /* System message */
 .acp-msg-system {
   align-self: flex-start;
+  min-width: 0;
   color: var(--text-muted, #6e7681);
   font-size: 12px;
   padding: 4px 0 4px 10px;
   border-left: 2px solid var(--border-color, #30363d);
   margin: 2px 0;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
 }
 
 /* Thought */
@@ -3662,6 +3668,7 @@ select.ai-form-input {
 .acp-activity-content {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 4px;
   margin-left: 21px;
   padding: 2px 0 8px;
@@ -3708,7 +3715,11 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
 .acp-thought-text {
   margin-left: 21px;
   padding: 2px 0 8px;
+  min-width: 0;
   white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
 }
 
 /* ========== Typing indicator ========== */
@@ -3800,6 +3811,8 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   font-size: 12px;
   color: var(--text-muted, #6e7681);
   padding: 4px 0;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ========== Plan panel ========== */
@@ -3844,7 +3857,14 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   font-size: 14px;
   line-height: 1.4;
 }
-.acp-plan-text { flex: 1; color: var(--text-primary, #e6edf3); }
+.acp-plan-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary, #e6edf3);
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
+}
 .acp-plan-priority {
   font-size: 10px;
   padding: 1px 6px;
@@ -4238,6 +4258,9 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   overflow-x: auto;
   font-size: 12.5px;
   font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 .acp-msg-body pre code { color: var(--text-primary, #e6edf3); }
 .acp-inline-code {
@@ -4246,6 +4269,12 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   border-radius: 4px;
   font-size: 12px;
   font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.acp-msg-body a {
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 .acp-md-h1, .acp-md-h2, .acp-md-h3, .acp-md-h4 {
   font-weight: 600;
