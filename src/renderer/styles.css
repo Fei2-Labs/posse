@@ -3848,6 +3848,32 @@ select.ai-form-input {
   hyphens: none;
 }
 
+.acp-session-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(100%, 82ch);
+  padding: 10px 12px;
+  border-left: 3px solid var(--status-error);
+  background: color-mix(in srgb, var(--status-error) 8%, transparent);
+  color: var(--text-primary);
+}
+.acp-session-error-text { min-width: 0; overflow-wrap: anywhere; }
+.acp-session-retry {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.acp-session-retry:hover:not(:disabled) { background: var(--hover-bg); }
+.acp-session-retry:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+.acp-session-retry:disabled { opacity: 0.6; cursor: default; }
+
 /* Thought */
 .acp-activity-group {
   width: 100%;

@@ -123,6 +123,8 @@ export class AcpSessionView {
   private promptHistoryKey: string;
   private startupPhase: AcpSessionInfo['startupPhase'];
   private openSessionLink: SessionLinkHandler;
+  private retrySession: (() => void | Promise<void>) | null;
+  private errorEl: HTMLElement | null = null;
   private followsLatest = true;
   private messagesResizeObserver: ResizeObserver;
 
@@ -132,12 +134,14 @@ export class AcpSessionView {
     cwd: string,
     conversationPreferences: ConversationPreferences = DEFAULT_CONVERSATION_PREFERENCES,
     openSessionLink: SessionLinkHandler = () => undefined,
+    retrySession: (() => void | Promise<void>) | null = null,
   ) {
     this.sessionId = sessionId;
     this.agentLabel = agentLabel;
     this.cwd = cwd;
     this.conversationPreferences = { ...conversationPreferences };
     this.openSessionLink = openSessionLink;
+    this.retrySession = retrySession;
     this.promptHistoryKey = this.historyStorageKey(sessionId);
     this.promptHistory = AcpPromptHistory.load(this.promptHistoryKey);
     const agentName = Object.keys(AGENT_COLORS).find(name => agentLabel.startsWith(name));
@@ -544,6 +548,10 @@ export class AcpSessionView {
     }
     if (info.status) {
       this.status = info.status;
+      if (info.status === 'initializing' || info.status === 'idle' || info.status === 'ready') {
+        this.errorEl?.remove();
+        this.errorEl = null;
+      }
       if (info.status === 'prompting') this.setPrompting(true);
       else if (info.status === 'idle' || info.status === 'ready') this.setPrompting(false);
       const unavailable = info.status === 'initializing' || info.status === 'error' || info.status === 'closed';
@@ -552,7 +560,7 @@ export class AcpSessionView {
       if (info.status === 'initializing') this.inputEl.placeholder = `${this.startupLabel()}…`;
     }
     if (info.errorMessage) {
-      this.addSystemMessage(`Session error: ${info.errorMessage}`);
+      this.renderSessionError(info.errorMessage);
     }
     this.renderStatusbar();
   }
@@ -848,6 +856,41 @@ export class AcpSessionView {
     el.className = 'acp-msg-system';
     el.textContent = text;
     this.appendConversationNode(el);
+    this.scrollToBottom();
+  }
+
+  private renderSessionError(message: string): void {
+    this.ensureConversationStarted();
+    this.errorEl?.remove();
+    const el = document.createElement('div');
+    el.className = 'acp-session-error';
+    el.setAttribute('role', 'alert');
+
+    const text = document.createElement('span');
+    text.className = 'acp-session-error-text';
+    text.textContent = `Session error: ${message}`;
+    el.appendChild(text);
+
+    if (this.retrySession && this.startupPhase !== 'ready') {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'acp-session-retry';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => {
+        retry.disabled = true;
+        retry.textContent = 'Retrying…';
+        void Promise.resolve(this.retrySession?.()).catch((error) => {
+          if (!retry.isConnected) return;
+          retry.disabled = false;
+          retry.textContent = 'Retry';
+          text.textContent = `Session error: ${error instanceof Error ? error.message : String(error)}`;
+        });
+      });
+      el.appendChild(retry);
+    }
+
+    this.appendConversationNode(el);
+    this.errorEl = el;
     this.scrollToBottom();
   }
 

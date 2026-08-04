@@ -4923,6 +4923,44 @@ function attachPtySession(info: PtySessionInfo, createdAt: number, replayRawBuff
   void refreshProjectsData();
 }
 
+function mountLoadedAcpSessionView(
+  acpId: string,
+  agentLabel: string,
+  cwd: string,
+  presetCommand: string,
+  acpSessionId: string,
+): AcpSessionView {
+  const retry = (): void => {
+    mountLoadedAcpSessionView(acpId, agentLabel, cwd, presetCommand, acpSessionId);
+  };
+  const view = new AcpSessionView(
+    acpId,
+    agentLabel,
+    cwd,
+    conversationPreferences,
+    openSessionLink,
+    retry,
+  );
+  const previous = acpViews.get(acpId);
+  if (previous) {
+    const previousElement = previous.getElement();
+    view.getElement().style.display = previousElement.style.display;
+    previous.destroy();
+    previousElement.replaceWith(view.getElement());
+  } else {
+    acpContent.appendChild(view.getElement());
+  }
+  acpViews.set(acpId, view);
+
+  void window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then((info) => {
+    if (acpViews.get(acpId) === view) view.handleStatus(info);
+  }).catch((error) => {
+    if (acpViews.get(acpId) !== view) return;
+    view.handleStatus({ status: 'error', errorMessage: error instanceof Error ? error.message : String(error) });
+  });
+  return view;
+}
+
 // Resume a session via ACP session/load instead of PTY --resume.
 // Returns true if the ACP path was taken, false to fall back to PTY.
 async function tryResumeViaAcp(
@@ -4960,16 +4998,7 @@ async function tryResumeViaAcp(
   sessionAgentId.set(acpId, acpSessionId);
   durableAcpSessionIds.add(acpId);
 
-  const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences, openSessionLink);
-  acpViews.set(acpId, view);
-  acpContent.appendChild(view.getElement());
-
-  // Load the existing ACP session
-  window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then((info) => {
-    view.handleStatus(info);
-  }).catch((err) => {
-    view.handleStatus({ status: 'error', errorMessage: err instanceof Error ? err.message : String(err) });
-  });
+  const view = mountLoadedAcpSessionView(acpId, agentLabel, cwd, presetCommand, acpSessionId);
 
   if (restore?.activate !== false) {
     switchToAcp(acpId);

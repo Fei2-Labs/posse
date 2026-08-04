@@ -184,11 +184,22 @@ test('app theme changes are explicit and structured sessions consume live tokens
 test('ACP startup reports measured phases and does not advertise fake rollback', () => {
   const client = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
   const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
   assert.match(client, /startupTimingsMs/);
   assert.match(client, /'initializing-protocol'/);
   assert.match(client, /'loading-session'/);
   assert.match(client, /supportsPromptRollback: false/);
+  assert.match(client, /const ACP_LOAD_TIMEOUT_MS = 90_000/);
+  assert.match(client, /this\.destroy\(id, false\)/);
+  assert.match(client, /this\.sessions\.get\(id\)\?\.process === childProcess/);
   assert.match(view, /'loading-session': 'Loading history'/);
+  assert.match(view, /className = 'acp-session-retry'/);
+  assert.match(view, /this\.startupPhase !== 'ready'/);
+  assert.match(app, /function mountLoadedAcpSessionView\(/);
+  assert.match(app, /previousElement\.replaceWith\(view\.getElement\(\)\)/);
+  assert.match(app, /if \(acpViews\.get\(acpId\) === view\) view\.handleStatus\(info\)/);
+  assert.match(styles, /\.acp-session-retry:focus-visible/);
 });
 
 test('ACP history replay renders user message chunks without duplicating live prompts', () => {

@@ -41,6 +41,9 @@ const importEsm = new Function('specifier', 'return import(specifier)') as (
 ) => Promise<AcpSdk>;
 let acpSdkPromise: Promise<AcpSdk> | null = null;
 
+const ACP_CREATE_TIMEOUT_MS = 30_000;
+const ACP_LOAD_TIMEOUT_MS = 90_000;
+
 function loadAcpSdk(): Promise<AcpSdk> {
   if (!acpSdkPromise) {
     acpSdkPromise = importEsm('@agentclientprotocol/sdk');
@@ -397,7 +400,7 @@ export class AcpManager {
         try { childProcess.kill(); } catch { /* process may already be dead */ }
         this.onStatus(id, { status: 'error', errorMessage: error.message });
         reject(error);
-      }, 30000);
+      }, ACP_CREATE_TIMEOUT_MS);
 
       client.connectWith(stream, async (ctx) => {
         try {
@@ -556,6 +559,9 @@ export class AcpManager {
 
   /** Load an existing ACP session by sessionId (for resume). */
   async load(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
+    // A retry reuses the renderer session id. Silently retire any previous adapter attempt so
+    // its exit/status callbacks cannot replace the retry's state.
+    this.destroy(id, false);
     const startup = this.startStartup(id);
     const acp = await loadAcpSdk();
     this.advanceStartup(id, startup, 'spawning-adapter');
@@ -623,14 +629,19 @@ export class AcpManager {
 
     const sessionReady = new Promise<AcpSessionInfo>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const error = new Error('ACP agent load timed out (30s)');
+        const error = new Error('Loading this session timed out after 90 seconds. Retry to start a clean load attempt.');
         info.status = 'error';
         info.errorMessage = error.message;
-        this.sessions.delete(id);
+        if (this.sessions.get(id)?.process === childProcess) this.sessions.delete(id);
         try { childProcess.kill(); } catch { /* process may already be dead */ }
-        this.onStatus(id, { status: 'error', errorMessage: error.message });
+        this.onStatus(id, {
+          status: 'error',
+          errorMessage: error.message,
+          startupPhase: info.startupPhase,
+          startupTimingsMs: info.startupTimingsMs,
+        });
         reject(error);
-      }, 30000);
+      }, ACP_LOAD_TIMEOUT_MS);
 
       client.connectWith(stream, async (ctx) => {
         try {
@@ -694,7 +705,7 @@ export class AcpManager {
           clearTimeout(timeout);
           info.status = 'error';
           info.errorMessage = err instanceof Error ? err.message : String(err);
-          this.sessions.delete(id);
+          if (this.sessions.get(id)?.process === childProcess) this.sessions.delete(id);
           try { childProcess.kill(); } catch { /* process may already be dead */ }
           this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
           reject(err);
