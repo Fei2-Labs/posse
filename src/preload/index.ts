@@ -101,7 +101,7 @@ contextBridge.exposeInMainWorld('posse', {
   browserBack: () => ipcRenderer.send('browser:back'),
   browserForward: () => ipcRenderer.send('browser:forward'),
   browserReloadOrStop: () => ipcRenderer.send('browser:reload-or-stop'),
-  browserOpenExternal: () => ipcRenderer.invoke('browser:open-external') as Promise<{ ok: boolean; error?: string }>,
+  browserOpenExternal: (input?: string) => ipcRenderer.invoke('browser:open-external', input) as Promise<{ ok: boolean; error?: string }>,
   browserOpenDevTools: () => ipcRenderer.send('browser:devtools'),
   browserClearProfile: () => ipcRenderer.invoke('browser:clear-profile') as Promise<{ ok: boolean; error?: string }>,
   browserResolvePermission: (requestId: string, allow: boolean) =>

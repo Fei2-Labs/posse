@@ -69,6 +69,9 @@ interface QueuedPrompt {
   images: ComposerImage[];
 }
 
+export type SessionLinkDisposition = 'embedded' | 'external';
+export type SessionLinkHandler = (url: string, disposition: SessionLinkDisposition) => void | Promise<void>;
+
 // Agent brand colors for avatars
 const AGENT_COLORS: Record<string, string> = {
   Claude: '#d97757',
@@ -114,17 +117,20 @@ export class AcpSessionView {
   private promptHistory = new AcpPromptHistory();
   private promptHistoryKey: string;
   private startupPhase: AcpSessionInfo['startupPhase'];
+  private openSessionLink: SessionLinkHandler;
 
   constructor(
     sessionId: string,
     agentLabel: string,
     cwd: string,
     conversationPreferences: ConversationPreferences = DEFAULT_CONVERSATION_PREFERENCES,
+    openSessionLink: SessionLinkHandler = () => undefined,
   ) {
     this.sessionId = sessionId;
     this.agentLabel = agentLabel;
     this.cwd = cwd;
     this.conversationPreferences = { ...conversationPreferences };
+    this.openSessionLink = openSessionLink;
     this.promptHistoryKey = this.historyStorageKey(sessionId);
     this.promptHistory = AcpPromptHistory.load(this.promptHistoryKey);
     const agentName = Object.keys(AGENT_COLORS).find(name => agentLabel.startsWith(name));
@@ -211,6 +217,20 @@ export class AcpSessionView {
   private setupEvents(): void {
     this.sendBtn.addEventListener('click', () => this.submitComposer('queue'));
     this.cancelBtn.addEventListener('click', () => this.cancelPrompt());
+    this.messagesEl.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest<HTMLAnchorElement>('a[href]');
+      if (!link || !this.messagesEl.contains(link)) return;
+      const url = link.href;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const disposition: SessionLinkDisposition = event.ctrlKey || event.metaKey ? 'external' : 'embedded';
+      void Promise.resolve(this.openSessionLink(url, disposition)).catch((error) => {
+        console.error('[ACP] Failed to open session link:', error);
+      });
+    });
 
     this.inputEl.addEventListener('input', () => {
       this.autoGrowInput();
@@ -566,18 +586,19 @@ export class AcpSessionView {
       currentMessage.dataset.raw = raw;
       const bodyEl = this.requiredElement<HTMLElement>('.acp-msg-body', currentMessage);
       bodyEl.innerHTML = this.renderMarkdown(raw);
-      this.attachCopyHandlers(bodyEl);
+      this.decorateMessageContent(bodyEl);
       this.scrollToBottom();
     } else {
       this.finishActivityGroup();
       this.currentMessageEl = this.addAgentMessage(text);
       if (messageId) this.currentMessageEl.dataset.messageId = messageId;
       this.currentMessageEl.dataset.raw = text;
-      this.attachCopyHandlers(this.requiredElement('.acp-msg-body', this.currentMessageEl));
+      this.decorateMessageContent(this.requiredElement('.acp-msg-body', this.currentMessageEl));
     }
   }
 
-  private attachCopyHandlers(scope: HTMLElement): void {
+  private decorateMessageContent(scope: HTMLElement): void {
+    this.linkifyPlainUrls(scope, false);
     for (const btn of Array.from(scope.querySelectorAll('.acp-code-copy'))) {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -613,7 +634,9 @@ export class AcpSessionView {
     }
     const raw = (thought.dataset.raw || '') + update.content.text;
     thought.dataset.raw = raw;
-    this.requiredElement<HTMLElement>('.acp-thought-text', thought).textContent = raw;
+    const thoughtText = this.requiredElement<HTMLElement>('.acp-thought-text', thought);
+    thoughtText.textContent = raw;
+    this.linkifyPlainUrls(thoughtText, true);
     this.requiredElement<HTMLElement>('.acp-thought-preview', thought).textContent = this.singleLinePreview(raw);
     this.scrollToBottom();
   }
@@ -727,6 +750,7 @@ export class AcpSessionView {
       body.appendChild(grid);
     }
     el.appendChild(body);
+    this.linkifyPlainUrls(body, true);
     this.appendConversationNode(el);
     this.currentMessageEl = null;
     this.scrollToBottom();
@@ -821,6 +845,7 @@ export class AcpSessionView {
       </summary>
       ${contentHtml}
     `;
+    this.linkifyPlainUrls(el, true);
 
     this.scrollToBottom();
   }
@@ -1001,7 +1026,7 @@ export class AcpSessionView {
     // Bold: **text**
     html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     // Links: [text](url) — only http/https
-    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" rel="noopener">$1</a>');
     // Headers: ### text
     html = html.replace(/^#### (.+)$/gm, '<div class="acp-md-h4">$1</div>');
     html = html.replace(/^### (.+)$/gm, '<div class="acp-md-h3">$1</div>');
@@ -1022,6 +1047,43 @@ export class AcpSessionView {
     html = html.replace(/(<\/div>|<hr>)<br>/g, '$1');
     html = html.replace(/<br>(<div class="acp-md-)/g, '$1');
     return html;
+  }
+
+  private linkifyPlainUrls(scope: HTMLElement, includeCode: boolean): void {
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    let current = walker.nextNode();
+    while (current) {
+      const parent = current.parentElement;
+      if (parent
+        && !parent.closest('a, button')
+        && (includeCode || !parent.closest('code, pre'))
+        && /https?:\/\//i.test(current.textContent || '')) {
+        textNodes.push(current as Text);
+      }
+      current = walker.nextNode();
+    }
+
+    const urlPattern = /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?()[\]{}]/gi;
+    for (const textNode of textNodes) {
+      const text = textNode.data;
+      const fragment = document.createDocumentFragment();
+      let cursor = 0;
+      let match = urlPattern.exec(text);
+      while (match) {
+        if (match.index > cursor) fragment.append(text.slice(cursor, match.index));
+        const link = document.createElement('a');
+        link.href = match[0];
+        link.rel = 'noopener';
+        link.textContent = match[0];
+        fragment.append(link);
+        cursor = match.index + match[0].length;
+        match = urlPattern.exec(text);
+      }
+      if (cursor === 0) continue;
+      if (cursor < text.length) fragment.append(text.slice(cursor));
+      textNode.replaceWith(fragment);
+    }
   }
 
   // ========== Utilities ==========

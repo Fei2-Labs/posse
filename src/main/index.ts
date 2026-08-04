@@ -2350,10 +2350,12 @@ function registerIPC(): void {
   ipcMain.on('browser:forward', (event) => { browserForEvent(event)?.controller.goForward(); });
   ipcMain.on('browser:reload-or-stop', (event) => { browserForEvent(event)?.controller.reloadOrStop(); });
   ipcMain.on('browser:devtools', (event) => { browserForEvent(event)?.controller.openDevTools(); });
-  ipcMain.handle('browser:open-external', async (event) => {
+  ipcMain.handle('browser:open-external', async (event, input?: string) => {
     const browser = browserForEvent(event);
-    if (!browser) return { ok: false, error: 'Browser is unavailable.' };
-    return browser.controller.openExternal();
+    if (!browser || (input !== undefined && typeof input !== 'string')) {
+      return { ok: false, error: 'Browser is unavailable.' };
+    }
+    return browser.controller.openExternal(input);
   });
   ipcMain.handle('browser:clear-profile', async (event) => {
     if (!BrowserWindow.fromWebContents(event.sender) || !embeddedBrowserManager) {

@@ -103,7 +103,7 @@ declare global {
       browserBack: () => void;
       browserForward: () => void;
       browserReloadOrStop: () => void;
-      browserOpenExternal: () => Promise<{ ok: boolean; error?: string }>;
+      browserOpenExternal: (input?: string) => Promise<{ ok: boolean; error?: string }>;
       browserOpenDevTools: () => void;
       browserClearProfile: () => Promise<{ ok: boolean; error?: string }>;
       browserResolvePermission: (requestId: string, allow: boolean) => Promise<boolean>;
@@ -2079,6 +2079,28 @@ function renderBrowserState(): void {
   scheduleBrowserBoundsSync();
 }
 
+async function navigateEmbeddedBrowser(input: string): Promise<void> {
+  browserHasPage = true;
+  browserState = { ...browserState, error: undefined, isLoading: true };
+  renderBrowserState();
+  const result = await window.posse.browserNavigate(input);
+  if (!result.ok) {
+    browserState = { ...browserState, isLoading: false, error: result.error || 'The page could not be opened.' };
+    renderBrowserState();
+  }
+}
+
+async function openSessionLink(url: string, disposition: 'embedded' | 'external'): Promise<void> {
+  if (disposition === 'external') {
+    const result = await window.posse.browserOpenExternal(url);
+    if (!result.ok && result.error) showNavToast(result.error);
+    return;
+  }
+  if (fileTreeCollapsed) setInspectorCollapsed(false);
+  setInspectorTab('browser');
+  await navigateEmbeddedBrowser(url);
+}
+
 function credentialActionLabel(code: string | undefined): string {
   if (code === 'missing') return 'rbw is not installed';
   if (code === 'locked') return 'Unlock rbw, then try again';
@@ -2187,14 +2209,7 @@ browserAddressForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const input = browserAddress.value.trim();
   if (!input) return;
-  browserHasPage = true;
-  browserState = { ...browserState, error: undefined, isLoading: true };
-  renderBrowserState();
-  const result = await window.posse.browserNavigate(input);
-  if (!result.ok) {
-    browserState = { ...browserState, isLoading: false, error: result.error || 'The page could not be opened.' };
-    renderBrowserState();
-  }
+  await navigateEmbeddedBrowser(input);
 });
 browserBackBtn.addEventListener('click', () => window.posse.browserBack());
 browserForwardBtn.addEventListener('click', () => window.posse.browserForward());
@@ -2246,13 +2261,7 @@ browserRetryBtn.addEventListener('click', async () => {
     browserAddress.focus();
     return;
   }
-  browserState = { ...browserState, error: undefined, isLoading: true };
-  renderBrowserState();
-  const result = await window.posse.browserNavigate(input);
-  if (!result.ok) {
-    browserState = { ...browserState, isLoading: false, error: result.error || 'The page could not be opened.' };
-    renderBrowserState();
-  }
+  await navigateEmbeddedBrowser(input);
 });
 browserPermissionAllow.addEventListener('click', () => { void resolveBrowserPermission(true); });
 browserPermissionDeny.addEventListener('click', () => { void resolveBrowserPermission(false); });
@@ -4799,7 +4808,7 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
     sessionUpdateTimes.set(acpId, Date.now());
 
     // Create the ACP session view
-    const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences);
+    const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences, openSessionLink);
     acpViews.set(acpId, view);
     acpContent.appendChild(view.getElement());
 
@@ -4951,7 +4960,7 @@ async function tryResumeViaAcp(
   sessionAgentId.set(acpId, acpSessionId);
   durableAcpSessionIds.add(acpId);
 
-  const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences);
+  const view = new AcpSessionView(acpId, agentLabel, cwd, conversationPreferences, openSessionLink);
   acpViews.set(acpId, view);
   acpContent.appendChild(view.getElement());
 

@@ -226,8 +226,8 @@ export class EmbeddedBrowserController {
     this.view.webContents.openDevTools({ mode: 'detach', activate: true });
   }
 
-  async openExternal(): Promise<{ ok: boolean; error?: string }> {
-    const normalized = normalizeBrowserUrl(this.view.webContents.getURL());
+  async openExternal(input?: string): Promise<{ ok: boolean; error?: string }> {
+    const normalized = normalizeBrowserUrl(input ?? this.view.webContents.getURL());
     if (normalized.ok === false) return normalized;
     try {
       await shell.openExternal(normalized.url);

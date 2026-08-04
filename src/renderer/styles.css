@@ -4451,6 +4451,32 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   word-break: normal;
   overflow-wrap: anywhere;
 }
+.acp-thought-text a,
+.acp-tool-content a {
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.acp-msg-body a,
+.acp-thought-text a,
+.acp-tool-content a {
+  color: var(--accent, #3fb950);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 2px;
+}
+.acp-msg-body a:hover,
+.acp-thought-text a:hover,
+.acp-tool-content a:hover {
+  text-decoration-color: currentColor;
+}
+.acp-msg-body a:focus-visible,
+.acp-thought-text a:focus-visible,
+.acp-tool-content a:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--accent, #3fb950);
+  outline-offset: 2px;
+}
 .acp-md-h1, .acp-md-h2, .acp-md-h3, .acp-md-h4 {
   font-weight: 600;
   margin: 8px 0 4px;

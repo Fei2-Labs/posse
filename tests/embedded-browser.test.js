@@ -11,6 +11,8 @@ const controller = source('src/main/browser-controller.ts');
 const main = source('src/main/index.ts');
 const preload = source('src/preload/index.ts');
 const renderer = source('src/renderer/app.ts');
+const sessionView = source('src/renderer/acp-session-view.ts');
+const styles = source('src/renderer/styles.css');
 const html = source('src/renderer/index.html');
 
 test('uses a persistent isolated WebContentsView profile', () => {
@@ -37,8 +39,23 @@ test('validates browser IPC against the sending BrowserWindow', () => {
 test('exposes only narrow browser commands through preload', () => {
   assert.match(preload, /browserSetBounds: \(bounds:/);
   assert.match(preload, /browserNavigate: \(input: string\)/);
+  assert.match(preload, /browserOpenExternal: \(input\?: string\)/);
   assert.match(preload, /browserResolvePermission: \(requestId: string, allow: boolean\)/);
   assert.doesNotMatch(preload, /webContents/);
+});
+
+test('routes structured session links to the embedded or system browser', () => {
+  assert.match(sessionView, /this\.messagesEl\.addEventListener\('click'/);
+  assert.match(sessionView, /event\.ctrlKey \|\| event\.metaKey \? 'external' : 'embedded'/);
+  assert.match(sessionView, /linkifyPlainUrls\(scope: HTMLElement, includeCode: boolean\)/);
+  assert.match(renderer, /if \(fileTreeCollapsed\) setInspectorCollapsed\(false\)/);
+  assert.match(renderer, /setInspectorTab\('browser'\)/);
+  assert.match(renderer, /window\.posse\.browserOpenExternal\(url\)/);
+  assert.match(renderer, /await navigateEmbeddedBrowser\(url\)/);
+  assert.match(controller, /normalizeBrowserUrl\(input \?\? this\.view\.webContents\.getURL\(\)\)/);
+  assert.match(styles, /\.acp-thought-text a/);
+  assert.match(styles, /\.acp-tool-content a/);
+  assert.match(styles, /a:focus-visible/);
 });
 
 test('gates permissions, popups, downloads, and global profile clearing', () => {
