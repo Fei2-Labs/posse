@@ -22,6 +22,14 @@ type AcpPermissionRequest = {
   options: PermissionOption[];
 };
 
+type AcpClosedSessionMetadata = {
+  title: string;
+  cwd: string;
+  presetCommand: string;
+  resumeId: string;
+  resumeCommand: string;
+};
+
 contextBridge.exposeInMainWorld('posse', {
   // Set window title
   setWindowTitle: (title: string) => ipcRenderer.send('window:set-title', title),
@@ -316,8 +324,8 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('acp:set-config-option', id, configId, value) as Promise<SessionConfigOption[]>,
   acpInfo: (id: string) =>
     ipcRenderer.invoke('acp:info', id) as Promise<AcpSessionInfo | null>,
-  acpDestroy: (id: string) =>
-    ipcRenderer.send('acp:destroy', id),
+  acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) =>
+    ipcRenderer.send('acp:destroy', id, closedSession),
   acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) =>
     ipcRenderer.invoke('acp:load', id, agentLabel, cwd, acpSessionId, providerEnv) as Promise<AcpSessionInfo>,
   acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) =>

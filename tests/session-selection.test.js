@@ -52,6 +52,16 @@ test('Recent mixes live and closed conversations and limits the result to nine',
   assert.match(collector, /return out\.slice\(0, 9\)/);
 });
 
+test('closing ACP sessions persists resumable metadata before clearing live state', () => {
+  const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src/preload/index.ts'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
+  assert.match(appSource, /function acpClosedSessionMetadata\(id: string\)/);
+  assert.match(appSource, /window\.posse\.acpDestroy\(id, acpClosedSessionMetadata\(id\)\);\s*removePersistedActiveAcpSession\(id\)/);
+  assert.match(preloadSource, /acpDestroy: \(id: string, closedSession\?: AcpClosedSessionMetadata\)/);
+  assert.match(mainSource, /ipcMain\.on\('acp:destroy', \(_e, id: string, closedSession\?: unknown\)/);
+  assert.match(mainSource, /existing\.resumeId !== session\.resumeId/);
+});
+
 test('resuming a closed session redraws Recent after its persisted row is removed', () => {
   const acpResumeBranch = appSource.match(
     /if \(hasResume && cs\.resumeId && cs\.presetCommand\) \{[\s\S]*?\n  \}\n\n  if \(hasResume\)/,

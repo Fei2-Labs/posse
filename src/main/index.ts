@@ -160,7 +160,9 @@ function saveClosedSessions(sessions: ClosedSession[]): ClosedSession[] {
 }
 
 function addClosedSession(session: { title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string }): void {
-  const list = loadClosedSessions();
+  const list = loadClosedSessions().filter(existing => !session.resumeId
+    || existing.resumeId !== session.resumeId
+    || existing.presetCommand !== session.presetCommand);
   list.push({
     id: `closed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     title: session.title,
@@ -2546,7 +2548,22 @@ function registerIPC(): void {
   });
 
   // Destroy an ACP session
-  ipcMain.on('acp:destroy', (_e, id: string) => {
+  ipcMain.on('acp:destroy', (_e, id: string, closedSession?: unknown) => {
+    if (closedSession && typeof closedSession === 'object') {
+      const candidate = closedSession as Partial<ClosedSession>;
+      if (typeof candidate.title === 'string'
+        && typeof candidate.cwd === 'string' && candidate.cwd
+        && typeof candidate.presetCommand === 'string' && candidate.presetCommand
+        && typeof candidate.resumeId === 'string' && candidate.resumeId) {
+        addClosedSession({
+          title: candidate.title.slice(0, 200),
+          cwd: candidate.cwd,
+          presetCommand: candidate.presetCommand,
+          resumeId: candidate.resumeId,
+          resumeCommand: typeof candidate.resumeCommand === 'string' ? candidate.resumeCommand : '',
+        });
+      }
+    }
     acpManager.destroy(id);
   });
 

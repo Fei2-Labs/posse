@@ -69,6 +69,14 @@ type PtySessionInfo = {
   lastActivityMs?: number;
 };
 
+type AcpClosedSessionMetadata = {
+  title: string;
+  cwd: string;
+  presetCommand: string;
+  resumeId: string;
+  resumeCommand: string;
+};
+
 declare global {
   interface Window {
     posse: {
@@ -197,7 +205,7 @@ declare global {
       acpCancel: (id: string) => Promise<boolean>;
       acpSetConfigOption: (id: string, configId: string, value: string | boolean) => Promise<SessionConfigOption[]>;
       acpInfo: (id: string) => Promise<AcpSessionInfo | null>;
-      acpDestroy: (id: string) => void;
+      acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) => void;
       acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
       acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) => Promise<boolean>;
       onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) => void;
@@ -5412,10 +5420,25 @@ function clearSessionState(id: string): void {
   durableAcpSessionIds.delete(id);
 }
 
+function acpClosedSessionMetadata(id: string): AcpClosedSessionMetadata | undefined {
+  const cwd = sessionCwds.get(id);
+  const presetCommand = acpPresetCommands.get(id);
+  const resumeId = sessionResumeId.get(id) || sessionAgentId.get(id);
+  if (!cwd || !presetCommand || !resumeId) return undefined;
+  return {
+    title: sessionTitles.get(id) || sessionDisplayNames.get(id) || 'Agent session',
+    cwd,
+    presetCommand,
+    resumeId,
+    resumeCommand: '',
+  };
+}
+
 function destroySession(id: string): void {
   const wasActive = getActiveSessionId() === id;
   // ACP session cleanup
   if (acpSessionIds.has(id)) {
+    window.posse.acpDestroy(id, acpClosedSessionMetadata(id));
     removePersistedActiveAcpSession(id);
     const view = acpViews.get(id);
     if (view) {
@@ -5451,6 +5474,7 @@ function destroySessions(ids: string[]): void {
   const activeBefore = getActiveSessionId();
   for (const id of uniqIds) {
     if (acpSessionIds.has(id)) {
+      window.posse.acpDestroy(id, acpClosedSessionMetadata(id));
       removePersistedActiveAcpSession(id);
       const view = acpViews.get(id);
       if (view) {
