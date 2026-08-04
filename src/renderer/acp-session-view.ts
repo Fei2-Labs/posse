@@ -784,7 +784,9 @@ export class AcpSessionView {
   }
 
   private decorateMessageContent(scope: HTMLElement): void {
-    this.linkifyPlainUrls(scope, false);
+    // Codex commonly formats development URLs as inline code. They remain URLs and
+    // should use the same embedded/system-browser click path as prose links.
+    this.linkifyPlainUrls(scope, true);
     for (const btn of Array.from(scope.querySelectorAll('.acp-code-copy'))) {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -1294,7 +1296,7 @@ export class AcpSessionView {
       current = walker.nextNode();
     }
 
-    const urlPattern = /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?()[\]{}]/gi;
+    const urlPattern = /https?:\/\/[^\s<>"'`]*[^\s<>"'`.,;:!?()[\]{}]/gi;
     for (const textNode of textNodes) {
       const text = textNode.data;
       const fragment = document.createDocumentFragment();

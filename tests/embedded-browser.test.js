@@ -48,6 +48,12 @@ test('routes structured session links to the embedded or system browser', () => 
   assert.match(sessionView, /this\.messagesEl\.addEventListener\('click'/);
   assert.match(sessionView, /event\.ctrlKey \|\| event\.metaKey \? 'external' : 'embedded'/);
   assert.match(sessionView, /linkifyPlainUrls\(scope: HTMLElement, includeCode: boolean\)/);
+  assert.match(sessionView, /private decorateMessageContent[\s\S]*this\.linkifyPlainUrls\(scope, true\)/);
+  const patternLine = sessionView.split('\n').find((line) => line.includes('const urlPattern ='));
+  const patternLiteral = patternLine?.match(/= (\/.*\/gi);$/)?.[1];
+  assert.ok(patternLiteral, 'plain HTTP URL matcher should remain discoverable');
+  const plainUrlPattern = Function(`"use strict"; return (${patternLiteral});`)();
+  assert.deepEqual('Preview at `http://localhost:8000/`.'.match(plainUrlPattern), ['http://localhost:8000/']);
   assert.match(renderer, /if \(fileTreeCollapsed\) setInspectorCollapsed\(false\)/);
   assert.match(renderer, /setInspectorTab\('browser'\)/);
   assert.match(renderer, /window\.posse\.browserOpenExternal\(url\)/);
