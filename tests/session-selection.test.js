@@ -84,3 +84,27 @@ test('Active and Recent session rows share the compact sidebar grid', () => {
   assert.match(titleRule, /font-size:\s*11\.5px;/);
   assert.match(titleRule, /text-overflow:\s*ellipsis;/);
 });
+
+test('workspace toolbar independently controls persistent left and right sidebars', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+
+  assert.match(html, /id="workspace-topbar" role="toolbar" aria-label="Workspace layout controls"[\s\S]*id="sidebar-toggle"[\s\S]*title="Toggle left sidebar"[\s\S]*aria-pressed="true"/);
+  assert.match(html, /id="file-tree-toggle"[\s\S]*title="Toggle right sidebar"[\s\S]*aria-pressed="true"/);
+  assert.match(appSource, /function setSidebarCollapsed\(collapsed: boolean, persist = true\)/);
+  assert.match(appSource, /function setInspectorCollapsed\(collapsed: boolean, persist = true\)/);
+  assert.match(appSource, /button\.setAttribute\('aria-pressed', String\(visible\)\)/);
+  assert.match(appSource, /sidebarResizer\.hidden = collapsed/);
+  assert.match(appSource, /fileTreeResizer\.hidden = collapsed/);
+  assert.match(appSource, /setInspectorCollapsed\(savedFileTreeCollapsed === 'true', false\)/);
+  assert.match(appSource, /setSidebarCollapsed\(savedSidebarCollapsed === 'true', false\)/);
+  assert.match(stylesSource, /\.workspace-panel-toggle:focus-visible/);
+  assert.match(stylesSource, /@media \(max-width: 1000px\)[\s\S]*#sidebar\.collapsed[\s\S]*translateX\(-100%\)/);
+});
+
+test('session viewports clip unnecessary horizontal overflow', () => {
+  assert.match(stylesSource, /#terminal-area \{[\s\S]*overflow: hidden;/);
+  assert.match(stylesSource, /\.terminal-container \.xterm-viewport \{[\s\S]*overflow-x: hidden !important;/);
+  assert.match(stylesSource, /\.chat-messages \{[\s\S]*overflow-x: hidden;/);
+  assert.match(stylesSource, /\.acp-scroll \{[\s\S]*overflow-x: hidden;/);
+  assert.match(stylesSource, /\.fp-markdown\.markdown-body pre \{[\s\S]*overflow: auto;/);
+});

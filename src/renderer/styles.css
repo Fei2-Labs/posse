@@ -42,30 +42,46 @@
   --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
 }
 
-/* Panel collapse/expand button */
-.panel-toggle {
-  width: 16px;
-  background: var(--bg-toolbar);
-  border: none;
-  color: var(--text-secondary);
-  font-size: 10px;
-  cursor: pointer;
+/* Persistent center-workspace layout controls. */
+#workspace-topbar {
   display: flex;
+  height: 38px;
+  flex: 0 0 38px;
   align-items: center;
-  justify-content: center;
-  transition: background 0.15s, color 0.15s;
-  user-select: none;
-  flex-shrink: 0;
+  gap: 4px;
+  padding: 0 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-toolbar);
 }
 
-.panel-toggle:hover {
+.workspace-panel-toggle {
+  display: flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.workspace-panel-toggle svg { width: 18px; height: 18px; }
+.workspace-panel-toggle:hover {
   background: var(--hover-bg);
   color: var(--text-primary);
 }
-
-.panel-toggle.collapsed {
-  background: var(--accent-green);
-  color: #0d1117;
+.workspace-panel-toggle.active {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+.workspace-panel-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 /* Resizer bar */
@@ -912,9 +928,10 @@ html, body {
 /* Terminal area */
 #terminal-area {
   flex: 1;
-  min-width: 0;
+  min-width: min(420px, 100%);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: var(--bg-primary);
   position: relative;
 }
@@ -1356,6 +1373,7 @@ html, body {
 
 .terminal-container .xterm-viewport {
   overflow-y: scroll !important;
+  overflow-x: hidden !important;
 }
 
 /* Thin, translucent terminal scrollbar so it doesn't cover the text column */
@@ -3197,6 +3215,7 @@ select.ai-form-input {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 12px 10px;
   display: flex;
   flex-direction: column;
@@ -3639,19 +3658,41 @@ select.ai-form-input {
 }
 
 @media (max-width: 1000px) {
+  #sidebar-resizer,
   #file-tree-resizer {
     display: none;
   }
 
+  #terminal-area { min-width: 0; }
+
+  #sidebar,
   #file-tree-panel {
     position: fixed;
     z-index: 30;
-    top: 0;
-    right: 0;
+    top: 38px;
     bottom: 0;
-    width: min(420px, calc(100vw - 44px)) !important;
     max-width: none;
     min-width: 0;
+  }
+
+  #sidebar {
+    left: 0;
+    width: min(360px, calc(100vw - 44px)) !important;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.35);
+    transition: transform 0.2s ease;
+  }
+
+  #sidebar.collapsed {
+    width: min(360px, calc(100vw - 44px)) !important;
+    min-width: 0 !important;
+    overflow: visible;
+    opacity: 1;
+    transform: translateX(-100%);
+  }
+
+  #file-tree-panel {
+    right: 0;
+    width: min(420px, calc(100vw - 44px)) !important;
     box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
     transition: transform 0.2s ease;
   }
@@ -3667,17 +3708,12 @@ select.ai-form-input {
   #file-tree-panel.browser-expanded {
     width: calc(100vw - 44px) !important;
   }
+}
 
-  #file-tree-toggle {
-    position: fixed;
-    z-index: 31;
-    top: 50%;
-    right: 0;
-    height: 44px;
-    border: 1px solid var(--border-color);
-    border-right: 0;
-    border-radius: 6px 0 0 6px;
-  }
+@media (prefers-reduced-motion: reduce) {
+  #sidebar,
+  #file-tree-panel,
+  .workspace-panel-toggle { transition: none; }
 }
 
 /* ===== Minimal inline toast (project-add confirmation) ===== */
@@ -3732,6 +3768,7 @@ select.ai-form-input {
 .acp-scroll {
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 28px 16px 40px;
   scrollbar-gutter: stable;
 }

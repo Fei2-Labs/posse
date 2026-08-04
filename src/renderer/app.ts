@@ -5722,28 +5722,33 @@ cwdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') cwdInput.bl
 // Workspace inspector collapse/expand
 let fileTreeCollapsed = false;
 let fileTreeLastWidth = 220;
+const PANEL_OVERLAY_BREAKPOINT = 1000;
+
+function isPanelOverlayLayout(): boolean {
+  return window.innerWidth <= PANEL_OVERLAY_BREAKPOINT;
+}
+
+function updatePanelToggle(button: HTMLElement, visible: boolean): void {
+  button.classList.toggle('active', visible);
+  button.setAttribute('aria-pressed', String(visible));
+}
 
 function setInspectorCollapsed(collapsed: boolean, persist = true): void {
+  const wasCollapsed = fileTreeCollapsed;
   fileTreeCollapsed = collapsed;
   if (collapsed) {
-    fileTreeLastWidth = fileTreePanel.offsetWidth;
+    if (!wasCollapsed && !isPanelOverlayLayout()) fileTreeLastWidth = fileTreePanel.offsetWidth;
     fileTreePanel.classList.add('collapsed');
-    fileTreeToggle.classList.add('collapsed');
-    fileTreeToggle.textContent = '\u25C0';
-    fileTreeToggle.setAttribute('aria-expanded', 'false');
-    fileTreeToggle.setAttribute('aria-label', 'Expand workspace inspector');
   } else {
     fileTreePanel.style.width = fileTreeLastWidth + 'px';
     fileTreePanel.classList.remove('collapsed');
-    fileTreeToggle.classList.remove('collapsed');
-    fileTreeToggle.textContent = '\u25B6';
-    fileTreeToggle.setAttribute('aria-expanded', 'true');
-    fileTreeToggle.setAttribute('aria-label', 'Collapse workspace inspector');
-    requestAnimationFrame(() => {
+    if (wasCollapsed && persist) requestAnimationFrame(() => {
       const activeTab = inspectorTabs.find((tab) => tab.classList.contains('active'));
       activeTab?.focus();
     });
   }
+  fileTreeResizer.hidden = collapsed;
+  updatePanelToggle(fileTreeToggle, !collapsed);
   if (persist) localStorage.setItem('posse_filetree_collapsed', String(fileTreeCollapsed));
 }
 
@@ -5751,25 +5756,27 @@ fileTreeToggle.addEventListener('click', () => {
   setInspectorCollapsed(!fileTreeCollapsed);
 });
 
-// Right sidebar collapse/expand
+// Sessions sidebar collapse/expand
 let sidebarCollapsed = false;
 let sidebarLastWidth = 300;
 
-sidebarToggle.addEventListener('click', () => {
-  sidebarCollapsed = !sidebarCollapsed;
-  if (sidebarCollapsed) {
-    sidebarLastWidth = sidebar.offsetWidth;
+function setSidebarCollapsed(collapsed: boolean, persist = true): void {
+  const wasCollapsed = sidebarCollapsed;
+  sidebarCollapsed = collapsed;
+  if (collapsed) {
+    if (!wasCollapsed && !isPanelOverlayLayout()) sidebarLastWidth = sidebar.offsetWidth;
     sidebar.classList.add('collapsed');
-    sidebarToggle.classList.add('collapsed');
-    // Sessions sidebar is on the left: collapsed \u2192 point right (expand), expanded \u2192 point left (collapse)
-    sidebarToggle.textContent = '\u25B6';
   } else {
     sidebar.style.width = sidebarLastWidth + 'px';
     sidebar.classList.remove('collapsed');
-    sidebarToggle.classList.remove('collapsed');
-    sidebarToggle.textContent = '\u25C0';
   }
-  localStorage.setItem('posse_sidebar_collapsed', String(sidebarCollapsed));
+  sidebarResizer.hidden = collapsed;
+  updatePanelToggle(sidebarToggle, !collapsed);
+  if (persist) localStorage.setItem('posse_sidebar_collapsed', String(sidebarCollapsed));
+}
+
+sidebarToggle.addEventListener('click', () => {
+  setSidebarCollapsed(!sidebarCollapsed);
 });
 
 // Drag to resize width
@@ -5850,25 +5857,24 @@ document.addEventListener('mouseup', () => {
 (function restorePanelStates() {
   const savedFileTreeWidth = localStorage.getItem('posse_filetree_width');
   if (savedFileTreeWidth) {
-    fileTreePanel.style.width = savedFileTreeWidth + 'px';
-    fileTreeLastWidth = parseInt(savedFileTreeWidth);
+    const width = Math.max(160, Math.min(500, Number.parseInt(savedFileTreeWidth, 10)));
+    if (Number.isFinite(width)) {
+      fileTreePanel.style.width = width + 'px';
+      fileTreeLastWidth = width;
+    }
   }
   const savedSidebarWidth = localStorage.getItem('posse_sidebar_width');
   if (savedSidebarWidth) {
-    sidebar.style.width = savedSidebarWidth + 'px';
-    sidebarLastWidth = parseInt(savedSidebarWidth);
+    const width = Math.max(180, Math.min(500, Number.parseInt(savedSidebarWidth, 10)));
+    if (Number.isFinite(width)) {
+      sidebar.style.width = width + 'px';
+      sidebarLastWidth = width;
+    }
   }
   const savedFileTreeCollapsed = localStorage.getItem('posse_filetree_collapsed');
-  if (savedFileTreeCollapsed === 'true') {
-    setInspectorCollapsed(true, false);
-  }
   const savedSidebarCollapsed = localStorage.getItem('posse_sidebar_collapsed');
-  if (savedSidebarCollapsed === 'true') {
-    sidebarCollapsed = true;
-    sidebar.classList.add('collapsed');
-    sidebarToggle.classList.add('collapsed');
-    sidebarToggle.textContent = '\u25B6';
-  }
+  setInspectorCollapsed(savedFileTreeCollapsed === 'true', false);
+  setSidebarCollapsed(savedSidebarCollapsed === 'true', false);
 })();
 
 fileTreeRefreshBtn.addEventListener('click', () => { void refreshFileTree(true); });

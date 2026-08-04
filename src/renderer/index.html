@@ -70,9 +70,6 @@
 
   <!-- Main body -->
   <div id="main">
-    <!-- Left sidebar collapse button -->
-    <div id="sidebar-toggle" class="panel-toggle" title="Collapse/expand session list">&#9664;</div>
-
     <div id="sidebar">
       <div id="sidebar-topbar">
         <button id="host-switcher-btn" class="topbar-icon-btn host-switcher-btn" title="Switch host / add remote">
@@ -136,6 +133,14 @@
     <div id="sidebar-resizer" class="resizer"></div>
 
     <div id="terminal-area">
+      <div id="workspace-topbar" role="toolbar" aria-label="Workspace layout controls">
+        <button id="sidebar-toggle" class="workspace-panel-toggle active" type="button" title="Toggle left sidebar" aria-label="Toggle left sidebar" aria-pressed="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+        </button>
+        <button id="file-tree-toggle" class="workspace-panel-toggle active" type="button" title="Toggle right sidebar" aria-label="Toggle right sidebar" aria-pressed="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+        </button>
+      </div>
       <div id="terminal-content">
         <div id="empty-state">Select a working directory, then click "New Terminal" to start</div>
       </div>
@@ -246,8 +251,6 @@
       </section>
     </aside>
 
-    <!-- Inspector collapse/expand button -->
-    <button id="file-tree-toggle" class="panel-toggle" type="button" title="Collapse/expand workspace inspector" aria-label="Collapse workspace inspector" aria-expanded="true">&#9654;</button>
   </div>
 
   <script type="module" src="app.js"></script>
