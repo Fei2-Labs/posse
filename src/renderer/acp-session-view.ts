@@ -29,6 +29,7 @@ import {
 } from './conversation-preferences';
 
 type AgentMessageChunkUpdate = Extract<SessionUpdate, { sessionUpdate: 'agent_message_chunk' }>;
+type UserMessageChunkUpdate = Extract<SessionUpdate, { sessionUpdate: 'user_message_chunk' }>;
 type AgentThoughtChunkUpdate = Extract<SessionUpdate, { sessionUpdate: 'agent_thought_chunk' }>;
 type ToolCallUpdate = Extract<SessionUpdate, { sessionUpdate: 'tool_call' }>;
 type ToolCallProgressUpdate = Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>;
@@ -105,6 +106,7 @@ export class AcpSessionView {
   private status: AcpSessionInfo['status'] = 'initializing';
   private toolCalls = new Map<string, ToolCallState>();
   private currentMessageEl: HTMLElement | null = null;
+  private currentUserMessageEl: HTMLElement | null = null;
   private currentThoughtEl: HTMLElement | null = null;
   private currentActivityEl: HTMLDetailsElement | null = null;
   private currentActivityContentEl: HTMLElement | null = null;
@@ -489,6 +491,7 @@ export class AcpSessionView {
 
   // Handle a session/update notification from the agent
   handleUpdate(update: SessionUpdate): void {
+    if (update.sessionUpdate !== 'user_message_chunk') this.currentUserMessageEl = null;
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
         this.handleAgentMessageChunk(update);
@@ -516,6 +519,7 @@ export class AcpSessionView {
         break;
       }
       case 'user_message_chunk':
+        this.handleUserMessageChunk(update);
         break;
       case 'agent_thought_chunk':
         this.handleThoughtChunk(update);
@@ -596,6 +600,48 @@ export class AcpSessionView {
   }
 
   // ========== Agent message rendering with Markdown ==========
+  private handleUserMessageChunk(update: UserMessageChunkUpdate): void {
+    // Locally submitted prompts are rendered before the ACP request starts. Some agents echo
+    // them back during the live turn; only load/replay chunks should create another bubble.
+    if (this.isPrompting || !update.content) return;
+    const messageId = update.messageId;
+    const current = this.currentUserMessageEl;
+    const sameMessage = Boolean(current) && (
+      (Boolean(messageId) && current?.dataset.messageId === messageId)
+      || (!messageId && !current?.dataset.messageId)
+    );
+
+    if (update.content.type === 'text') {
+      const text = update.content.text;
+      if (sameMessage && current) {
+        const raw = (current.dataset.raw || '') + text;
+        current.dataset.raw = raw;
+        const textEl = this.requiredElement<HTMLElement>('.acp-user-text', current);
+        textEl.textContent = raw;
+        this.linkifyPlainUrls(textEl, true);
+        this.scrollToBottom();
+        return;
+      }
+      this.currentUserMessageEl = this.addUserMessage(text);
+    } else if (update.content.type === 'image') {
+      const image: ComposerImage = {
+        dataUrl: `data:${update.content.mimeType};base64,${update.content.data}`,
+        name: 'Attached image',
+      };
+      if (sameMessage && current) {
+        this.appendUserImages(current, [image]);
+        this.scrollToBottom();
+        return;
+      }
+      this.currentUserMessageEl = this.addUserMessage('', [image]);
+    } else {
+      return;
+    }
+
+    if (messageId) this.currentUserMessageEl.dataset.messageId = messageId;
+    if (update.content.type === 'text') this.currentUserMessageEl.dataset.raw = update.content.text;
+  }
+
   private handleAgentMessageChunk(update: AgentMessageChunkUpdate): void {
     if (!update.content || update.content.type !== 'text') return;
     const text = update.content.text;
@@ -747,7 +793,7 @@ export class AcpSessionView {
   }
 
   // ========== Message helpers ==========
-  private addUserMessage(text: string, images: ComposerImage[] = []): void {
+  private addUserMessage(text: string, images: ComposerImage[] = []): HTMLElement {
     this.ensureConversationStarted();
     this.finishActivityGroup();
     const el = document.createElement('div');
@@ -756,25 +802,34 @@ export class AcpSessionView {
     body.className = 'acp-msg-body';
     if (text) {
       const textEl = document.createElement('div');
+      textEl.className = 'acp-user-text';
       textEl.textContent = text;
       body.appendChild(textEl);
     }
-    if (images.length > 0) {
-      const grid = document.createElement('div');
-      grid.className = 'acp-msg-images';
-      for (const image of images) {
-        const preview = document.createElement('img');
-        preview.src = image.dataUrl;
-        preview.alt = image.name;
-        grid.appendChild(preview);
-      }
-      body.appendChild(grid);
-    }
     el.appendChild(body);
+    this.appendUserImages(el, images);
     this.linkifyPlainUrls(body, true);
     this.appendConversationNode(el);
     this.currentMessageEl = null;
     this.scrollToBottom();
+    return el;
+  }
+
+  private appendUserImages(messageEl: HTMLElement, images: ComposerImage[]): void {
+    if (images.length === 0) return;
+    const body = this.requiredElement<HTMLElement>('.acp-msg-body', messageEl);
+    let grid = body.querySelector<HTMLElement>('.acp-msg-images');
+    if (!grid) {
+      grid = document.createElement('div');
+      grid.className = 'acp-msg-images';
+      body.appendChild(grid);
+    }
+    for (const image of images) {
+      const preview = document.createElement('img');
+      preview.src = image.dataUrl;
+      preview.alt = image.name;
+      grid.appendChild(preview);
+    }
   }
 
   private addAgentMessage(text: string): HTMLElement {

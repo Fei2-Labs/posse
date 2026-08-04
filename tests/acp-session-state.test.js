@@ -190,3 +190,14 @@ test('ACP startup reports measured phases and does not advertise fake rollback',
   assert.match(client, /supportsPromptRollback: false/);
   assert.match(view, /'loading-session': 'Loading history'/);
 });
+
+test('ACP history replay renders user message chunks without duplicating live prompts', () => {
+  const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  assert.match(view, /case 'user_message_chunk':\s*this\.handleUserMessageChunk\(update\)/);
+  assert.match(view, /if \(this\.isPrompting \|\| !update\.content\) return/);
+  assert.match(view, /!messageId && !current\?\.dataset\.messageId/);
+  assert.match(view, /this\.currentUserMessageEl = null/);
+  assert.match(view, /className = 'acp-user-text'/);
+  assert.match(view, /data:\$\{update\.content\.mimeType\};base64/);
+  assert.doesNotMatch(view, /case 'user_message_chunk':\s*break;/);
+});
