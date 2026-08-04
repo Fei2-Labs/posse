@@ -88,6 +88,20 @@ test('ACP composer wires queue, interrupt, paste and structured prompt content',
   assert.match(styles, /\.acp-input::\-webkit-scrollbar \{ display: none; \}/);
 });
 
+test('ACP sessions expose a jump-to-latest control without forcing readers back to the bottom', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  assert.match(source, /class="acp-jump-bottom"/);
+  assert.match(source, /aria-label="Jump to latest message"/);
+  assert.match(source, /this\.scrollEl\.addEventListener\('scroll'/);
+  assert.match(source, /if \(!force && !this\.followsLatest\)/);
+  assert.match(source, /this\.jumpToBottomBtn\.addEventListener\('click', \(\) => this\.scrollToBottom\(true\)\)/);
+  assert.match(source, /this\.messagesResizeObserver\.disconnect\(\)/);
+  assert.match(styles, /\.acp-scroll-shell \{[\s\S]*position: relative;[\s\S]*min-height: 0;/);
+  assert.match(styles, /\.acp-jump-bottom \{[\s\S]*width: 40px;[\s\S]*height: 40px;/);
+  assert.match(styles, /\.acp-jump-bottom:focus-visible/);
+});
+
 test('ACP context usage stays outside the scrollable status controls', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');

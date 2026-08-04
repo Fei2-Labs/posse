@@ -81,9 +81,12 @@ const AGENT_COLORS: Record<string, string> = {
   OpenCode: '#f59e0b',
 };
 
+const BOTTOM_PROXIMITY_PX = 72;
+
 export class AcpSessionView {
   private container: HTMLElement;
   private scrollEl: HTMLElement;
+  private jumpToBottomBtn: HTMLButtonElement;
   private messagesEl: HTMLElement;
   private inputWrapEl: HTMLElement;
   private inputEl: HTMLTextAreaElement;
@@ -118,6 +121,8 @@ export class AcpSessionView {
   private promptHistoryKey: string;
   private startupPhase: AcpSessionInfo['startupPhase'];
   private openSessionLink: SessionLinkHandler;
+  private followsLatest = true;
+  private messagesResizeObserver: ResizeObserver;
 
   constructor(
     sessionId: string,
@@ -145,19 +150,24 @@ export class AcpSessionView {
     const safeCwd = this.escapeHtml(this.shortPath(cwd));
 
     this.container.innerHTML = `
-      <div class="acp-scroll" id="acp-scroll-${sessionId}">
-        <div class="acp-messages" id="acp-messages-${sessionId}">
-          <div class="acp-welcome">
-            <div class="acp-welcome-avatar acp-agent-logo" style="background:${this.agentColor}">${avatarContent}</div>
-            <div class="acp-welcome-title">${safeAgent}</div>
-            <div class="acp-welcome-sub">Ready to work in <code>${safeCwd}</code></div>
-          </div>
-          <div class="acp-typing-indicator" id="acp-typing-${sessionId}" style="display:none;" aria-label="Agent is working">
-            <span class="acp-typing-dot"></span>
-            <span class="acp-typing-dot"></span>
-            <span class="acp-typing-dot"></span>
+      <div class="acp-scroll-shell">
+        <div class="acp-scroll" id="acp-scroll-${sessionId}">
+          <div class="acp-messages" id="acp-messages-${sessionId}">
+            <div class="acp-welcome">
+              <div class="acp-welcome-avatar acp-agent-logo" style="background:${this.agentColor}">${avatarContent}</div>
+              <div class="acp-welcome-title">${safeAgent}</div>
+              <div class="acp-welcome-sub">Ready to work in <code>${safeCwd}</code></div>
+            </div>
+            <div class="acp-typing-indicator" id="acp-typing-${sessionId}" style="display:none;" aria-label="Agent is working">
+              <span class="acp-typing-dot"></span>
+              <span class="acp-typing-dot"></span>
+              <span class="acp-typing-dot"></span>
+            </div>
           </div>
         </div>
+        <button class="acp-jump-bottom" id="acp-jump-bottom-${sessionId}" type="button" title="Jump to latest message" aria-label="Jump to latest message" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
+        </button>
       </div>
       <div class="acp-composer-dock">
         <div class="acp-composer">
@@ -181,6 +191,7 @@ export class AcpSessionView {
     `;
 
     this.scrollEl = this.requiredElement(`#acp-scroll-${sessionId}`);
+    this.jumpToBottomBtn = this.requiredElement(`#acp-jump-bottom-${sessionId}`);
     this.messagesEl = this.requiredElement(`#acp-messages-${sessionId}`);
     this.inputWrapEl = this.requiredElement(`#acp-input-wrap-${sessionId}`);
     this.inputEl = this.requiredElement(`#acp-input-${sessionId}`);
@@ -193,6 +204,11 @@ export class AcpSessionView {
     this.typingIndicatorEl = this.requiredElement(`#acp-typing-${sessionId}`);
 
     this.setupEvents();
+    this.messagesResizeObserver = new ResizeObserver(() => {
+      if (this.followsLatest) this.scrollToBottom();
+      else this.updateJumpToBottomVisibility();
+    });
+    this.messagesResizeObserver.observe(this.messagesEl);
     this.renderStatusbar();
   }
 
@@ -217,6 +233,11 @@ export class AcpSessionView {
   private setupEvents(): void {
     this.sendBtn.addEventListener('click', () => this.submitComposer('queue'));
     this.cancelBtn.addEventListener('click', () => this.cancelPrompt());
+    this.jumpToBottomBtn.addEventListener('click', () => this.scrollToBottom(true));
+    this.scrollEl.addEventListener('scroll', () => {
+      this.followsLatest = this.isNearBottom();
+      this.updateJumpToBottomVisibility();
+    }, { passive: true });
     this.messagesEl.addEventListener('click', (event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
@@ -1087,8 +1108,23 @@ export class AcpSessionView {
   }
 
   // ========== Utilities ==========
-  private scrollToBottom(): void {
+  private isNearBottom(): boolean {
+    const distance = this.scrollEl.scrollHeight - this.scrollEl.clientHeight - this.scrollEl.scrollTop;
+    return distance <= BOTTOM_PROXIMITY_PX;
+  }
+
+  private updateJumpToBottomVisibility(): void {
+    this.jumpToBottomBtn.hidden = this.isNearBottom();
+  }
+
+  private scrollToBottom(force = false): void {
+    if (!force && !this.followsLatest) {
+      this.updateJumpToBottomVisibility();
+      return;
+    }
+    this.followsLatest = true;
     this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
+    this.updateJumpToBottomVisibility();
   }
 
   private appendConversationNode(element: HTMLElement): void {
@@ -1179,6 +1215,7 @@ export class AcpSessionView {
   }
 
   destroy(): void {
+    this.messagesResizeObserver.disconnect();
     window.posse.acpDestroy(this.sessionId);
     this.container.remove();
   }
