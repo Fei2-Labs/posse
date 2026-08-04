@@ -71,6 +71,7 @@
   transition: background 0.15s ease, color 0.15s ease;
 }
 .workspace-panel-toggle svg { width: 18px; height: 18px; }
+#file-tree-toggle { margin-left: auto; }
 .workspace-panel-toggle:hover {
   background: var(--hover-bg);
   color: var(--text-primary);

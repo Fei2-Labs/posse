@@ -98,6 +98,7 @@ test('workspace toolbar independently controls persistent left and right sidebar
   assert.match(appSource, /setInspectorCollapsed\(savedFileTreeCollapsed === 'true', false\)/);
   assert.match(appSource, /setSidebarCollapsed\(savedSidebarCollapsed === 'true', false\)/);
   assert.match(stylesSource, /\.workspace-panel-toggle:focus-visible/);
+  assert.match(stylesSource, /#file-tree-toggle \{ margin-left: auto; \}/);
   assert.match(stylesSource, /@media \(max-width: 1000px\)[\s\S]*#sidebar\.collapsed[\s\S]*translateX\(-100%\)/);
 });
 
