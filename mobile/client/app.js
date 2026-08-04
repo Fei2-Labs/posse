@@ -2061,6 +2061,7 @@ function formatSize(bytes) {
 
 // 危险按键：需要两步确认（先点亮「武装」，2s 内再点才触发）
 const DANGEROUS_KEYS = new Set(['\\r', 'y\\r', '\\x03']);
+const QUICK_KEY_SWIPE_THRESHOLD = 8;
 let armedKeyBtn = null;
 let armedKeyTimer = null;
 
@@ -2076,8 +2077,42 @@ function disarmKey() {
 }
 
 document.querySelectorAll('.key-btn').forEach(btn => {
-  btn.addEventListener('touchstart', (e) => { e.preventDefault(); }, { passive: false });
+  let touchStartX = null;
+  let touchStartY = null;
+  let touchMoved = false;
+
+  const resetTouch = () => {
+    touchStartX = null;
+    touchStartY = null;
+    touchMoved = false;
+  };
+
+  btn.addEventListener('touchstart', (e) => {
+    const touch = e.touches[0];
+    if (e.touches.length !== 1 || !touch) {
+      resetTouch();
+      return;
+    }
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchMoved = false;
+  }, { passive: true });
+  btn.addEventListener('touchmove', (e) => {
+    const touch = e.touches[0];
+    if (touchStartX == null || touchStartY == null || !touch) return;
+    if (Math.abs(touch.clientX - touchStartX) > QUICK_KEY_SWIPE_THRESHOLD
+      || Math.abs(touch.clientY - touchStartY) > QUICK_KEY_SWIPE_THRESHOLD) {
+      touchMoved = true;
+    }
+  }, { passive: true });
+  btn.addEventListener('touchcancel', resetTouch, { passive: true });
   btn.addEventListener('touchend', (e) => {
+    const touch = e.changedTouches[0];
+    const moved = touchMoved || touchStartX == null || touchStartY == null || !touch
+      || Math.abs(touch.clientX - touchStartX) > QUICK_KEY_SWIPE_THRESHOLD
+      || Math.abs(touch.clientY - touchStartY) > QUICK_KEY_SWIPE_THRESHOLD;
+    resetTouch();
+    if (moved) return;
     e.preventDefault();
     if (!currentSessionId) return;
     const key = btn.dataset.key;
@@ -2110,7 +2145,7 @@ document.querySelectorAll('.key-btn').forEach(btn => {
     // 非危险按键：立即触发，并解除任何已武装状态
     disarmKey();
     fire();
-  });
+  }, { passive: false });
 });
 
 // 删除会话

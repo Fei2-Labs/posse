@@ -529,8 +529,6 @@ header h2 {
 
 /* ========== 快捷键栏 ========== */
 
-/* ========== 快捷键栏 ========== */
-
 #shortcut-bar {
   display: flex;
   gap: 4px;
@@ -540,6 +538,7 @@ header h2 {
   overflow-x: auto;
   flex-shrink: 0;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
 }
 
 #shortcut-bar::-webkit-scrollbar {
@@ -560,6 +559,7 @@ header h2 {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+  touch-action: pan-x;
 }
 
 .key-btn:active {
