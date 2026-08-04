@@ -71,6 +71,17 @@ test('gates permissions, popups, downloads, and global profile clearing', () => 
   assert.match(controller, /clearAuthCache/);
 });
 
+test('tears down browser ownership without touching destroyed webContents', () => {
+  assert.match(controller, /this\.ownerContentsId = owner\.webContents\.id/);
+  assert.match(controller, /ownerId\(\): number \{ return this\.ownerContentsId; \}/);
+  assert.match(controller, /controllersByOwner = new WeakMap<BrowserWindow, EmbeddedBrowserController>/);
+  assert.match(controller, /const controller = this\.controllersByOwner\.get\(owner\)/);
+  assert.doesNotMatch(controller, /destroyFor\(owner: BrowserWindow\): void \{\s*const ownerId = owner\.webContents\.id/);
+  assert.match(controller, /if \(!this\.owner\.isDestroyed\(\)\) \{/);
+  assert.match(controller, /const popupContentsId = popup\.webContents\.id/);
+  assert.match(controller, /unregisterBrowserContents\(popupContentsId\)/);
+});
+
 test('mounts the browser as an expandable Inspector tab and hides it under overlays', () => {
   assert.match(html, /id="inspector-browser-tab"/);
   assert.match(html, /id="browser-viewport"/);

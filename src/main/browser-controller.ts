@@ -141,6 +141,7 @@ function normalizedOrigin(value: string): string {
 
 export class EmbeddedBrowserController {
   private readonly owner: BrowserWindow;
+  private readonly ownerContentsId: number;
   private readonly manager: EmbeddedBrowserManager;
   private readonly view: WebContentsView;
   private readonly popups = new Set<BrowserWindow>();
@@ -158,6 +159,7 @@ export class EmbeddedBrowserController {
 
   constructor(owner: BrowserWindow, manager: EmbeddedBrowserManager) {
     this.owner = owner;
+    this.ownerContentsId = owner.webContents.id;
     this.manager = manager;
     this.view = new WebContentsView({ webPreferences: browserWebPreferences() });
     this.view.setBackgroundColor('#ffffff');
@@ -165,7 +167,7 @@ export class EmbeddedBrowserController {
     this.bindEvents();
   }
 
-  ownerId(): number { return this.owner.webContents.id; }
+  ownerId(): number { return this.ownerContentsId; }
   contentsId(): number { return this.view.webContents.id; }
 
   currentState(): EmbeddedBrowserState { return { ...this.state }; }
@@ -264,7 +266,10 @@ export class EmbeddedBrowserController {
 
   private detach(): void {
     if (!this.isAttached) return;
-    this.owner.contentView.removeChildView(this.view);
+    if (!this.owner.isDestroyed()) {
+      try { this.owner.contentView.removeChildView(this.view); }
+      catch { /* owner teardown can race native view cleanup */ }
+    }
     this.isAttached = false;
   }
 
@@ -304,12 +309,13 @@ export class EmbeddedBrowserController {
       },
     }));
     contents.on('did-create-window', (popup) => {
+      const popupContentsId = popup.webContents.id;
       this.popups.add(popup);
       this.manager.registerBrowserContents(popup.webContents, this);
       popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       popup.on('closed', () => {
         this.popups.delete(popup);
-        this.manager.unregisterBrowserContents(popup.webContents.id);
+        this.manager.unregisterBrowserContents(popupContentsId);
       });
     });
   }
@@ -398,6 +404,7 @@ export class EmbeddedBrowserController {
 export class EmbeddedBrowserManager {
   private readonly browserSession: Session;
   private readonly controllers = new Map<number, EmbeddedBrowserController>();
+  private readonly controllersByOwner = new WeakMap<BrowserWindow, EmbeddedBrowserController>();
   private readonly controllersByContents = new Map<number, EmbeddedBrowserController>();
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly permissionGrants = new Set<string>();
@@ -408,21 +415,28 @@ export class EmbeddedBrowserManager {
   }
 
   controllerFor(owner: BrowserWindow): EmbeddedBrowserController {
+    const owned = this.controllersByOwner.get(owner);
+    if (owned) return owned;
     const ownerId = owner.webContents.id;
     const existing = this.controllers.get(ownerId);
-    if (existing) return existing;
+    if (existing) {
+      this.controllersByOwner.set(owner, existing);
+      return existing;
+    }
     const controller = new EmbeddedBrowserController(owner, this);
     this.controllers.set(ownerId, controller);
+    this.controllersByOwner.set(owner, controller);
     return controller;
   }
 
   destroyFor(owner: BrowserWindow): void {
-    const ownerId = owner.webContents.id;
-    const controller = this.controllers.get(ownerId);
+    const controller = this.controllersByOwner.get(owner);
     if (!controller) return;
+    const ownerId = controller.ownerId();
     this.denyPermissionsForOwner(ownerId);
     controller.destroy();
     this.controllers.delete(ownerId);
+    this.controllersByOwner.delete(owner);
   }
 
   resolvePermission(owner: BrowserWindow, requestId: string, allow: boolean): boolean {
