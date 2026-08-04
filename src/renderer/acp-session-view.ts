@@ -3,6 +3,7 @@
 // Full-width message blocks, agent avatars, compact tool cards, modern input bar.
 
 import type {
+  AvailableCommand,
   ContentBlock,
   PermissionOption,
   PlanEntry,
@@ -16,9 +17,11 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   AcpPromptQueue,
+  availableSlashCommands,
   configControlLabel,
   configValueLabel,
   imageContentFromDataUrl,
+  slashCommandCompletion,
   statusConfigOptions,
 } from './acp-session-state';
 import { getAgentLogo } from './agent-logos';
@@ -91,6 +94,7 @@ export class AcpSessionView {
   private messagesEl: HTMLElement;
   private inputWrapEl: HTMLElement;
   private inputEl: HTMLTextAreaElement;
+  private slashCommandsEl: HTMLElement;
   private attachmentsEl: HTMLElement;
   private imageInputEl: HTMLInputElement;
   private queueEl: HTMLElement;
@@ -112,6 +116,9 @@ export class AcpSessionView {
   private currentActivityContentEl: HTMLElement | null = null;
   private isPrompting = false;
   private supportsImages: boolean | null = null;
+  private availableCommands: AvailableCommand[] = [];
+  private filteredCommands: AvailableCommand[] = [];
+  private activeCommandIndex = 0;
   private composerImages: ComposerImage[] = [];
   private promptQueue = new AcpPromptQueue<QueuedPrompt>();
   private usage: Pick<UsageUpdate, 'used' | 'size' | 'cost'> | undefined;
@@ -179,10 +186,14 @@ export class AcpSessionView {
         <div class="acp-composer">
           <div class="acp-queue" id="acp-queue-${sessionId}" style="display:none;"></div>
           <div class="acp-attachments" id="acp-attachments-${sessionId}" style="display:none;"></div>
+          <div class="acp-slash-commands" id="acp-slash-commands-${sessionId}" role="listbox" aria-label="Available agent commands" hidden></div>
           <div class="acp-input-wrap" id="acp-input-wrap-${sessionId}">
             <input class="acp-image-input" id="acp-image-input-${sessionId}" type="file" accept="image/*" hidden>
             <textarea class="acp-input" id="acp-input-${sessionId}"
               placeholder="Ask ${safeAgent} to do anything…"
+              aria-autocomplete="list"
+              aria-controls="acp-slash-commands-${sessionId}"
+              aria-expanded="false"
               rows="1"></textarea>
             <button class="acp-cancel-btn" id="acp-cancel-${sessionId}" style="display:none;" title="Cancel (Esc)" aria-label="Cancel current response">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.5"/></svg>
@@ -201,6 +212,7 @@ export class AcpSessionView {
     this.messagesEl = this.requiredElement(`#acp-messages-${sessionId}`);
     this.inputWrapEl = this.requiredElement(`#acp-input-wrap-${sessionId}`);
     this.inputEl = this.requiredElement(`#acp-input-${sessionId}`);
+    this.slashCommandsEl = this.requiredElement(`#acp-slash-commands-${sessionId}`);
     this.attachmentsEl = this.requiredElement(`#acp-attachments-${sessionId}`);
     this.imageInputEl = this.requiredElement(`#acp-image-input-${sessionId}`);
     this.queueEl = this.requiredElement(`#acp-queue-${sessionId}`);
@@ -262,7 +274,11 @@ export class AcpSessionView {
     this.inputEl.addEventListener('input', () => {
       this.autoGrowInput();
       this.promptHistory.reset();
+      this.activeCommandIndex = 0;
+      this.renderSlashCommands();
     });
+    this.inputEl.addEventListener('focus', () => this.renderSlashCommands());
+    this.inputEl.addEventListener('blur', () => this.closeSlashCommands());
 
     this.inputEl.addEventListener('paste', (event) => this.handleImagePaste(event));
     this.imageInputEl.addEventListener('change', () => {
@@ -272,6 +288,7 @@ export class AcpSessionView {
     });
 
     this.inputEl.addEventListener('keydown', (e) => {
+      if (this.handleSlashCommandKeydown(e)) return;
       if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const direction = e.key === 'ArrowUp' ? 'older' : 'newer';
         if (canNavigatePromptHistory(
@@ -305,6 +322,95 @@ export class AcpSessionView {
         this.cancelPrompt();
       }
     });
+  }
+
+  private handleSlashCommandKeydown(event: KeyboardEvent): boolean {
+    if (this.slashCommandsEl.hidden || this.filteredCommands.length === 0) return false;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      this.activeCommandIndex = (
+        this.activeCommandIndex + delta + this.filteredCommands.length
+      ) % this.filteredCommands.length;
+      this.renderSlashCommands(false);
+      return true;
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      this.completeSlashCommand(this.filteredCommands[this.activeCommandIndex]);
+      return true;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this.closeSlashCommands();
+      return true;
+    }
+    return false;
+  }
+
+  private renderSlashCommands(recalculate = true): void {
+    if (recalculate) {
+      this.filteredCommands = availableSlashCommands(this.availableCommands, this.inputEl.value);
+    }
+    if (this.filteredCommands.length === 0) {
+      this.closeSlashCommands();
+      return;
+    }
+    this.activeCommandIndex = Math.min(this.activeCommandIndex, this.filteredCommands.length - 1);
+    this.slashCommandsEl.innerHTML = '';
+    this.filteredCommands.forEach((command, index) => {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'acp-slash-command';
+      option.id = `${this.slashCommandsEl.id}-option-${index}`;
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', String(index === this.activeCommandIndex));
+      if (index === this.activeCommandIndex) option.classList.add('acp-slash-command--active');
+
+      const name = document.createElement('span');
+      name.className = 'acp-slash-command__name';
+      name.textContent = `/${command.name.trim()}`;
+      const detail = document.createElement('span');
+      detail.className = 'acp-slash-command__detail';
+      detail.textContent = command.description;
+      option.append(name, detail);
+
+      const hint = command.input?.hint?.trim();
+      if (hint) {
+        const inputHint = document.createElement('span');
+        inputHint.className = 'acp-slash-command__hint';
+        inputHint.textContent = hint;
+        option.appendChild(inputHint);
+      }
+      option.addEventListener('mousedown', (event) => event.preventDefault());
+      option.addEventListener('click', () => this.completeSlashCommand(command));
+      this.slashCommandsEl.appendChild(option);
+    });
+    this.slashCommandsEl.hidden = false;
+    this.inputEl.setAttribute('aria-expanded', 'true');
+    this.inputEl.setAttribute(
+      'aria-activedescendant',
+      `${this.slashCommandsEl.id}-option-${this.activeCommandIndex}`,
+    );
+    this.slashCommandsEl.querySelector('.acp-slash-command--active')?.scrollIntoView({ block: 'nearest' });
+  }
+
+  private completeSlashCommand(command: AvailableCommand | undefined): void {
+    if (!command) return;
+    const completion = slashCommandCompletion(command);
+    this.inputEl.value = completion;
+    this.autoGrowInput();
+    this.promptHistory.reset();
+    this.closeSlashCommands();
+    this.inputEl.focus();
+    this.inputEl.setSelectionRange(completion.length, completion.length);
+  }
+
+  private closeSlashCommands(): void {
+    this.slashCommandsEl.hidden = true;
+    this.filteredCommands = [];
+    this.inputEl.setAttribute('aria-expanded', 'false');
+    this.inputEl.removeAttribute('aria-activedescendant');
   }
 
   private autoGrowInput(): void {
@@ -522,6 +628,11 @@ export class AcpSessionView {
         this.renderStatusbar();
         break;
       }
+      case 'available_commands_update':
+        this.availableCommands = update.availableCommands || [];
+        this.activeCommandIndex = 0;
+        this.renderSlashCommands();
+        break;
       case 'user_message_chunk':
         this.handleUserMessageChunk(update);
         break;

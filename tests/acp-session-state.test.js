@@ -54,6 +54,41 @@ test('image data URLs become ACP image content blocks', () => {
   assert.equal(imageContentFromDataUrl('data:text/plain;base64,QUJD'), null);
 });
 
+test('ACP slash commands filter dynamically and complete without executing', () => {
+  const { availableSlashCommands, slashCommandCompletion, slashCommandQuery } = loadModule();
+  const commands = [
+    { name: 'plan', description: 'Create an implementation plan', input: { hint: 'task to plan' } },
+    { name: 'skills', description: 'Browse available skills' },
+    { name: 'duplicate', description: 'First' },
+    { name: 'DUPLICATE', description: 'Second' },
+    { name: 'bad command', description: 'Invalid whitespace' },
+  ];
+
+  assert.equal(slashCommandQuery('/PL'), 'pl');
+  assert.equal(slashCommandQuery('/plan arguments'), null);
+  assert.deepEqual(availableSlashCommands(commands, '/impl').map(command => command.name), ['plan']);
+  assert.deepEqual(availableSlashCommands(commands, '/browse').map(command => command.name), ['skills']);
+  assert.deepEqual(availableSlashCommands(commands, '/').map(command => command.name), [
+    'plan', 'skills', 'duplicate',
+  ]);
+  assert.equal(slashCommandCompletion(commands[0]), '/plan ');
+  assert.equal(slashCommandCompletion(commands[1]), '/skills');
+});
+
+test('ACP slash command list handles protocol updates and accessible completion controls', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  assert.match(source, /case 'available_commands_update':\s*this\.availableCommands = update\.availableCommands \|\| \[\]/);
+  assert.match(source, /role="listbox" aria-label="Available agent commands"/);
+  assert.match(source, /aria-autocomplete="list"/);
+  assert.match(source, /event\.key === 'Enter' \|\| event\.key === 'Tab'/);
+  assert.match(source, /this\.completeSlashCommand\(this\.filteredCommands\[this\.activeCommandIndex\]\)/);
+  assert.match(source, /option\.addEventListener\('mousedown', \(event\) => event\.preventDefault\(\)\)/);
+  assert.match(source, /slashCommandCompletion\(command\)/);
+  assert.match(styles, /\.acp-slash-commands \{[\s\S]*scrollbar-gutter: stable;/);
+  assert.match(styles, /\.acp-slash-command:focus-visible/);
+});
+
 test('persisted ACP foreground metadata rejects incomplete or corrupt state', () => {
   const { parsePersistedAcpForeground } = loadModule();
   const valid = {

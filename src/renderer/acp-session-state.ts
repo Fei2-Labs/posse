@@ -1,4 +1,32 @@
-import type { ContentBlock, SessionConfigOption } from '@agentclientprotocol/sdk';
+import type { AvailableCommand, ContentBlock, SessionConfigOption } from '@agentclientprotocol/sdk';
+
+export function slashCommandQuery(value: string): string | null {
+  const match = value.match(/^\/([^\s]*)$/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+export function availableSlashCommands(
+  commands: AvailableCommand[],
+  value: string,
+): AvailableCommand[] {
+  const query = slashCommandQuery(value);
+  if (query === null) return [];
+  const seen = new Set<string>();
+  return commands.filter((command) => {
+    const name = command.name.trim();
+    if (!name || /\s/.test(name)) return false;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return !query
+      || key.includes(query)
+      || command.description.toLowerCase().includes(query);
+  });
+}
+
+export function slashCommandCompletion(command: AvailableCommand): string {
+  return `/${command.name.trim()}${command.input ? ' ' : ''}`;
+}
 
 export interface PersistedAcpForeground {
   kind: 'acp';
