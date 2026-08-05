@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v25';
+const CLIENT_BUILD = 'posse-v26';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -78,6 +78,7 @@ const chatHelpers = globalThis.DuoChatHelpers || {
     return 'Agent';
   },
 };
+const sessionListHelpers = globalThis.PosseSessionListHelpers;
 
 // ========== 循环（自动继续）==========
 // 手机端只做 UI，实际配置存在桌面端，通过 API 读写
@@ -849,11 +850,23 @@ async function renderAppVersionLine() {
   }
 }
 
+let enterMainPromise = null;
+
 async function enterMain() {
+  if (enterMainPromise) return enterMainPromise;
+  enterMainPromise = initializeMain();
+  try {
+    return await enterMainPromise;
+  } finally {
+    enterMainPromise = null;
+  }
+}
+
+async function initializeMain() {
   showPage('main-page');
   initDevicePage();
   renderAppVersionLine();
-  await refreshSessions();
+  await refreshSessions({ fresh: true });
   await refreshRecentCwdOptions();
   await pullCustomPresetsFromServer(); // 从服务端同步预设
   renderPresetSelect();
@@ -866,12 +879,28 @@ async function enterMain() {
   LanSwitcher.start();
 }
 
-async function refreshSessions() {
+async function loadSessionSnapshot(fresh = false) {
   try {
-    const sessions = await api('/api/sessions');
-    renderSessionList(sessions);
+    const suffix = fresh ? '?fresh=1' : '';
+    return sessionListHelpers.normalizeSessionSnapshot(await api(`/api/session-list${suffix}`));
+  } catch (e) {
+    if (e?.status !== 404) throw e;
+    return sessionListHelpers.normalizeLegacySessions(await api('/api/sessions'));
+  }
+}
+
+async function refreshSessions({ fresh = false, showLoading = true } = {}) {
+  if (showLoading && lastSessionSnapshot.live.length === 0 && lastSessionSnapshot.recent.length === 0) {
+    renderSessionListState('loading');
+  }
+  try {
+    const snapshot = await loadSessionSnapshot(fresh);
+    renderSessionList(snapshot);
+    return true;
   } catch (e) {
     console.error('刷新会话失败', e);
+    renderSessionListState('error', e?.message || '请检查网络后重试');
+    return false;
   }
 }
 
@@ -896,9 +925,9 @@ async function refreshRecentCwdOptions() {
   }
 }
 
-// Cache of the most recent live-session array so handlers (e.g. dropping a dead
-// card on a not-found open) can re-render without an extra fetch.
+// Cache the latest combined list so local interactions do not drop Recent rows.
 let lastSessions = [];
+let lastSessionSnapshot = { version: 1, live: [], recent: [] };
 
 // ---- 按项目文件夹分组（与桌面端侧栏一致）----
 // 分组键 = 规范化后的 cwd（去尾部斜杠）；显示标签 = cwd 的最后一段路径。
@@ -974,22 +1003,69 @@ function sessionCardHtml(s) {
   </div>`;
 }
 
-function renderSessionList(sessions) {
-  lastSessions = Array.isArray(sessions) ? sessions : [];
-  const list = $('session-list');
-  const empty = $('empty-state');
+function recentSessionCardHtml(s) {
+  const label = chatHelpers.getResumeAgentLabel(s.agent);
+  return `
+  <div class="session-card recent-session-card" data-recent-id="${escHtml(s.id)}">
+    <div class="status-dot inactive"></div>
+    <div class="session-info">
+      <div class="session-title-row">
+        <div class="session-title">${escHtml(s.title || s.resumeId || '最近会话')}</div>
+        <span class="cli-tag">${escHtml(label)}</span>
+      </div>
+      <div class="session-meta">
+        <span class="session-time">${formatTime(s.updatedAt)}</span>
+        <span class="session-cwd">${escHtml(shortenPath(s.cwd || '', 32))}</span>
+      </div>
+    </div>
+    <div class="session-arrow">›</div>
+  </div>`;
+}
 
-  if (!sessions.length) {
-    list.innerHTML = '';
-    empty.style.display = 'flex';
+function renderSessionListState(kind, message = '') {
+  const list = $('session-list');
+  const state = $('empty-state');
+  const spinner = $('session-state-spinner');
+  const title = $('session-state-title');
+  const detail = $('session-state-message');
+  const retry = $('session-retry-btn');
+
+  if (kind === 'hidden') {
+    state.style.display = 'none';
+    list.style.display = 'block';
     return;
   }
 
-  empty.style.display = 'none';
+  list.innerHTML = '';
+  list.style.display = 'none';
+  state.style.display = 'flex';
+  spinner.style.display = kind === 'loading' ? 'block' : 'none';
+  retry.hidden = kind !== 'error';
+  title.textContent = kind === 'loading' ? '正在加载会话…' : kind === 'error' ? '无法加载会话' : '暂无会话';
+  detail.textContent = kind === 'loading'
+    ? '正在同步 Active 和 Recent'
+    : kind === 'error'
+      ? message
+      : '点击右上角 ＋ 创建新终端';
+}
+
+function renderSessionList(snapshot) {
+  lastSessionSnapshot = snapshot;
+  lastSessions = snapshot.live;
+  const sessions = snapshot.live;
+  const recent = snapshot.recent;
+  const list = $('session-list');
+
+  if (!sessions.length && !recent.length) {
+    renderSessionListState('empty');
+    return;
+  }
+
+  renderSessionListState('hidden');
 
   const collapsed = getCollapsedFolders();
   const groups = groupSessionsByFolder(sessions);
-  const html = groups.map(g => {
+  const liveHtml = groups.map(g => {
     const isCollapsed = collapsed.has(g.key);
     const cards = isCollapsed ? '' : g.sessions.map(sessionCardHtml).join('');
     return `
@@ -1003,18 +1079,33 @@ function renderSessionList(sessions) {
     </div>`;
   }).join('');
 
-  list.innerHTML = html;
+  const activeSection = sessions.length
+    ? `<div class="session-section-header"><span>Active</span><span class="session-section-count">${sessions.length}</span></div>${liveHtml}`
+    : '';
+  const recentSection = recent.length
+    ? `<div class="recent-sessions"><div class="session-section-header"><span>Recent</span><span class="session-section-count">${recent.length}</span></div>${recent.map(recentSessionCardHtml).join('')}</div>`
+    : '';
+
+  list.innerHTML = activeSection + recentSection;
 
   list.querySelectorAll('.folder-header').forEach(header => {
     header.onclick = () => {
       toggleFolderCollapsed(header.dataset.folderKey);
-      renderSessionList(lastSessions);
+      renderSessionList(lastSessionSnapshot);
     };
   });
 
   list.querySelectorAll('.session-card').forEach(card => {
+    if (card.dataset.recentId) return;
     const id = card.dataset.id;
     card.onclick = () => openSession(id);
+  });
+
+  list.querySelectorAll('.recent-session-card').forEach(card => {
+    card.onclick = () => {
+      const session = lastSessionSnapshot.recent.find(item => item.id === card.dataset.recentId);
+      if (session) resumeSession(session.cwd, session.resumeCommand);
+    };
   });
 }
 
@@ -1023,22 +1114,33 @@ function renderSessionList(sessions) {
 function startSSE() {
   stopSSE();
   const profile = getNetworkProfile();
+  let receivedCombinedList = false;
   sseSource = new EventSource(`${API}/api/events?token=${encodeURIComponent(token)}`);
   sseSource.onopen = () => {
     sseReconnectAttempt = 0;
+    void refreshSessions({ showLoading: false });
   };
+  sseSource.addEventListener('session-list', e => {
+    try {
+      const snapshot = sessionListHelpers.normalizeSessionSnapshot(JSON.parse(e.data));
+      receivedCombinedList = true;
+      if ($('main-page').classList.contains('active')) renderSessionList(snapshot);
+      updateCurrentSessionStatus(snapshot.live);
+    } catch (error) {
+      console.error('会话推送格式错误', error);
+    }
+  });
   sseSource.addEventListener('sessions', e => {
     try {
-      const sessions = JSON.parse(e.data);
+      const sessions = sessionListHelpers.normalizeLegacySessions(JSON.parse(e.data)).live;
       if ($('main-page').classList.contains('active')) {
-        renderSessionList(sessions);
+        renderSessionList({
+          ...lastSessionSnapshot,
+          live: sessions,
+          recent: receivedCombinedList ? lastSessionSnapshot.recent : [],
+        });
       }
-      if (currentSessionId) {
-        const s = sessions.find(x => x.id === currentSessionId);
-        if (s) {
-          $('detail-status').className = `status-dot ${s.status}`;
-        }
-      }
+      updateCurrentSessionStatus(sessions);
     } catch {}
   });
   sseSource.onerror = () => {
@@ -1055,6 +1157,12 @@ function startSSE() {
       }
     }, delay);
   };
+}
+
+function updateCurrentSessionStatus(sessions) {
+  if (!currentSessionId) return;
+  const session = sessions.find(item => item.id === currentSessionId);
+  if (session) $('detail-status').className = `status-dot ${session.status}`;
 }
 
 function stopSSE() {
@@ -1713,8 +1821,8 @@ async function openSession(id) {
     const sessions = await api('/api/sessions');
     if (Array.isArray(sessions) && !sessions.find(x => x.id === id)) {
       console.warn('[openSession] session no longer exists, removing dead card:', id);
-      lastSessions = sessions.filter(x => x.id !== id);
-      renderSessionList(lastSessions);
+      lastSessionSnapshot = { ...lastSessionSnapshot, live: sessions.filter(x => x.id !== id) };
+      renderSessionList(lastSessionSnapshot);
       showCopyToast('会话已不存在，已从列表移除');
       return;
     }
@@ -1768,7 +1876,7 @@ $('back-btn').onclick = () => {
   currentSessionId = null;
   closeTerminal();
   showPage('main-page');
-  refreshSessions();
+  void refreshSessions({ fresh: true });
 };
 
 // 发送消息 — 点击发送按钮
@@ -2157,7 +2265,7 @@ $('delete-btn').onclick = async () => {
     currentSessionId = null;
     closeTerminal();
     showPage('main-page');
-    refreshSessions();
+    await refreshSessions({ fresh: true });
   } catch (e) {
     alert('删除失败: ' + e.message);
   }
@@ -2490,7 +2598,7 @@ async function resumeSession(cwd, cmd) {
       body: JSON.stringify({ cwd: cwd || undefined, presetCommand: cmd, themeId: 'default' }),
     });
     if (cwd) localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
-    await refreshSessions();
+    await refreshSessions({ fresh: true });
     openSession(session.id);
   } catch (e) {
     alert('恢复失败: ' + e.message);
@@ -2514,7 +2622,7 @@ $('modal-create').onclick = async () => {
     });
     localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
     localStorage.setItem(MOBILE_LAST_PRESET_KEY, preset);
-    await refreshSessions();
+    await refreshSessions({ fresh: true });
     openSession(session.id);
   } catch (e) {
     alert('创建失败: ' + e.message);
@@ -2698,15 +2806,10 @@ async function loadServerInfo() {
 
 loadServerInfo();
 
-if (token) {
-  api('/api/sessions').then(() => enterMain()).catch(() => showPage('login-page'));
-} else {
-  showPage('login-page');
-}
-
 window.addEventListener('online', () => {
-  if ($('main-page').classList.contains('active') && token && !sseSource) {
-    startSSE();
+  if ($('main-page').classList.contains('active') && token) {
+    void refreshSessions({ fresh: true, showLoading: false });
+    if (!sseSource) startSSE();
   }
   if (currentSessionId && $('detail-page').classList.contains('active') && (!ws || ws.readyState !== WebSocket.OPEN)) {
     connectWebSocket(currentSessionId);
@@ -2736,13 +2839,13 @@ async function init() {
     const data = await res.json();
     if (data.ok) {
       token = savedToken;
-      enterMain();
+      await enterMain();
     } else {
       localStorage.removeItem('duocli_token');
       showPage('login-page');
     }
   } catch (e) {
-    // 网络错误时仍显示登录页
+    $('login-error').textContent = '连接失败: ' + (e?.message || '请检查网络');
     showPage('login-page');
   }
 }
@@ -3010,8 +3113,9 @@ function initChatEvents() {
 let cachedChatSessions = [];
 let chatSessionsLastFetch = 0;
 const origRenderSessionList = renderSessionList;
-renderSessionList = function(sessions) {
-  origRenderSessionList(sessions);
+renderSessionList = function(snapshot) {
+  origRenderSessionList(snapshot);
+  const sessions = snapshot.live;
 
   // 缓存 chat 会话列表，避免每次 SSE 刷新都请求
   const now = Date.now();
@@ -3030,6 +3134,7 @@ function appendChatCards(sessions) {
   if (!cachedChatSessions.length) return;
   const list = $('session-list');
   const empty = $('empty-state');
+  list.style.display = 'block';
 
   const divider = document.createElement('div');
   divider.className = 'chat-sessions-divider';
@@ -3062,6 +3167,10 @@ function appendChatCards(sessions) {
     empty.style.display = 'none';
   }
 }
+
+$('session-retry-btn').onclick = () => {
+  void refreshSessions({ fresh: true });
+};
 
 initChatEvents();
 

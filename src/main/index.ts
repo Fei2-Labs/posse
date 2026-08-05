@@ -3870,7 +3870,7 @@ app.whenReady().then(async () => {
         ...status,
       };
     }
-  }, listResumableSessions);
+  }, listResumableSessions, loadClosedSessions);
 
   // Periodic Tailscale watcher: Tailscale may come online after the server started.
   // Re-check every 10s and push updated server info to the renderer when Tailscale state changes.

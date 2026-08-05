@@ -41,9 +41,11 @@
       </div>
     </header>
     <div id="session-list" class="session-list"></div>
-    <div id="empty-state" class="empty-state">
-      <p>暂无会话</p>
-      <p>点击右上角 ＋ 创建新终端</p>
+    <div id="empty-state" class="empty-state" role="status" aria-live="polite">
+      <div id="session-state-spinner" class="session-state-spinner" aria-hidden="true"></div>
+      <p id="session-state-title">正在加载会话…</p>
+      <p id="session-state-message"></p>
+      <button id="session-retry-btn" class="session-retry-btn" type="button" hidden>重试</button>
     </div>
     <div id="app-version-line" class="app-version-line"></div>
   </div>
@@ -211,6 +213,7 @@
   <script src="addon-unicode11.js"></script>
   <script src="addon-web-links.js"></script>
   <script src="chat-helpers.js"></script>
+  <script src="session-list-helpers.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

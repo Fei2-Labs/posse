@@ -48,5 +48,7 @@ test('getResumeAgentLabel renders native resume session agents', () => {
   assert.equal(getResumeAgentLabel('claude'), 'Claude Code');
   assert.equal(getResumeAgentLabel('codex'), 'Codex');
   assert.equal(getResumeAgentLabel('copilot'), 'GitHub Copilot');
+  assert.equal(getResumeAgentLabel('gemini'), 'Gemini');
+  assert.equal(getResumeAgentLabel('kiro'), 'Kiro');
   assert.equal(getResumeAgentLabel('unknown'), 'Agent');
 });

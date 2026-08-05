@@ -48,6 +48,49 @@ export type RemoteConnectionStatus = RemoteServerInfo & {
   subscribedSessions: number;
 };
 
+export type RemoteRecentSession = {
+  id: string;
+  title: string;
+  cwd: string;
+  presetCommand: string;
+  resumeId: string;
+  resumeCommand: string;
+  displayName: string;
+  closedAt: number;
+};
+
+type MobileLiveSession = {
+  id: string;
+  title: string;
+  cwd: string;
+  presetCommand: string;
+  displayName: string;
+  provider: string | null;
+  status: string;
+  createdAt: number;
+  lastActivityMs: number;
+  resumeId: string | null;
+  agentSessionId: string | null;
+};
+
+type MobileRecentSession = {
+  id: string;
+  title: string;
+  cwd: string;
+  presetCommand: string;
+  resumeId: string;
+  resumeCommand: string;
+  displayName: string;
+  agent: string;
+  updatedAt: number;
+};
+
+type MobileSessionListSnapshot = {
+  version: 1;
+  live: MobileLiveSession[];
+  recent: MobileRecentSession[];
+};
+
 // Mobile / remote first-paint replay tail size. The daemon retains a much larger rawBuffer (1MB) so desktop
 // reconnect can restore full scrollback after a restart, but on weak networks the replay payload directly drives
 // first-paint speed, so we only send the last ~128KB to a (re)attaching remote/mobile viewer. This keeps mobile
@@ -377,6 +420,7 @@ export function startRemoteServer(
   onServerStarted?: (info: RemoteServerInfo) => void,
   onConnectionStatusChanged?: (status: RemoteConnectionStatus) => void,
   listResumableSessions?: (cwd: string) => Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: string; resumeCommand: string }>,
+  listRecentSessions?: () => RemoteRecentSession[],
 ): void {
   // Cache for use by Bridge events
   cachedPtyManager = ptyManager;
@@ -673,7 +717,7 @@ export function startRemoteServer(
     return statuses[id] || 'idle';
   }
 
-  function mapSessionToApi(s: PtySessionSnapshot) {
+  function mapSessionToApi(s: PtySessionSnapshot): MobileLiveSession {
     return {
       id: s.id,
       title: s.title,
@@ -684,13 +728,110 @@ export function startRemoteServer(
       status: getSessionStatus(s.id, s.exitState),
       createdAt: s.createdAt || Date.now(),
       lastActivityMs: s.lastActivityMs || s.createdAt || Date.now(),
+      resumeId: s.resumeId || null,
+      agentSessionId: s.agentSessionId || null,
     };
   }
+
+  const agentFromCommand = (command: string): string => {
+    const normalized = String(command || '').trim().toLowerCase();
+    if (normalized.startsWith('codex')) return 'codex';
+    if (normalized.startsWith('copilot')) return 'copilot';
+    if (normalized.startsWith('kiro-cli')) return 'kiro';
+    if (normalized.startsWith('devin')) return 'devin';
+    if (normalized.startsWith('gemini')) return 'gemini';
+    if (normalized.startsWith('kimi')) return 'kimi';
+    if (normalized.startsWith('opencode')) return 'opencode';
+    if (normalized.startsWith('agent') || normalized.includes('cursor')) return 'cursor';
+    return 'claude';
+  };
+
+  let recentSessionCache: MobileRecentSession[] = [];
+  let recentSessionCacheAt = 0;
+  const RECENT_SESSION_CACHE_MS = 5_000;
+
+  const getMobileRecentSessions = (fresh = false): MobileRecentSession[] => {
+    const now = Date.now();
+    if (!fresh && now - recentSessionCacheAt < RECENT_SESSION_CACHE_MS) {
+      return recentSessionCache;
+    }
+
+    const candidates: MobileRecentSession[] = [];
+    try {
+      for (const session of listRecentSessions?.() || []) {
+        candidates.push({
+          id: session.id,
+          title: session.title,
+          cwd: session.cwd,
+          presetCommand: session.presetCommand,
+          resumeId: session.resumeId,
+          resumeCommand: session.resumeCommand,
+          displayName: session.displayName,
+          agent: agentFromCommand(session.presetCommand),
+          updatedAt: session.closedAt,
+        });
+      }
+    } catch { /* persisted recent history is best-effort */ }
+
+    const knownCwds = new Set<string>(config.recentCwds.map(normalizeCwd).filter(Boolean));
+    for (const session of ptyManager.getAllSessions()) {
+      const cwd = normalizeCwd(session.cwd);
+      if (cwd) knownCwds.add(cwd);
+    }
+    if (listResumableSessions) {
+      for (const cwd of Array.from(knownCwds).slice(0, MAX_RECENT_CWDS)) {
+        try {
+          for (const session of listResumableSessions(cwd)) {
+            candidates.push({
+              id: `resumable-${session.agent}-${session.id}`,
+              title: session.title,
+              cwd: session.cwd,
+              presetCommand: session.resumeCommand,
+              resumeId: session.id,
+              resumeCommand: session.resumeCommand,
+              displayName: getDisplayName(session.resumeCommand),
+              agent: session.agent,
+              updatedAt: session.mtimeMs,
+            });
+          }
+        } catch { /* one unreadable cwd must not hide the rest */ }
+      }
+    }
+
+    const liveResumeIds = new Set<string>();
+    for (const session of ptyManager.getAllSessions()) {
+      if (session.resumeId) liveResumeIds.add(session.resumeId);
+      if (session.agentSessionId) liveResumeIds.add(session.agentSessionId);
+    }
+    const seen = new Set<string>();
+    recentSessionCache = candidates
+      .filter((session) => Boolean(session.resumeCommand) && !liveResumeIds.has(session.resumeId))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .filter((session) => {
+        const key = `${session.agent}:${session.resumeId || session.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 40);
+    recentSessionCacheAt = now;
+    return recentSessionCache;
+  };
+
+  const getMobileSessionList = (fresh = false): MobileSessionListSnapshot => ({
+    version: 1,
+    live: ptyManager.getAllSessions().map(mapSessionToApi),
+    recent: getMobileRecentSessions(fresh),
+  });
 
   // Session list — read directly from ptyManager
   app.get('/api/sessions', (_req, res) => {
     const sessions = ptyManager.getAllSessions().map(s => mapSessionToApi(s));
     res.json(sessions);
+  });
+
+  app.get('/api/session-list', (req, res) => {
+    res.json(getMobileSessionList(req.query.fresh === '1'));
   });
 
   // Recent working directories (desktop-synced + running-session cwds, deduplicated and merged)
@@ -906,6 +1047,7 @@ export function startRemoteServer(
         displayName: getDisplayName(session.presetCommand),
       };
       addRecentCwdInConfig(config, session.cwd);
+      recentSessionCacheAt = 0;
       fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
       onRemoteCreate?.(info);
       res.json(info);
@@ -971,6 +1113,7 @@ export function startRemoteServer(
   // Delete session
   app.delete('/api/sessions/:id', async (req, res) => {
     await ptyManager.destroy(req.params.id);
+    recentSessionCacheAt = 0;
     onRemoteDestroy?.(req.params.id);
     res.json({ ok: true });
   });
@@ -1081,6 +1224,7 @@ export function startRemoteServer(
     const sendSessions = () => {
       const sessions = ptyManager.getAllSessions().map(s => mapSessionToApi(s));
       res.write(`event: sessions\ndata: ${JSON.stringify(sessions)}\n\n`);
+      res.write(`event: session-list\ndata: ${JSON.stringify(getMobileSessionList())}\n\n`);
     };
     const heartbeat = setInterval(() => { res.write(': heartbeat\n\n'); }, 3000);
     const statusInterval = setInterval(sendSessions, 2000);

@@ -47,6 +47,12 @@
     if (agent === 'codex') return 'Codex';
     if (agent === 'claude') return 'Claude Code';
     if (agent === 'copilot') return 'GitHub Copilot';
+    if (agent === 'gemini') return 'Gemini';
+    if (agent === 'kimi') return 'Kimi';
+    if (agent === 'opencode') return 'OpenCode';
+    if (agent === 'kiro') return 'Kiro';
+    if (agent === 'devin') return 'Devin';
+    if (agent === 'cursor') return 'Cursor';
     return 'Agent';
   }
 
