@@ -493,16 +493,17 @@ let projectSortMode: ProjectSortMode = loadProjectSort();
 // Live, lower-cased search query. Empty => no filtering, persisted collapse state is honored.
 let projectSearchQuery = '';
 
-// ========== Active Sessions section-local sort (#53) ==========
-// Independent from projectSortMode above: this only controls the ordering of the flattened
-// "Active Sessions" rows, not the Projects-section folder list.
-type ActiveSessionSortMode = 'recent' | 'project';
+// ========== Active Sessions section-local grouping (#53, #98) ==========
+// Independent from projectSortMode above: this controls how the flattened "Active Sessions"
+// rows are grouped/ordered — Copilot-style "Group by": Last updated (flat recency), Project,
+// or Status. Not to be confused with the Projects-section folder sort.
+type ActiveSessionGroupMode = 'recent' | 'project' | 'status';
 const ACTIVE_SESSION_SORT_STORAGE_KEY = 'posse_active_session_sort';
-function loadActiveSessionSort(): ActiveSessionSortMode {
+function loadActiveSessionSort(): ActiveSessionGroupMode {
   const raw = localStorage.getItem(ACTIVE_SESSION_SORT_STORAGE_KEY);
-  return raw === 'project' ? 'project' : 'recent';
+  return raw === 'project' || raw === 'status' ? raw : 'recent';
 }
-let activeSessionSortMode: ActiveSessionSortMode = loadActiveSessionSort();
+let activeSessionSortMode: ActiveSessionGroupMode = loadActiveSessionSort();
 
 // UI expand/collapse state (persisted to localStorage). DEFAULT for a never-touched project or
 // agent group is COLLAPSED: a project/group is only open if its key is present in the matching
@@ -4190,11 +4191,118 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
       if (a.projectKey !== b.projectKey) return a.projectKey < b.projectKey ? -1 : 1;
       return b.time - a.time;
     });
-  } else {
-    out.sort((a, b) => b.time - a.time);
+    // Insert visible group headers so the grouping is perceptible (#98: the old bare
+    // re-ordering looked like "the sort does nothing"). Header label = project name.
+    const withHeaders: Array<{ time: number; el: HTMLElement }> = [];
+    let lastGroup: string | null = null;
+    for (const row of out) {
+      if (row.projectKey !== lastGroup) {
+        lastGroup = row.projectKey;
+        withHeaders.push({ time: row.time, el: makeActiveGroupHeader(row.projectKey ? (projectNameByKey(row.projectKey) || cwdShortName(row.projectKey)) : 'No project') });
+      }
+      withHeaders.push({ time: row.time, el: row.el });
+    }
+    return withHeaders;
   }
 
+  if (activeSessionSortMode === 'status') {
+    // Group by live status using the same precedence as the status dot: waiting for input →
+    // working → unread → idle. Groups render in that fixed order; rows within a group by
+    // latest activity desc. Group headers carry the matching dot color.
+    const statusOf = (el: HTMLElement): 'waiting' | 'working' | 'unread' | 'idle' => {
+      const id = el.dataset.sessionId || '';
+      if (sessionWaiting.has(id)) return 'waiting';
+      if (sessionBusy.has(id)) return 'working';
+      if (sessionUnread.has(id)) return 'unread';
+      return 'idle';
+    };
+    const ORDER: Array<{ key: 'waiting' | 'working' | 'unread' | 'idle'; label: string; color: string }> = [
+      { key: 'waiting', label: 'Waiting for input', color: '#ff5c4d' },
+      { key: 'working', label: 'Working', color: '#e5a100' },
+      { key: 'unread', label: 'Unread', color: '#73c991' },
+      { key: 'idle', label: 'Idle', color: '#8a93a6' },
+    ];
+    const withHeaders: Array<{ time: number; el: HTMLElement }> = [];
+    for (const group of ORDER) {
+      const rows = out.filter((row) => statusOf(row.el) === group.key).sort((a, b) => b.time - a.time);
+      if (rows.length === 0) continue;
+      withHeaders.push({ time: rows[0].time, el: makeActiveGroupHeader(group.label, group.color) });
+      for (const row of rows) withHeaders.push({ time: row.time, el: row.el });
+    }
+    return withHeaders;
+  }
+
+  out.sort((a, b) => b.time - a.time);
   return out.map((row) => ({ time: row.time, el: row.el }));
+}
+
+// Copilot-style group header row for the Active Sessions section (#98). Reuses the
+// .session-group-header visual system (dot + name + count) already used by agent groups.
+function makeActiveGroupHeader(label: string, dotColor?: string): HTMLElement {
+  const header = document.createElement('div');
+  header.className = 'session-group-header active-group-header';
+  if (dotColor) {
+    const dot = document.createElement('span');
+    dot.className = 'session-group-dot';
+    dot.style.backgroundColor = dotColor;
+    header.appendChild(dot);
+  }
+  const name = document.createElement('span');
+  name.className = 'session-group-name';
+  name.textContent = label;
+  header.appendChild(name);
+  return header;
+}
+
+// Resolve a canonical project key back to its display name via the projects list.
+function projectNameByKey(key: string): string {
+  const p = projects.find((proj) => canonicalProjectKey(proj.path) === key);
+  return p ? projectDisplayName(p) : '';
+}
+
+// Copilot-style "Group by" popup for the Active Sessions section (#98). Anchored to the
+// header button; reuses the host-switcher menu visual system (items + active check).
+function openActiveGroupMenu(anchor: HTMLElement, labels: Record<ActiveSessionGroupMode, string>): void {
+  document.getElementById('active-group-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.id = 'active-group-menu';
+  menu.className = 'host-switcher-menu';
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${Math.max(8, rect.left - 60)}px`;
+  const title = document.createElement('div');
+  title.className = 'host-switcher-item host-switcher-menu-title';
+  title.innerHTML = '<span class="host-switcher-name">Group by</span>';
+  menu.appendChild(title);
+  for (const mode of ['recent', 'project', 'status'] as ActiveSessionGroupMode[]) {
+    const item = document.createElement('div');
+    item.className = 'host-switcher-item' + (mode === activeSessionSortMode ? ' active' : '');
+    const check = document.createElement('span');
+    check.className = 'host-switcher-check';
+    check.textContent = mode === activeSessionSortMode ? '✓' : '';
+    const name = document.createElement('span');
+    name.className = 'host-switcher-name';
+    name.textContent = labels[mode];
+    item.appendChild(check);
+    item.appendChild(name);
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('active-group-menu')?.remove();
+      if (mode === activeSessionSortMode) return;
+      activeSessionSortMode = mode;
+      try { localStorage.setItem(ACTIVE_SESSION_SORT_STORAGE_KEY, mode); } catch { /* ignore */ }
+      renderSessionList();
+    });
+    menu.appendChild(item);
+  }
+  document.body.appendChild(menu);
+  const onOutside = (ev: MouseEvent): void => {
+    if (!menu.contains(ev.target as Node) && ev.target !== anchor && !anchor.contains(ev.target as Node)) {
+      menu.remove();
+      document.removeEventListener('click', onOutside, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', onOutside, true), 0);
 }
 
 // Flatten the nine most recently active conversations across live and closed sessions.
@@ -4293,20 +4401,22 @@ function renderSessionList(): void {
     label.appendChild(actIcon);
     label.appendChild(actText);
     header.appendChild(label);
-    const sortBtn = document.createElement('button');
-    sortBtn.type = 'button';
-    sortBtn.id = 'active-session-sort';
-    sortBtn.className = 'nav-section-sort-btn';
-    const sortLabel = activeSessionSortMode === 'project' ? 'Project' : 'Recent';
-    sortBtn.innerHTML = `<span class="nav-section-sort-glyph">${ICON.sort}</span><span class="nav-section-sort-label">${sortLabel}</span>`;
-    sortBtn.title = `Sort Active Sessions (current: ${sortLabel}) — click to switch`;
-    sortBtn.addEventListener('click', (e) => {
+    const GROUP_LABELS: Record<ActiveSessionGroupMode, string> = {
+      recent: 'Last updated',
+      project: 'Project',
+      status: 'Status',
+    };
+    const groupBtn = document.createElement('button');
+    groupBtn.type = 'button';
+    groupBtn.id = 'active-session-sort';
+    groupBtn.className = 'nav-section-sort-btn';
+    groupBtn.innerHTML = `<span class="nav-section-sort-glyph">${ICON.sort}</span><span class="nav-section-sort-label">Group: ${GROUP_LABELS[activeSessionSortMode]}</span>`;
+    groupBtn.title = `Group Active Sessions (current: ${GROUP_LABELS[activeSessionSortMode]}) — click to change`;
+    groupBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      activeSessionSortMode = activeSessionSortMode === 'recent' ? 'project' : 'recent';
-      try { localStorage.setItem(ACTIVE_SESSION_SORT_STORAGE_KEY, activeSessionSortMode); } catch { /* ignore */ }
-      renderSessionList();
+      openActiveGroupMenu(groupBtn, GROUP_LABELS);
     });
-    header.appendChild(sortBtn);
+    header.appendChild(groupBtn);
     header.addEventListener('click', () => toggleSectionCollapsed('active'));
     sessionList.appendChild(header);
     if (!activeCollapsed) {
@@ -4857,8 +4967,11 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
     // Switch to the ACP view
     switchToAcp(acpId);
 
-    // Update sidebar
-    if (activeAgentTab !== 'all') setActiveAgentTab('all');
+    // Update sidebar. #90: do NOT reset the agent filter to 'all' when opening an EXISTING
+    // session — switch the tab to that session's family instead (keeps the filter useful and
+    // the session visible); leave the tab untouched when the family can't be derived.
+    const loadedFamily = agentFamilyFromDisplayName(sessionDisplayNames.get(acpId) || '');
+    if (loadedFamily && loadedFamily !== 'Terminal' && loadedFamily !== activeAgentTab) setActiveAgentTab(loadedFamily);
     if (!findProject(cwd)) {
       projects.push({ path: cwd, pinned: false, addedAt: Date.now() });
       saveProjects();
@@ -5045,8 +5158,10 @@ async function tryResumeViaAcp(
     persistActiveAcpSession(acpId);
   }
 
-  // Update sidebar
-  if (activeAgentTab !== 'all') setActiveAgentTab('all');
+  // Update sidebar. #90: same rule as the load path above — resuming an existing session
+  // must not reset the agent filter; follow the session's family instead.
+  const resumedFamily = agentFamilyFromDisplayName(sessionDisplayNames.get(acpId) || '');
+  if (resumedFamily && resumedFamily !== 'Terminal' && resumedFamily !== activeAgentTab) setActiveAgentTab(resumedFamily);
   if (cwd) { selectedProjectPath = cwd; setProjectExpanded(canonicalProjectKey(cwd), true); }
 
   updateEmptyState();
@@ -6683,13 +6798,14 @@ function updateEditorStatusbar(): void {
 function renderFileStatusbar(): void {
   fileStatusbarFiles.innerHTML = '';
   const files = globalRecentFiles;
+  // #106: no "Waiting for file changes..." placeholder — hide the whole bar until the
+  // watcher has produced a file. The watcher itself is untouched; the bar reappears on
+  // the first real file event.
   if (files.length === 0) {
-    const placeholder = document.createElement('span');
-    placeholder.className = 'file-statusbar-placeholder';
-    placeholder.textContent = 'Waiting for file changes...';
-    fileStatusbarFiles.appendChild(placeholder);
+    fileStatusbar.classList.add('file-statusbar-empty');
     return;
   }
+  fileStatusbar.classList.remove('file-statusbar-empty');
   for (const filePath of files) {
     const item = document.createElement('span');
     item.className = 'file-statusbar-item';

@@ -2474,9 +2474,9 @@ html, body {
   overflow: hidden;
 }
 
-.file-statusbar-placeholder {
-  color: var(--text-secondary);
-  white-space: nowrap;
+/* #106: hidden while the watcher has produced no files — no placeholder row. */
+#file-statusbar.file-statusbar-empty {
+  display: none;
 }
 
 .file-statusbar-item {
@@ -3601,6 +3601,21 @@ select.ai-form-input {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* "Group by" menu title row (non-interactive) + Active Sessions group headers (#98) */
+.host-switcher-menu-title {
+  pointer-events: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted, #6e7681);
+  padding-bottom: 2px;
+}
+
+.session-group-header.active-group-header {
+  padding: 4px 12px 2px;
+  font-size: 10.5px;
+}
+
 .host-switcher-menu {
   position: fixed;
   z-index: 1000;
@@ -3882,6 +3897,13 @@ select.ai-form-input {
   color: var(--text-primary, #e6edf3);
 }
 
+/* Preserve Shift+Enter newlines in user-sent text (#100). The renderer sets
+   textContent (keeps \n) so pre-wrap is what makes them visible. */
+.acp-user-text {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 /* System message */
 .acp-msg-system {
   align-self: flex-start;
@@ -3929,10 +3951,10 @@ select.ai-form-input {
 }
 .acp-activity-summary {
   display: flex;
-  min-height: 30px;
+  min-height: 24px;
   align-items: center;
-  gap: 7px;
-  padding: 3px 0;
+  gap: 6px;
+  padding: 1px 0;
   color: var(--text-secondary, #8b949e);
   cursor: pointer;
   list-style: none;
@@ -3952,9 +3974,9 @@ select.ai-form-input {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  gap: 4px;
+  gap: 2px;
   margin-left: 21px;
-  padding: 2px 0 8px;
+  padding: 1px 0 4px;
 }
 .acp-thought {
   width: 100%;
@@ -3964,10 +3986,10 @@ select.ai-form-input {
 }
 .acp-disclosure-summary {
   display: flex;
-  min-height: 28px;
+  min-height: 24px;
   align-items: center;
-  gap: 7px;
-  padding: 3px 0;
+  gap: 6px;
+  padding: 1px 0;
   cursor: pointer;
   list-style: none;
   user-select: none;
@@ -3997,8 +4019,9 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
 .acp-thought[open] .acp-thought-preview { display: none; }
 .acp-thought-text {
   margin-left: 21px;
-  padding: 2px 0 8px;
+  padding: 1px 0 4px;
   min-width: 0;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: normal;
   overflow-wrap: break-word;

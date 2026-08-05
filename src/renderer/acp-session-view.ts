@@ -853,7 +853,8 @@ export class AcpSessionView {
     const raw = (thought.dataset.raw || '') + update.content.text;
     thought.dataset.raw = raw;
     const thoughtText = this.requiredElement<HTMLElement>('.acp-thought-text', thought);
-    thoughtText.textContent = raw;
+    // #92: collapse 3+ consecutive blank lines so thought paragraphs don't sprawl.
+    thoughtText.textContent = raw.replace(/\n{3,}/g, '\n\n');
     this.linkifyPlainUrls(thoughtText, true);
     this.requiredElement<HTMLElement>('.acp-thought-preview', thought).textContent = this.singleLinePreview(raw);
     this.scrollToBottom();
