@@ -114,8 +114,8 @@ test('direct delete terminates live sessions without creating resumable records'
   assert.match(preloadSource, /deletePty: \(id: string\)[\s\S]*ipcRenderer\.invoke\('pty:delete', id\)/);
   assert.match(preloadSource, /acpDelete: \(id: string\)[\s\S]*ipcRenderer\.invoke\('acp:delete', id\)/);
   assert.match(mainSource, /const sessionUserDeleted: Set<string> = new Set\(\)/);
-  assert.match(mainSource, /session\?\.resumeId && !sessionUserDeleted\.has\(id\)/);
-  assert.match(mainSource, /ipcMain\.handle\('pty:delete'[\s\S]*sessionUserDeleted\.add\(id\)[\s\S]*await backend\.destroy\(id\)/);
+  assert.match(mainSource, /session\?\.resumeId && !sessionUserDeleted\.has\(deletionKey\)/);
+  assert.match(mainSource, /ipcMain\.handle\('pty:delete'[\s\S]*sessionUserDeleted\.add\(deletionKey\)[\s\S]*await backend\.destroy\(id\)/);
   assert.match(mainSource, /ipcMain\.handle\('acp:delete'[\s\S]*acpManager\.destroy\(id\)/);
   assert.match(appSource, /confirmDangerDialog\([\s\S]*Delete session permanently\?/);
   assert.match(appSource, /result\.terminated[\s\S]*removeLiveSessionFromRenderer\(id\)/);
@@ -127,6 +127,7 @@ test('permanent store deletion resolves only agent-owned source paths', () => {
   assert.match(mainSource, /function isPathInside\(root: string, candidate: string\)/);
   assert.match(mainSource, /function resolveSessionSourcePath\(agent: DeletableAgent/);
   assert.match(mainSource, /supplied && isPathInside\(root, supplied\) && fs\.existsSync\(supplied\)/);
+  assert.match(mainSource, /sid\.includes\('\.\.'\)[\s\S]*invalid session id/);
   assert.doesNotMatch(mainSource, /fs\.rmSync\(sourcePath,/);
 });
 

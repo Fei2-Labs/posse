@@ -124,6 +124,10 @@ const sessionLastNotifyAt: Map<string, number> = new Map();
 const sessionUserClosed: Set<string> = new Set();
 const sessionUserDeleted: Set<string> = new Set();
 
+function connectionSessionKey(connectionId: string, sessionId: string): string {
+  return `${connectionId}\0${sessionId}`;
+}
+
 const NOTIFY_COOLDOWN_MS = 15_000;
 const WAITING_INPUT_DELAY_MS = 8_000;
 const IMESSAGE_TARGET = (process.env.POSSE_IMESSAGE_TO || '').trim();
@@ -363,6 +367,9 @@ function deleteSessionFromStore(
     const a = String(agent || '').trim().toLowerCase();
     const sid = String(id || '').trim();
     if (!sid) return { ok: false, error: 'missing session id' };
+    if (sid.length > 256 || sid.includes('..') || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(sid)) {
+      return { ok: false, error: 'invalid session id' };
+    }
 
     if (a === 'claude' || a === 'kiro') {
       // Single backing file (Claude: <uuid>.jsonl ; Kiro: <uuid>.json).
@@ -1220,9 +1227,10 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
       sendToConnection(connId, 'pty:title-update', id, title);
     },
     onExit: (id, exitedSession) => {
+      const deletionKey = connectionSessionKey(connId, id);
       // Save sessions that have a resume ID to the closed list
       const session = exitedSession || backendFor(connId).getSession(id);
-      if (session?.resumeId && !sessionUserDeleted.has(id)) {
+      if (session?.resumeId && !sessionUserDeleted.has(deletionKey)) {
         addClosedSession({
           title: session.title,
           cwd: session.cwd,
@@ -1238,7 +1246,7 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
         sendUserNotification(id, 'Session ended', title);
       }
       sessionUserClosed.delete(id);
-      sessionUserDeleted.delete(id);
+      sessionUserDeleted.delete(deletionKey);
       sessionOutputTail.delete(id);
       sessionLastInputAt.delete(id);
       sessionArmedForNotify.delete(id);
@@ -2572,16 +2580,17 @@ function registerIPC(): void {
 
   ipcMain.handle('pty:delete', async (_e, id: string): Promise<{ ok: boolean; terminated: boolean; error?: string }> => {
     const backend = backendForEvent(_e);
+    const deletionKey = connectionSessionKey(connectionIdForEvent(_e), id);
     const session = backend.getSession(id);
     if (!session) return { ok: true, terminated: true };
     const nativeSessionId = session.agentSessionId || session.resumeId || '';
     const agent = deletableAgentFromCommand(session.presetCommand);
-    sessionUserDeleted.add(id);
+    sessionUserDeleted.add(deletionKey);
     sessionUserClosed.add(id);
     try {
       await backend.destroy(id);
     } catch (error) {
-      sessionUserDeleted.delete(id);
+      sessionUserDeleted.delete(deletionKey);
       sessionUserClosed.delete(id);
       return { ok: false, terminated: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -2589,6 +2598,7 @@ function registerIPC(): void {
     sessionLastInputAt.delete(id);
     sessionArmedForNotify.delete(id);
     sessionLastNotifyAt.delete(id);
+    setTimeout(() => sessionUserDeleted.delete(deletionKey), 30_000);
     if (!nativeSessionId || !agent || remoteBackendForEvent(_e)) {
       return { ok: true, terminated: true };
     }
