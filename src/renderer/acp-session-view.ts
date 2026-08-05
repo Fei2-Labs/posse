@@ -13,14 +13,15 @@ import type {
   SessionUpdate,
   ToolCallContent,
   ToolCallStatus,
-  UsageUpdate,
 } from '@agentclientprotocol/sdk';
 import {
   AcpPromptQueue,
   availableSlashCommands,
   configControlLabel,
   configValueLabel,
+  type ContextUsageState,
   imageContentFromDataUrl,
+  normalizeContextUsage,
   slashCommandCompletion,
   statusConfigOptions,
 } from './acp-session-state';
@@ -121,7 +122,7 @@ export class AcpSessionView {
   private activeCommandIndex = 0;
   private composerImages: ComposerImage[] = [];
   private promptQueue = new AcpPromptQueue<QueuedPrompt>();
-  private usage: Pick<UsageUpdate, 'used' | 'size' | 'cost'> | undefined;
+  private contextUsage: ContextUsageState | undefined;
   private planEl: HTMLElement | null = null;
   private planEntries: PlanEntry[] = [];
   private typingIndicatorEl: HTMLElement;
@@ -909,7 +910,7 @@ export class AcpSessionView {
   }
 
   private handleUsageUpdate(update: UsageSessionUpdate): void {
-    this.usage = { used: update.used, size: update.size, cost: update.cost };
+    this.contextUsage = normalizeContextUsage(update.used, update.size);
     this.renderStatusbar();
   }
 
@@ -1107,13 +1108,21 @@ export class AcpSessionView {
       </button>`;
     }).join('');
 
-    const ctxLabel = this.usage?.used && this.usage?.size
-      ? `${this.formatTokens(this.usage.used)}/${this.formatTokens(this.usage.size)}`
+    const ctxLabel = this.contextUsage?.kind === 'active'
+      ? `${this.formatTokens(this.contextUsage.used)}/${this.formatTokens(this.contextUsage.size)}`
       : '';
-    const ctxPct = this.usage?.used && this.usage?.size
-      ? Math.min(100, (this.usage.used / this.usage.size) * 100)
-      : 0;
+    const ctxPct = this.contextUsage?.kind === 'active' ? this.contextUsage.percentage : 0;
     const ctxColor = ctxPct > 80 ? 'var(--status-error)' : ctxPct > 60 ? 'var(--status-warning)' : 'var(--status-success)';
+    const ctxTitle = this.contextUsage?.kind === 'active'
+      ? `Active context: ${this.formatTokens(this.contextUsage.used)} of ${this.formatTokens(this.contextUsage.size)} used (${Math.round(ctxPct)}%); ${this.formatTokens(this.contextUsage.remaining)} remaining`
+      : this.contextUsage?.kind === 'unknown'
+        ? 'Active context unavailable because the agent reported invalid usage'
+        : '';
+    const contextHtml = this.contextUsage?.kind === 'active'
+      ? `<span class="acp-sb-divider"></span><span class="acp-sb-item acp-sb-ctx" title="${this.escapeHtml(ctxTitle)}" aria-label="${this.escapeHtml(ctxTitle)}"><div class="acp-sb-ctx-bar" aria-hidden="true"><div class="acp-sb-ctx-fill" style="width:${ctxPct}%;background:${ctxColor}"></div></div><span class="acp-sb-value">${ctxLabel}</span></span>`
+      : this.contextUsage?.kind === 'unknown'
+        ? `<span class="acp-sb-divider"></span><span class="acp-sb-item acp-sb-ctx acp-sb-ctx-unknown" title="${this.escapeHtml(ctxTitle)}" aria-label="${this.escapeHtml(ctxTitle)}"><span class="acp-sb-value">Context unknown</span></span>`
+        : '';
 
     const statusLabel = this.status === 'prompting' ? 'Working' : this.status === 'error' ? 'Error' : this.status === 'idle' ? 'Ready' : this.status === 'closed' ? 'Closed' : this.startupLabel();
     const statusDot = this.status === 'prompting' ? '●' : this.status === 'error' ? '✕' : this.status === 'idle' ? '●' : '○';
@@ -1136,7 +1145,7 @@ export class AcpSessionView {
         ${configHtml}
       </div>
       <div class="acp-sb-trailing">
-        ${ctxLabel ? `<span class="acp-sb-divider"></span><span class="acp-sb-item acp-sb-ctx"><div class="acp-sb-ctx-bar"><div class="acp-sb-ctx-fill" style="width:${ctxPct}%;background:${ctxColor}"></div></div><span class="acp-sb-value">${ctxLabel}</span></span>` : ''}
+        ${contextHtml}
         <span class="acp-sb-status" style="color:${statusColor}" role="status" title="${statusLabel}" aria-label="${statusLabel}">${statusDot}</span>
       </div>
     `;
@@ -1201,11 +1210,21 @@ export class AcpSessionView {
       item.addEventListener('click', async () => {
         dropdown.remove();
         if (option.value !== opt.currentValue) {
+          const isModelChange = opt.id === 'model';
+          const previousContextUsage = this.contextUsage;
+          if (isModelChange) {
+            this.contextUsage = undefined;
+            this.renderStatusbar();
+          }
           try {
             const updated = await window.posse.acpSetConfigOption(this.sessionId, opt.id, option.value);
             this.configOptions = updated || [];
             this.renderStatusbar();
           } catch (err) {
+            if (isModelChange && this.contextUsage === undefined) {
+              this.contextUsage = previousContextUsage;
+              this.renderStatusbar();
+            }
             this.addSystemMessage(`Failed to set ${opt.name}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }

@@ -46,6 +46,67 @@ test('status controls expose model, effort, speed and access in stable order', (
   ]);
 });
 
+test('ACP context usage derives active occupancy and remaining capacity', () => {
+  const { normalizeContextUsage } = loadModule();
+  assert.deepEqual(normalizeContextUsage(50_000, 200_000), {
+    kind: 'active',
+    used: 50_000,
+    size: 200_000,
+    remaining: 150_000,
+    percentage: 25,
+  });
+  assert.deepEqual(normalizeContextUsage(0, 200_000), {
+    kind: 'active',
+    used: 0,
+    size: 200_000,
+    remaining: 200_000,
+    percentage: 0,
+  });
+});
+
+test('ACP context usage rejects cumulative and malformed reports', () => {
+  const { normalizeContextUsage } = loadModule();
+  assert.deepEqual(normalizeContextUsage(345_000, 200_000), {
+    kind: 'unknown', reason: 'over-capacity',
+  });
+  for (const values of [
+    [-1, 200_000],
+    [1, 0],
+    [1.5, 200_000],
+    [Number.NaN, 200_000],
+    [1, Number.POSITIVE_INFINITY],
+    ['100', 200_000],
+  ]) {
+    assert.deepEqual(normalizeContextUsage(values[0], values[1]), {
+      kind: 'unknown', reason: 'invalid',
+    });
+  }
+});
+
+test('ACP context snapshots replace rather than accumulate across compaction and resume', () => {
+  const { normalizeContextUsage } = loadModule();
+  let current = normalizeContextUsage(160_000, 200_000);
+  current = normalizeContextUsage(42_000, 200_000);
+  assert.equal(current.kind, 'active');
+  assert.equal(current.used, 42_000);
+  assert.equal(current.remaining, 158_000);
+
+  current = normalizeContextUsage(18_000, 128_000);
+  assert.equal(current.kind, 'active');
+  assert.equal(current.used, 18_000);
+  assert.equal(current.size, 128_000);
+});
+
+test('ACP context meter exposes active, remaining, unknown and model-switch states', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  assert.match(source, /this\.contextUsage = normalizeContextUsage\(update\.used, update\.size\)/);
+  assert.match(source, /Active context:.*remaining/);
+  assert.match(source, />Context unknown<\/span>/);
+  assert.match(source, /const isModelChange = opt\.id === 'model'/);
+  assert.match(source, /if \(isModelChange\) \{\s*this\.contextUsage = undefined;/);
+  assert.doesNotMatch(source, /Math\.min\(100, \(this\.usage\.used \/ this\.usage\.size\)/);
+});
+
 test('image data URLs become ACP image content blocks', () => {
   const { imageContentFromDataUrl } = loadModule();
   assert.deepEqual(imageContentFromDataUrl('data:image/png;base64,QUJD'), {
@@ -140,7 +201,8 @@ test('ACP sessions expose a jump-to-latest control without forcing readers back 
 test('ACP context usage stays outside the scrollable status controls', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
-  assert.match(source, /class="acp-sb-scroll"[\s\S]*?<\/div>\s*<div class="acp-sb-trailing">[\s\S]*?acp-sb-ctx/);
+  assert.match(source, /class="acp-sb-scroll"[\s\S]*?<\/div>\s*<div class="acp-sb-trailing">\s*\$\{contextHtml\}/);
+  assert.match(source, /class="acp-sb-item acp-sb-ctx"/);
   assert.match(styles, /\.acp-sb-scroll \{[\s\S]*?min-width: 0;[\s\S]*?overflow-x: auto;/);
   assert.match(styles, /\.acp-sb-trailing \{ flex: 0 0 auto; \}/);
   assert.match(styles, /\.acp-sb-ctx \{ flex-shrink: 0;/);

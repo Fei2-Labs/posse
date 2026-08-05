@@ -1,5 +1,36 @@
 import type { AvailableCommand, ContentBlock, SessionConfigOption } from '@agentclientprotocol/sdk';
 
+export type ContextUsageState =
+  | {
+    kind: 'active';
+    used: number;
+    size: number;
+    remaining: number;
+    percentage: number;
+  }
+  | {
+    kind: 'unknown';
+    reason: 'invalid' | 'over-capacity';
+  };
+
+export function normalizeContextUsage(used: unknown, size: unknown): ContextUsageState {
+  const hasValidNumbers = typeof used === 'number'
+    && typeof size === 'number'
+    && Number.isSafeInteger(used)
+    && Number.isSafeInteger(size)
+    && used >= 0
+    && size > 0;
+  if (!hasValidNumbers) return { kind: 'unknown', reason: 'invalid' };
+  if (used > size) return { kind: 'unknown', reason: 'over-capacity' };
+  return {
+    kind: 'active',
+    used,
+    size,
+    remaining: size - used,
+    percentage: (used / size) * 100,
+  };
+}
+
 export function slashCommandQuery(value: string): string | null {
   const match = value.match(/^\/([^\s]*)$/);
   return match ? match[1].toLowerCase() : null;

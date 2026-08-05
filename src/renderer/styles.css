@@ -4476,6 +4476,7 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   border-radius: 2px;
   transition: width 0.3s;
 }
+.acp-sb-ctx-unknown { color: var(--text-muted); }
 
 /* ========== Config dropdown ========== */
 .acp-config-dropdown {
