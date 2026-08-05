@@ -4468,10 +4468,7 @@ function renderSessionList(): void {
       timeSpan.className = 'nav-session-time';
       timeSpan.textContent = relativeTimeShort(chatSessionCreateTimes.get(id) || Date.now());
 
-      const delBtn = document.createElement('button');
-      delBtn.className = 'nav-session-action';
-      delBtn.textContent = '×';
-      delBtn.title = 'Delete chat';
+      const delBtn = makeSessionActionButton(ICON.x, 'Delete chat');
       delBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleChatCloseClick(id); });
 
       item.appendChild(dot);
@@ -4522,16 +4519,10 @@ function renderSessionList(): void {
       timeSpan.className = 'nav-session-time';
       timeSpan.textContent = relativeTimeShort(cs.closedAt);
 
-      const resumeBtn = document.createElement('button');
-      resumeBtn.className = 'nav-session-action';
-      resumeBtn.textContent = '↩';
-      resumeBtn.title = 'Resume chat';
+      const resumeBtn = makeSessionActionButton(ICON.resume, 'Resume chat');
       resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); restoreClosedChatSession(cs); });
 
-      const delBtn = document.createElement('button');
-      delBtn.className = 'nav-session-action';
-      delBtn.textContent = '×';
-      delBtn.title = 'Delete record';
+      const delBtn = makeSessionActionButton(ICON.x, 'Delete record');
       delBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         closedChatSessions = await window.posse.closedChatRemove(cs.id);

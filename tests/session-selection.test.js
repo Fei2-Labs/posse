@@ -85,6 +85,51 @@ test('Active and Recent session rows share the compact sidebar grid', () => {
   assert.match(titleRule, /text-overflow:\s*ellipsis;/);
 });
 
+test('session row actions use one icon system and stable metrics', () => {
+  const actionRule = stylesSource.match(/\.nav-session-action \{([\s\S]*?)\}/)?.[1] || '';
+  const iconRule = stylesSource.match(/\.nav-session-action svg \{([\s\S]*?)\}/)?.[1] || '';
+  const timeRule = stylesSource.match(/\.nav-session-time \{([\s\S]*?)\}/)?.[1] || '';
+  const compactRows = appSource.slice(
+    appSource.indexOf('function buildLiveSessionRow'),
+    appSource.indexOf('interface ProjectAgentGroup'),
+  );
+
+  assert.match(appSource, /trash: '<svg/);
+  assert.match(appSource, /makeSessionActionButton\(ICON\.x, 'Close'\)/);
+  assert.match(appSource, /makeSessionActionButton\(ICON\.trash, 'Delete permanently', true\)/);
+  assert.doesNotMatch(compactRows, /(?:closeBtn|delBtn)\.textContent = ['"](?:×|🗑)['"]/);
+  assert.match(actionRule, /width:\s*20px;/);
+  assert.match(actionRule, /height:\s*20px;/);
+  assert.match(iconRule, /width:\s*13px;/);
+  assert.match(iconRule, /height:\s*13px;/);
+  assert.match(timeRule, /font-size:\s*10px;/);
+  assert.match(timeRule, /font-variant-numeric:\s*tabular-nums;/);
+});
+
+test('direct delete terminates live sessions without creating resumable records', () => {
+  const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src/preload/index.ts'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
+  const acpViewSource = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+
+  assert.match(preloadSource, /deletePty: \(id: string\)[\s\S]*ipcRenderer\.invoke\('pty:delete', id\)/);
+  assert.match(preloadSource, /acpDelete: \(id: string\)[\s\S]*ipcRenderer\.invoke\('acp:delete', id\)/);
+  assert.match(mainSource, /const sessionUserDeleted: Set<string> = new Set\(\)/);
+  assert.match(mainSource, /session\?\.resumeId && !sessionUserDeleted\.has\(id\)/);
+  assert.match(mainSource, /ipcMain\.handle\('pty:delete'[\s\S]*sessionUserDeleted\.add\(id\)[\s\S]*await backend\.destroy\(id\)/);
+  assert.match(mainSource, /ipcMain\.handle\('acp:delete'[\s\S]*acpManager\.destroy\(id\)/);
+  assert.match(appSource, /confirmDangerDialog\([\s\S]*Delete session permanently\?/);
+  assert.match(appSource, /result\.terminated[\s\S]*removeLiveSessionFromRenderer\(id\)/);
+  assert.match(acpViewSource, /destroy\(notifyMain = true\)[\s\S]*if \(notifyMain\) window\.posse\.acpDestroy/);
+});
+
+test('permanent store deletion resolves only agent-owned source paths', () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
+  assert.match(mainSource, /function isPathInside\(root: string, candidate: string\)/);
+  assert.match(mainSource, /function resolveSessionSourcePath\(agent: DeletableAgent/);
+  assert.match(mainSource, /supplied && isPathInside\(root, supplied\) && fs\.existsSync\(supplied\)/);
+  assert.doesNotMatch(mainSource, /fs\.rmSync\(sourcePath,/);
+});
+
 test('workspace toolbar independently controls persistent left and right sidebars', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
 
