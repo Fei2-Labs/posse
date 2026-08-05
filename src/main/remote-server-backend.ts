@@ -476,6 +476,14 @@ export class RemoteServerBackend implements PtyBackend {
     }
   }
 
+  /**
+   * Fetch the remote backend's `/api/server-info` for version handshake.
+   * Returns the parsed JSON or throws on non-OK / network failure.
+   */
+  async fetchServerInfo(): Promise<{ version?: string; sha?: string; builtAt?: string; ip?: string; port?: number; hostname?: string }> {
+    return this.request('GET', '/api/server-info');
+  }
+
   /** ws:// or wss:// origin derived from the http(s) baseUrl. */
   private wsBaseUrl(): string {
     if (this.baseUrl.startsWith('https://')) return 'wss://' + this.baseUrl.slice('https://'.length);

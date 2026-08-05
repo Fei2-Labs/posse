@@ -190,6 +190,8 @@ declare global {
       connectionsList: () => Promise<Array<{ id: string; label: string; kind: 'local' | 'remote'; active: boolean }>>;
       connectionsAdd: (opts: { label?: string; baseUrl: string; token: string }) => Promise<{ ok: boolean; id?: string; label?: string; error?: string }>;
       connectionsBootstrapSshHost: (host: string) => Promise<{ ok: boolean; id?: string; label?: string; baseUrl?: string; error?: string }>;
+      connectionsRebootstrap: (id: string) => Promise<{ ok: boolean; id?: string; label?: string; baseUrl?: string; error?: string }>;
+      connectionsCheckVersion: (id: string) => Promise<{ ok: boolean; matched?: boolean; remoteVersion?: string; appVersion?: string; canRebootstrap?: boolean; error?: string }>;
       connectionsRemove: (id: string) => Promise<{ ok: boolean; error?: string }>;
       connectionsSetActive: (id: string) => Promise<{ ok: boolean; error?: string }>;
       connectionsBindWindow: (id: string) => Promise<{ ok: boolean; error?: string }>;
@@ -6963,6 +6965,37 @@ async function openHostMenu(): Promise<void> {
     menu.appendChild(item);
   }
 
+  // Version check + re-bootstrap for the active remote connection. Compares the remote
+  // backend's version to the app's version; if mismatched (and the connection was bootstrapped
+  // via SSH), offers to re-bootstrap with the current app version (coexist-drain: live 24/7
+  // sessions on the old version keep running; new sessions land on the new version).
+  const activeConn = list.find((c) => c.active);
+  if (activeConn && activeConn.kind === 'remote') {
+    const versionItem = document.createElement('div');
+    versionItem.className = 'host-switcher-item host-switcher-version';
+    versionItem.innerHTML = '<span class="host-switcher-check">⟳</span><span class="host-switcher-name">Check backend version…</span>';
+    versionItem.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      try {
+        const res = await window.posse.connectionsCheckVersion(activeConn.id);
+        if (!res.ok) {
+          void showVersionResult(activeConn.label, `Check failed: ${res.error || 'unknown error'}`);
+          return;
+        }
+        if (res.matched) {
+          void showVersionResult(activeConn.label, `Up to date (v${res.remoteVersion}).`);
+        } else if (res.canRebootstrap) {
+          void showVersionMismatchDialog(activeConn, res.remoteVersion || 'unknown', res.appVersion || 'unknown');
+        } else {
+          void showVersionResult(activeConn.label, `Version mismatch (remote: ${res.remoteVersion}, app: ${res.appVersion}). Re-bootstrap unavailable (manual add).`);
+        }
+      } catch (err) {
+        void showVersionResult(activeConn.label, `Check failed: ${(err as Error).message}`);
+      }
+    });
+    menu.appendChild(versionItem);
+  }
+
   const addItem = document.createElement('div');
   addItem.className = 'host-switcher-item host-switcher-add';
   addItem.innerHTML = '<span class="host-switcher-check">+</span><span class="host-switcher-name">Add remote…</span>';
@@ -7237,6 +7270,72 @@ function openBootstrapSshDialog(): Promise<void> {
       cleanup();
     };
 
+    dialog.querySelector('.btn-cancel')!.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+    goBtn.addEventListener('click', () => { void onGo(); });
+    dialog.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Escape') cleanup(); });
+  });
+}
+
+/** Simple OK dialog showing a version-check result (no action). */
+function showVersionResult(hostLabel: string, message: string): Promise<void> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    dialog.innerHTML = `
+      <h3>${hostLabel}</h3>
+      <div style="font-size:13px;color:var(--text-secondary);line-height:1.5">${message}</div>
+      <div class="confirm-buttons" style="margin-top:16px">
+        <button class="btn-close-confirm" style="background:var(--accent)">OK</button>
+      </div>`;
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    const cleanup = () => { overlay.remove(); resolve(); };
+    dialog.querySelector('.btn-close-confirm')!.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+    dialog.addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Escape') cleanup(); });
+  });
+}
+
+/** Version mismatch dialog — offers to re-bootstrap the remote backend with the current app version. */
+function showVersionMismatchDialog(conn: { id: string; label: string }, remoteVersion: string, appVersion: string): Promise<void> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    dialog.innerHTML = `
+      <h3>Update Remote Backend</h3>
+      <div style="font-size:13px;color:var(--text-secondary);line-height:1.5">
+        <strong>${conn.label}</strong> is running backend v${remoteVersion}, but your app expects v${appVersion}.<br><br>
+        Re-bootstrap will deploy the current backend alongside the old one (coexist). Live 24/7 sessions keep running on the old version; new sessions use v${appVersion}.
+      </div>
+      <div class="preset-form-error" id="rebootstrap-error" style="color:var(--danger);min-height:16px;font-size:12px"></div>
+      <div class="confirm-buttons" style="margin-top:16px">
+        <button class="btn-cancel">Cancel</button>
+        <button class="btn-close-confirm" style="background:var(--accent)">Re-bootstrap</button>
+      </div>`;
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    const errorEl = dialog.querySelector('#rebootstrap-error') as HTMLElement;
+    const goBtn = dialog.querySelector('.btn-close-confirm') as HTMLButtonElement;
+    const cleanup = () => { overlay.remove(); resolve(); };
+    const onGo = async () => {
+      goBtn.disabled = true;
+      goBtn.textContent = 'Re-bootstrapping…';
+      errorEl.textContent = '';
+      const res = await window.posse.connectionsRebootstrap(conn.id);
+      if (!res.ok) {
+        errorEl.textContent = res.error || 'Re-bootstrap failed';
+        goBtn.disabled = false;
+        goBtn.textContent = 'Re-bootstrap';
+        return;
+      }
+      await refreshHostSwitcherLabel();
+      cleanup();
+    };
     dialog.querySelector('.btn-cancel')!.addEventListener('click', cleanup);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
     goBtn.addEventListener('click', () => { void onGo(); });

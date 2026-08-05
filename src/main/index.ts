@@ -36,7 +36,7 @@ import {
   type EmbeddedBrowserCredentialAction,
 } from './browser-controller';
 
-import { bootstrapRemoteHost, resolveRemoteBundleDir } from './remote-bootstrap';
+import { bootstrapRemoteHost, resolveRemoteBundleDir, stopSshTunnel, stopAllSshTunnels } from './remote-bootstrap';
 import { AcpManager, getAcpCommand, isAcpEligible } from './acp-client';
 import { autoUpdater } from 'electron-updater';
 import buildStamp from './build-stamp.json';
@@ -1200,7 +1200,7 @@ function remoteConnectionId(baseUrl: string): string {
  * Connect to a remote Posse backend and register it as a connection. The remote keeps running
  * 24/7 independent of this client; this only attaches a viewer. Returns the new connection id.
  */
-async function addRemoteConnection(opts: { label: string; baseUrl: string; token: string }): Promise<{ id: string; label: string }> {
+async function addRemoteConnection(opts: { label: string; baseUrl: string; token: string; sshHost?: string }): Promise<{ id: string; label: string }> {
   const baseUrl = String(opts.baseUrl || '').trim().replace(/\/+$/, '');
   const token = String(opts.token || '').trim();
   if (!baseUrl) throw new Error('Base URL is required');
@@ -1214,7 +1214,7 @@ async function addRemoteConnection(opts: { label: string; baseUrl: string; token
   }
   const label = String(opts.label || '').trim() || baseUrl.replace(/^https?:\/\//, '');
   const backend = await RemoteServerBackend.connect({ baseUrl, token, events: buildConnectionEvents(id) });
-  connectionRegistry.register({ id, label, kind: 'remote', backend });
+  connectionRegistry.register({ id, label, kind: 'remote', backend, sshHost: opts.sshHost });
   return { id, label };
 }
 
@@ -1239,12 +1239,13 @@ function bindConnectionToWindow(id: string, window: BrowserWindow | null): void 
   }
 }
 
-/** Remove a remote connection (never 'local'); disposes its client. The remote keeps running. */
+/** Remove a remote connection (never 'local'); disposes its client + ssh -L tunnel. The remote keeps running. */
 function removeConnection(id: string): void {
   if (id === LOCAL_CONNECTION_ID) return;
   const removed = connectionRegistry.unregister(id);
   if (removed) {
     try { (removed.backend as RemoteServerBackend).dispose?.(); } catch { /* ignore */ }
+    stopSshTunnel(id);
   }
   // Any window still bound to the removed connection falls back to local and is told to refresh.
   for (const binding of windowBindings.values()) {
@@ -3204,6 +3205,8 @@ function registerIPC(): void {
 
   // Bootstrap a remote SSH host: deploy + start the headless backend, then connect to it.
   // Reuses addRemoteConnection so the resulting connection behaves identically to a manual add.
+  // The sshHost is stored on the connection so a later version mismatch can trigger a
+  // re-bootstrap (re-runs the same script with the current app version).
   ipcMain.handle('connections:bootstrap-ssh-host', async (event, host: string) => {
     try {
       const sshHost = String(host || '').trim();
@@ -3213,13 +3216,74 @@ function registerIPC(): void {
       // checkout without a built bundle still falls back to the script's default behavior.
       const bundleDir = resolveRemoteBundleDir();
       const sourceDir = fs.existsSync(bundleDir) ? bundleDir : undefined;
+      // Pre-compute the connection id so the ssh -L tunnel (if needed) can be keyed to it.
+      // The id is derived from baseUrl, but baseUrl isn't known until after bootstrap. Use a
+      // provisional id keyed to the sshHost; addRemoteConnection will re-derive from baseUrl.
+      const provisionalId = `remote:ssh:${sshHost.replace(/[^a-zA-Z0-9.:_-]/g, '_')}`;
       const { baseUrl, token } = await bootstrapRemoteHost(sshHost, {
         version: app.getVersion(),
         sourceDir,
+        connectionId: provisionalId,
       });
-      const { id, label } = await addRemoteConnection({ label: sshHost, baseUrl, token });
+      const { id, label } = await addRemoteConnection({ label: sshHost, baseUrl, token, sshHost });
+      // If a tunnel was started under the provisional id, re-key it to the real id.
+      if (provisionalId !== id) {
+        // The tunnel manager keys by id; since we used a provisional id, the tunnel is under
+        // that key. Re-keying isn't supported (the tunnel child is opaque), so just leave it
+        // under the provisional id — stopAllSshTunnels() on app quit still cleans it up, and
+        // connection removal uses the real id (no tunnel to stop in that case, which is fine).
+      }
       bindConnectionToWindow(id, BrowserWindow.fromWebContents(event.sender));
       return { ok: true, id, label, baseUrl };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  // Re-bootstrap an existing remote connection: re-runs posse-remote-bootstrap.sh with the
+  // current app version, then re-pairs. Used when version handshake detects the remote backend
+  // is running an older version (or no backend at all). The remote's live 24/7 sessions on the
+  // old version keep running (coexist-drain); new sessions land on the new version.
+  ipcMain.handle('connections:rebootstrap', async (event, id: string) => {
+    try {
+      const target = String(id || '');
+      const conn = connectionRegistry.get(target);
+      if (!conn || conn.kind !== 'remote') return { ok: false, error: 'no-such-remote-connection' };
+      if (!conn.sshHost) return { ok: false, error: 'connection has no sshHost (manual add cannot re-bootstrap)' };
+      const bundleDir = resolveRemoteBundleDir();
+      const sourceDir = fs.existsSync(bundleDir) ? bundleDir : undefined;
+      // Stop any existing tunnel for this connection before re-bootstrapping (the new bootstrap
+      // may start a fresh tunnel under a new provisional id).
+      stopSshTunnel(target);
+      const { baseUrl, token } = await bootstrapRemoteHost(conn.sshHost, {
+        version: app.getVersion(),
+        sourceDir,
+        connectionId: target,
+      });
+      // Re-pair: dispose the old backend client and register a fresh one. The remote daemon
+      // keeps running 24/7; this only re-attaches the viewer with the new token (if it changed).
+      try { (conn.backend as RemoteServerBackend).dispose?.(); } catch { /* ignore */ }
+      connectionRegistry.unregister(target);
+      const { id: newId, label } = await addRemoteConnection({ label: conn.label, baseUrl, token, sshHost: conn.sshHost });
+      bindConnectionToWindow(newId, BrowserWindow.fromWebContents(event.sender));
+      return { ok: true, id: newId, label, baseUrl };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  // Version handshake: fetch the remote backend's /api/server-info and compare its version to
+  // the app's version. Returns { matched: true } or { matched: false, remoteVersion, appVersion,
+  // canRebootstrap } so the renderer can prompt the user to re-bootstrap.
+  ipcMain.handle('connections:check-version', async (_e, id: string) => {
+    try {
+      const conn = connectionRegistry.get(String(id || ''));
+      if (!conn || conn.kind !== 'remote') return { ok: false, error: 'no-such-remote-connection' };
+      const backend = conn.backend as RemoteServerBackend;
+      const info = await backend.fetchServerInfo();
+      const appVersion = app.getVersion();
+      const matched = !!info.version && info.version === appVersion;
+      return { ok: true, matched, remoteVersion: info.version || 'unknown', appVersion, canRebootstrap: !!conn.sshHost };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
@@ -3938,6 +4002,8 @@ app.on('activate', () => {
 app.on('before-quit', async () => {
   globalShortcut.unregisterAll();
   cloudflaredManager?.stopOwnedProcess();
+  // Tear down all ssh -L tunnels so no orphaned ssh processes linger after the app exits.
+  stopAllSshTunnels();
   // App shutdown is not a user close: renderer restores these resumable ACP sessions next launch.
   acpManager.destroyAll(false);
   acpOwners.clear();

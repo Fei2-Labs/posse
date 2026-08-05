@@ -17,6 +17,8 @@ export interface Connection {
   label: string;
   kind: ConnectionKind;
   backend: PtyBackend;
+  /** SSH host alias (from ~/.ssh/config) for bootstrapped remotes; enables re-bootstrap + ssh -L fallback. */
+  sshHost?: string;
 }
 
 export const LOCAL_CONNECTION_ID = 'local';

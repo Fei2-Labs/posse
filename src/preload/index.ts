@@ -288,6 +288,10 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('connections:add', opts),
   connectionsBootstrapSshHost: (host: string) =>
     ipcRenderer.invoke('connections:bootstrap-ssh-host', host),
+  connectionsRebootstrap: (id: string) =>
+    ipcRenderer.invoke('connections:rebootstrap', id),
+  connectionsCheckVersion: (id: string) =>
+    ipcRenderer.invoke('connections:check-version', id),
   connectionsRemove: (id: string) => ipcRenderer.invoke('connections:remove', id),
   connectionsSetActive: (id: string) => ipcRenderer.invoke('connections:set-active', id),
   // D3: bind THIS window to a connection (in-window host switch).
