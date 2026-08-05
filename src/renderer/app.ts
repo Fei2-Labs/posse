@@ -37,6 +37,10 @@ const ICON: Record<string, string> = {
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
   pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>',
+  resume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 14-4-4 4-4"/><path d="M5 10h8a6 6 0 0 1 6 6v2"/></svg>',
+  archive: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v13h16V8M10 12h4"/></svg>',
+  archiveRestore: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v13h16V8M9 15l3-3 3 3M12 12v5"/></svg>',
   collapse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
   chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
@@ -88,6 +92,7 @@ declare global {
       writePty: (id: string, data: string) => void;
       resizePty: (id: string, cols: number, rows: number) => void;
       destroyPty: (id: string) => void;
+      deletePty: (id: string) => Promise<{ ok: boolean; terminated: boolean; error?: string }>;
       renamePty: (id: string, title: string) => void;
       regenerateTitle: (id: string) => Promise<void>;
       getSessions: () => Promise<PtySessionInfo[]>;
@@ -208,6 +213,7 @@ declare global {
       acpSetConfigOption: (id: string, configId: string, value: string | boolean) => Promise<SessionConfigOption[]>;
       acpInfo: (id: string) => Promise<AcpSessionInfo | null>;
       acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) => void;
+      acpDelete: (id: string) => Promise<{ ok: boolean; terminated: boolean; error?: string }>;
       acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
       acpDrainReplay: (id: string) => Promise<SessionUpdate[]>;
       acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) => Promise<boolean>;
@@ -399,6 +405,43 @@ async function toggleArchiveSession(s: ClaudeHistorySession): Promise<void> {
   await refreshProjectsData();
 }
 
+function storeAgentFromCommand(command: string): ProjectsAgentId | null {
+  const normalized = String(command || '').trim().toLowerCase();
+  if (/^claude\b/.test(normalized)) return 'claude';
+  if (/^codex\b/.test(normalized)) return 'codex';
+  if (/^kiro/.test(normalized)) return 'kiro';
+  if (/^copilot\b/.test(normalized)) return 'copilot';
+  if (/^devin\b/.test(normalized)) return 'devin';
+  return null;
+}
+
+function removePinnedSession(key: string): void {
+  if (!key || !pinnedSessions.delete(key)) return;
+  savePinnedSessions();
+}
+
+async function deleteClosedSession(cs: ClosedSessionInfo): Promise<void> {
+  const agent = storeAgentFromCommand(cs.presetCommand);
+  const ok = await confirmDangerDialog(
+    'Delete session permanently?',
+    `This permanently deletes "${cs.title || cs.resumeId || 'Session'}"${agent ? ` from ${AGENT_ID_LABEL[agent]}'s session store` : ''}. This cannot be undone.`,
+    'Delete',
+  );
+  if (!ok) return;
+  if (cs.resumeId && agent) {
+    const result = await window.posse.sessionDelete({ id: cs.resumeId, agent });
+    if (!result.ok) {
+      showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
+      return;
+    }
+    removedHistoryKeys.add(conversationKey(cs.resumeId));
+  }
+  removePinnedSession(closedSessionPinKey(cs));
+  closedSessions = await window.posse.closedSessionsRemove(cs.id);
+  renderSessionList();
+  await refreshProjectsData();
+}
+
 // PERMANENT delete: confirm dialog gate (mandatory) → route to the agent's own store.
 async function deleteHistorySession(s: ClaudeHistorySession): Promise<void> {
   const ok = await confirmDangerDialog(
@@ -415,15 +458,16 @@ async function deleteHistorySession(s: ClaudeHistorySession): Promise<void> {
     });
     if (!res || !res.ok) {
       console.error('session delete failed', res?.error);
-      window.alert(`Delete failed: ${res?.error || 'unknown error'}`);
+      showToast(`Delete failed: ${res?.error || 'unknown error'}`, 4000);
       return;
     }
   } catch (err) {
     console.error('session delete failed', err);
-    window.alert('Delete failed.');
+    showToast('Delete failed.', 4000);
     return;
   }
   // Drop the dead row locally, then re-pull backend.
+  removePinnedSession(historySessionPinKey(s));
   removedHistoryKeys.add(conversationKey(s.id));
   await refreshProjectsData();
 }
@@ -3556,12 +3600,21 @@ function sessionStatusColor(id: string): string {
 }
 
 // A pin/unpin action button for a session row, keyed by its canonical conversationKey.
+function makeSessionActionButton(icon: string, title: string, danger = false): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'nav-session-action' + (danger ? ' nav-session-action-danger' : '');
+  button.innerHTML = icon;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  return button;
+}
+
 function makeSessionPinButton(convKey: string): HTMLButtonElement {
-  const btn = document.createElement('button');
   const pinned = isSessionPinned(convKey);
-  btn.className = 'nav-session-action' + (pinned ? ' active' : '');
-  btn.innerHTML = ICON.pin;
-  btn.title = pinned ? 'Unpin session' : 'Pin session to top';
+  const title = pinned ? 'Unpin session' : 'Pin session to top';
+  const btn = makeSessionActionButton(ICON.pin, title);
+  if (pinned) btn.classList.add('active');
   btn.addEventListener('click', (e) => { e.stopPropagation(); toggleSessionPin(convKey); });
   return btn;
 }
@@ -3634,20 +3687,17 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   timeSpan.className = 'nav-session-time';
   timeSpan.textContent = relativeTimeShort(sessionUpdateTimes.get(id) || Date.now());
 
-  const editBtn = document.createElement('button');
-  editBtn.className = 'nav-session-action';
-  editBtn.innerHTML = ICON.pencil;
-  editBtn.title = 'Rename';
+  const editBtn = makeSessionActionButton(ICON.pencil, 'Rename');
   editBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     startTitleEdit(id, titleSpan);
   });
 
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'nav-session-action';
-  closeBtn.textContent = '×';
-  closeBtn.title = 'Close';
+  const closeBtn = makeSessionActionButton(ICON.x, 'Close');
   closeBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleCloseClick(id); });
+
+  const deleteBtn = makeSessionActionButton(ICON.trash, 'Delete permanently', true);
+  deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleDeleteClick(id); });
 
   if (isPinned) item.classList.add('pinned');
 
@@ -3668,6 +3718,7 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(editBtn);
   item.appendChild(closeBtn);
+  item.appendChild(deleteBtn);
 
   item.addEventListener('click', () => switchSession(id));
   item.addEventListener('contextmenu', (e) => {
@@ -3697,19 +3748,13 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   timeSpan.className = 'nav-session-time';
   timeSpan.textContent = relativeTimeShort(cs.closedAt);
 
-  const resumeBtn = document.createElement('button');
-  resumeBtn.className = 'nav-session-action';
-  resumeBtn.textContent = '↩';
-  resumeBtn.title = 'Resume session';
+  const resumeBtn = makeSessionActionButton(ICON.resume, 'Resume session');
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void restoreClosedSession(cs); });
 
   // Rename: routes through the EXISTING closed-sessions:rename IPC, which already forward-propagates
   // the title into the agent's own session file (claude/codex via resumeId). Copilot/Kiro are a
   // server-side no-op there, so only Posse's stored title updates for them.
-  const editBtn = document.createElement('button');
-  editBtn.className = 'nav-session-action';
-  editBtn.innerHTML = ICON.pencil;
-  editBtn.title = 'Rename';
+  const editBtn = makeSessionActionButton(ICON.pencil, 'Rename');
   editBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     startInlineTitleEdit(titleSpan, cs.title || '', (val) => {
@@ -3720,15 +3765,8 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
     });
   });
 
-  const delBtn = document.createElement('button');
-  delBtn.className = 'nav-session-action';
-  delBtn.textContent = '×';
-  delBtn.title = 'Delete record';
-  delBtn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    closedSessions = await window.posse.closedSessionsRemove(cs.id);
-    renderSessionList();
-  });
+  const delBtn = makeSessionActionButton(ICON.trash, 'Delete permanently', true);
+  delBtn.addEventListener('click', (e) => { e.stopPropagation(); void deleteClosedSession(cs); });
 
   item.appendChild(dot);
   item.appendChild(titleSpan);
@@ -3760,19 +3798,13 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   timeSpan.className = 'nav-session-time';
   timeSpan.textContent = relativeTimeShort(s.mtimeMs);
 
-  const resumeBtn = document.createElement('button');
-  resumeBtn.className = 'nav-session-action';
-  resumeBtn.textContent = '↩';
-  resumeBtn.title = 'Resume history session';
+  const resumeBtn = makeSessionActionButton(ICON.resume, 'Resume history session');
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void resumeAgentSession(s); });
 
   // Rename: forward-propagate into the agent's own session file via history-sessions:rename.
   // Claude/Codex get the title marker written; Copilot/Kiro are a server-side no-op (no writable
   // title format) but the displayed title still updates locally so the sidebar reflects the rename.
-  const editBtn = document.createElement('button');
-  editBtn.className = 'nav-session-action';
-  editBtn.innerHTML = ICON.pencil;
-  editBtn.title = 'Rename';
+  const editBtn = makeSessionActionButton(ICON.pencil, 'Rename');
   editBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     startInlineTitleEdit(titleSpan, s.title || '', (val) => {
@@ -3790,17 +3822,12 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   });
 
   // Archive toggle (Posse-internal soft-hide, reversible, no confirm).
-  const archiveBtn = document.createElement('button');
-  archiveBtn.className = 'nav-session-action';
-  archiveBtn.textContent = s.archived ? '⊕' : '⊟';
-  archiveBtn.title = s.archived ? 'Unarchive session' : 'Archive session (hide from list)';
+  const archiveTitle = s.archived ? 'Unarchive session' : 'Archive session (hide from list)';
+  const archiveBtn = makeSessionActionButton(s.archived ? ICON.archiveRestore : ICON.archive, archiveTitle);
   archiveBtn.addEventListener('click', (e) => { e.stopPropagation(); void toggleArchiveSession(s); });
 
   // Permanent delete (confirm-gated, removes from the agent's own store).
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'nav-session-action nav-session-action-danger';
-  deleteBtn.textContent = '🗑';
-  deleteBtn.title = 'Delete permanently (cannot be undone)';
+  const deleteBtn = makeSessionActionButton(ICON.trash, 'Delete permanently (cannot be undone)', true);
   deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); void deleteHistorySession(s); });
 
   item.appendChild(dot);
@@ -5372,6 +5399,31 @@ async function handleCloseClick(id: string): Promise<void> {
   destroySession(id);
 }
 
+async function handleDeleteClick(id: string): Promise<void> {
+  const title = sessionTitles.get(id) || sessionDisplayNames.get(id) || 'Session';
+  const confirmed = await confirmDangerDialog(
+    'Delete session permanently?',
+    `This terminates "${title}" and deletes its stored conversation when available. This cannot be undone.`,
+    'Delete',
+  );
+  if (!confirmed) return;
+  const pinKey = liveSessionPinKey(id);
+  const nativeSessionId = sessionResumeId.get(id) || sessionAgentId.get(id) || '';
+  try {
+    const result = acpSessionIds.has(id)
+      ? await window.posse.acpDelete(id)
+      : await window.posse.deletePty(id);
+    if (result.terminated) {
+      removePinnedSession(pinKey);
+      if (nativeSessionId) removedHistoryKeys.add(conversationKey(nativeSessionId));
+      removeLiveSessionFromRenderer(id);
+    }
+    if (!result.ok) showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
+  } catch (error) {
+    showToast(`Delete failed: ${error instanceof Error ? error.message : String(error)}`, 4000);
+  }
+}
+
 async function handleChatCloseClick(id: string): Promise<void> {
   const title = chatSessionTitles.get(id) || 'New Chat';
   const action = await showConfirmDialog(title, 'Chat');
@@ -5445,21 +5497,20 @@ function acpClosedSessionMetadata(id: string): AcpClosedSessionMetadata | undefi
   };
 }
 
-function destroySession(id: string): void {
+function removeLiveSessionFromRenderer(id: string): void {
   const wasActive = getActiveSessionId() === id;
-  // ACP session cleanup
   if (acpSessionIds.has(id)) {
-    window.posse.acpDestroy(id, acpClosedSessionMetadata(id));
     removePersistedActiveAcpSession(id);
     const view = acpViews.get(id);
     if (view) {
-      view.destroy();
+      view.destroy(false);
       view.getElement().remove();
     }
     acpViews.delete(id);
     acpSessionIds.delete(id);
     clearSessionState(id);
     if (activeAcpId === id) {
+      clearSavedAcpForeground();
       activeAcpId = null;
       switchToTerminal();
     }
@@ -5470,13 +5521,21 @@ function destroySession(id: string): void {
     return;
   }
 
-  window.posse.destroyPty(id);
   clearSessionState(id);
   termManager.destroy(id);
   updateEmptyState();
   updateSessionTitleBar();
   removeSessionRowsInPlace([id]);
   scheduleSessionChromeRender(wasActive);
+}
+
+function destroySession(id: string): void {
+  if (acpSessionIds.has(id)) {
+    window.posse.acpDestroy(id, acpClosedSessionMetadata(id));
+  } else {
+    window.posse.destroyPty(id);
+  }
+  removeLiveSessionFromRenderer(id);
 }
 
 function destroySessions(ids: string[]): void {
@@ -5489,7 +5548,7 @@ function destroySessions(ids: string[]): void {
       removePersistedActiveAcpSession(id);
       const view = acpViews.get(id);
       if (view) {
-        view.destroy();
+        view.destroy(false);
         view.getElement().remove();
       }
       acpViews.delete(id);

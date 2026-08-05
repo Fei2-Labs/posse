@@ -122,6 +122,7 @@ const sessionLastInputAt: Map<string, number> = new Map();
 const sessionArmedForNotify: Set<string> = new Set();
 const sessionLastNotifyAt: Map<string, number> = new Map();
 const sessionUserClosed: Set<string> = new Set();
+const sessionUserDeleted: Set<string> = new Set();
 
 const NOTIFY_COOLDOWN_MS = 15_000;
 const WAITING_INPUT_DELAY_MS = 8_000;
@@ -175,6 +176,22 @@ function addClosedSession(session: { title: string; cwd: string; presetCommand: 
     closedAt: Date.now(),
   });
   const saved = saveClosedSessions(list);
+  safeSend('closed-sessions:update', saved);
+}
+
+function sessionIdentityKey(id: string): string {
+  const normalized = String(id || '').trim().toLowerCase();
+  const uuidPrefix = normalized.match(/^[0-9a-f]{8}/)?.[0];
+  return uuidPrefix || normalized;
+}
+
+function removeClosedSessionsByResumeId(resumeId: string): void {
+  const target = sessionIdentityKey(resumeId);
+  if (!target) return;
+  const current = loadClosedSessions();
+  const next = current.filter((session) => sessionIdentityKey(session.resumeId) !== target);
+  if (next.length === current.length) return;
+  const saved = saveClosedSessions(next);
   safeSend('closed-sessions:update', saved);
 }
 
@@ -283,6 +300,60 @@ function resolveRemappedCwd(cwd: string, map: Record<string, string>): string {
 
 // ========== Permanent session deletion (targets the agent's OWN store) ==========
 // Routes by agent type to the correct backing store. NEVER throws across IPC.
+type DeletableAgent = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
+
+function deletableAgentFromCommand(command: string): DeletableAgent | null {
+  const normalized = String(command || '').trim().toLowerCase();
+  if (/^claude\b/.test(normalized)) return 'claude';
+  if (/^codex\b/.test(normalized)) return 'codex';
+  if (/^kiro/.test(normalized)) return 'kiro';
+  if (/^copilot\b/.test(normalized)) return 'copilot';
+  if (/^devin\b/.test(normalized)) return 'devin';
+  return null;
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+function findNestedSessionFile(root: string, sessionId: string, maxDepth: number): string {
+  const scan = (dir: string, depth: number): string => {
+    if (depth > maxDepth) return '';
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return ''; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const nested = scan(full, depth + 1);
+        if (nested) return nested;
+      } else if (entry.name.includes(sessionId) && entry.name.endsWith('.jsonl')) {
+        return full;
+      }
+    }
+    return '';
+  };
+  return scan(root, 0);
+}
+
+function resolveSessionSourcePath(agent: DeletableAgent, sessionId: string, suppliedPath: string): string {
+  const roots: Partial<Record<DeletableAgent, string>> = {
+    claude: path.join(os.homedir(), '.claude', 'projects'),
+    codex: path.join(os.homedir(), '.codex', 'sessions'),
+    kiro: path.join(os.homedir(), '.kiro', 'sessions', 'cli'),
+  };
+  const root = roots[agent];
+  if (!root) return '';
+  const supplied = String(suppliedPath || '').trim();
+  if (supplied && isPathInside(root, supplied) && fs.existsSync(supplied)) return supplied;
+  if (!fs.existsSync(root)) return '';
+  if (agent === 'kiro') {
+    const direct = path.join(root, `${sessionId}.json`);
+    return fs.existsSync(direct) ? direct : '';
+  }
+  return findNestedSessionFile(root, sessionId, agent === 'codex' ? 5 : 2);
+}
+
 function deleteSessionFromStore(
   agent: string,
   id: string,
@@ -295,16 +366,22 @@ function deleteSessionFromStore(
 
     if (a === 'claude' || a === 'kiro') {
       // Single backing file (Claude: <uuid>.jsonl ; Kiro: <uuid>.json).
-      if (sourcePath && fs.existsSync(sourcePath)) {
-        fs.rmSync(sourcePath, { force: true });
+      const resolvedSource = resolveSessionSourcePath(a, sid, sourcePath);
+      if (resolvedSource) {
+        fs.rmSync(resolvedSource, { force: true });
+      }
+      if (a === 'kiro') {
+        const sessionDir = path.join(os.homedir(), '.kiro', 'sessions', 'cli', sid);
+        if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
       }
       return { ok: true };
     }
 
     if (a === 'codex') {
       // Remove the rollout file AND its line in ~/.codex/session_index.jsonl.
-      if (sourcePath && fs.existsSync(sourcePath)) {
-        fs.rmSync(sourcePath, { force: true });
+      const resolvedSource = resolveSessionSourcePath('codex', sid, sourcePath);
+      if (resolvedSource) {
+        fs.rmSync(resolvedSource, { force: true });
       }
       try {
         const indexPath = path.join(os.homedir(), '.codex', 'session_index.jsonl');
@@ -1145,7 +1222,7 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
     onExit: (id, exitedSession) => {
       // Save sessions that have a resume ID to the closed list
       const session = exitedSession || backendFor(connId).getSession(id);
-      if (session?.resumeId) {
+      if (session?.resumeId && !sessionUserDeleted.has(id)) {
         addClosedSession({
           title: session.title,
           cwd: session.cwd,
@@ -1161,6 +1238,7 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
         sendUserNotification(id, 'Session ended', title);
       }
       sessionUserClosed.delete(id);
+      sessionUserDeleted.delete(id);
       sessionOutputTail.delete(id);
       sessionLastInputAt.delete(id);
       sessionArmedForNotify.delete(id);
@@ -2492,6 +2570,36 @@ function registerIPC(): void {
     sessionUserClosed.delete(id);
   });
 
+  ipcMain.handle('pty:delete', async (_e, id: string): Promise<{ ok: boolean; terminated: boolean; error?: string }> => {
+    const backend = backendForEvent(_e);
+    const session = backend.getSession(id);
+    if (!session) return { ok: true, terminated: true };
+    const nativeSessionId = session.agentSessionId || session.resumeId || '';
+    const agent = deletableAgentFromCommand(session.presetCommand);
+    sessionUserDeleted.add(id);
+    sessionUserClosed.add(id);
+    try {
+      await backend.destroy(id);
+    } catch (error) {
+      sessionUserDeleted.delete(id);
+      sessionUserClosed.delete(id);
+      return { ok: false, terminated: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    sessionOutputTail.delete(id);
+    sessionLastInputAt.delete(id);
+    sessionArmedForNotify.delete(id);
+    sessionLastNotifyAt.delete(id);
+    if (!nativeSessionId || !agent || remoteBackendForEvent(_e)) {
+      return { ok: true, terminated: true };
+    }
+    const deleted = deleteSessionFromStore(agent, nativeSessionId, '');
+    if (deleted.ok) {
+      removeClosedSessionsByResumeId(nativeSessionId);
+      try { setSessionArchived(nativeSessionId, false); } catch { /* ignore */ }
+    }
+    return { ...deleted, terminated: true };
+  });
+
   // Rename terminal
   ipcMain.on('pty:rename', (_e, id: string, title: string) => {
     backendForEvent(_e).rename(id, title).catch((error) => {
@@ -2586,6 +2694,21 @@ function registerIPC(): void {
     }
     acpManager.destroy(id);
     acpOwners.delete(id);
+  });
+
+  ipcMain.handle('acp:delete', (_e, id: string): { ok: boolean; terminated: boolean; error?: string } => {
+    const session = acpManager.getSession(id);
+    const nativeSessionId = session?.sessionId || '';
+    const agent = deletableAgentFromCommand(session?.agentLabel || '');
+    acpManager.destroy(id);
+    acpOwners.delete(id);
+    if (!nativeSessionId || !agent) return { ok: true, terminated: true };
+    const deleted = deleteSessionFromStore(agent, nativeSessionId, '');
+    if (deleted.ok) {
+      removeClosedSessionsByResumeId(nativeSessionId);
+      try { setSessionArchived(nativeSessionId, false); } catch { /* ignore */ }
+    }
+    return { ...deleted, terminated: true };
   });
 
   // Load (resume) an existing ACP session by sessionId
@@ -3384,7 +3507,10 @@ function registerIPC(): void {
       const sourcePath = String(meta?.sourcePath || '');
       const result = deleteSessionFromStore(agent, id, sourcePath);
       // Once the source is gone, drop any stale archived flag for that id.
-      if (result.ok) { try { setSessionArchived(id, false); } catch { /* ignore */ } }
+      if (result.ok) {
+        try { setSessionArchived(id, false); } catch { /* ignore */ }
+        removeClosedSessionsByResumeId(id);
+      }
       return result;
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

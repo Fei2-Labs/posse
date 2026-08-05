@@ -2081,7 +2081,9 @@ html, body {
 
 .nav-session-time {
   flex-shrink: 0;
-  font-size: 9.5px;
+  font-size: 10px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-secondary, #888);
 }
 
@@ -2101,18 +2103,26 @@ html, body {
 .nav-session-context-chip.ctx-red    { color: #f87171; background: rgba(248, 113, 113, 0.15); }
 
 .nav-session-action {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary, #888);
-  font-size: 11px;
+  line-height: 1;
   cursor: pointer;
   display: none;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+}
+
+.nav-session-action svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  pointer-events: none;
 }
 
 .nav-session:hover .nav-session-action {

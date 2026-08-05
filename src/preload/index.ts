@@ -52,6 +52,8 @@ contextBridge.exposeInMainWorld('posse', {
   // Destroy terminal
   destroyPty: (id: string) =>
     ipcRenderer.send('pty:destroy', id),
+  deletePty: (id: string) =>
+    ipcRenderer.invoke('pty:delete', id) as Promise<{ ok: boolean; terminated: boolean; error?: string }>,
 
   // Rename terminal
   renamePty: (id: string, title: string) =>
@@ -331,6 +333,8 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('acp:info', id) as Promise<AcpSessionInfo | null>,
   acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) =>
     ipcRenderer.send('acp:destroy', id, closedSession),
+  acpDelete: (id: string) =>
+    ipcRenderer.invoke('acp:delete', id) as Promise<{ ok: boolean; terminated: boolean; error?: string }>,
   acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) =>
     ipcRenderer.invoke('acp:load', id, agentLabel, cwd, acpSessionId, providerEnv) as Promise<AcpSessionInfo>,
   acpDrainReplay: (id: string) =>

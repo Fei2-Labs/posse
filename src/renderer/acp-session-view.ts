@@ -1474,10 +1474,10 @@ export class AcpSessionView {
     this.messagesEl.querySelector('.acp-welcome')?.remove();
   }
 
-  destroy(): void {
+  destroy(notifyMain = true): void {
     this.destroyed = true;
     this.messagesResizeObserver.disconnect();
-    window.posse.acpDestroy(this.sessionId);
+    if (notifyMain) window.posse.acpDestroy(this.sessionId);
     this.container.remove();
   }
 }
