@@ -20,6 +20,7 @@ function loadAcpClientModule() {
 }
 
 const {
+  AcpReplayBuffer,
   getAcpCommand,
   isAcpEligible,
   preferredFullAccessConfig,
@@ -123,6 +124,21 @@ test('defaults permission fallbacks to always allow, then allow once', () => {
 test('applies default full access to both new and resumed ACP sessions', () => {
   const calls = acpClientSource.match(/await this\.applyDefaultFullAccess\(id, info\);/g) || [];
   assert.equal(calls.length, 2);
+});
+
+test('ACP replay buffer preserves update order across incremental drains', () => {
+  const buffer = new AcpReplayBuffer();
+  const first = { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'first' } };
+  const second = { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'second' } };
+  const third = { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'third' } };
+
+  buffer.capture(first);
+  buffer.capture(second);
+  assert.deepEqual(buffer.take(), [first, second]);
+  assert.deepEqual(buffer.take(), []);
+
+  buffer.capture(third);
+  assert.deepEqual(buffer.take(), [third]);
 });
 
 test('app shutdown destroys ACP processes without reporting user-initiated closes', () => {

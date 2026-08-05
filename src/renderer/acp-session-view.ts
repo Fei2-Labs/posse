@@ -52,6 +52,7 @@ export interface AcpSessionInfo {
   startupPhase?: 'loading-adapter' | 'spawning-adapter' | 'connecting' | 'initializing-protocol' | 'creating-session' | 'loading-session' | 'applying-config' | 'ready';
   startupTimingsMs?: Partial<Record<string, number>>;
   supportsPromptRollback?: boolean;
+  replayUpdates?: SessionUpdate[];
 }
 
 interface ToolCallState {
@@ -135,6 +136,8 @@ export class AcpSessionView {
   private errorEl: HTMLElement | null = null;
   private followsLatest = true;
   private messagesResizeObserver: ResizeObserver;
+  private isReplayingHistory = false;
+  private destroyed = false;
 
   constructor(
     sessionId: string,
@@ -642,6 +645,32 @@ export class AcpSessionView {
         break;
       default:
         console.log('[ACP] Unhandled update type:', update.sessionUpdate);
+    }
+  }
+
+  async replayUpdates(updates: SessionUpdate[], batchSize = 100): Promise<void> {
+    if (updates.length === 0 || this.destroyed) return;
+    this.isReplayingHistory = true;
+    try {
+      for (let index = 0; index < updates.length && !this.destroyed; index += 1) {
+        this.handleUpdate(updates[index]);
+        if ((index + 1) % batchSize === 0) {
+          await new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = (): void => {
+              if (settled) return;
+              settled = true;
+              window.clearTimeout(timeout);
+              resolve();
+            };
+            const timeout = window.setTimeout(finish, 50);
+            requestAnimationFrame(finish);
+          });
+        }
+      }
+    } finally {
+      this.isReplayingHistory = false;
+      if (!this.destroyed) this.scrollToBottom(true);
     }
   }
 
@@ -1348,6 +1377,7 @@ export class AcpSessionView {
   }
 
   private scrollToBottom(force = false): void {
+    if (this.isReplayingHistory) return;
     if (!force && !this.followsLatest) {
       this.updateJumpToBottomVisibility();
       return;
@@ -1445,6 +1475,7 @@ export class AcpSessionView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.messagesResizeObserver.disconnect();
     window.posse.acpDestroy(this.sessionId);
     this.container.remove();

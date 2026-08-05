@@ -14,6 +14,7 @@ type AcpSessionInfo = {
   startupPhase?: 'loading-adapter' | 'spawning-adapter' | 'connecting' | 'initializing-protocol' | 'creating-session' | 'loading-session' | 'applying-config' | 'ready';
   startupTimingsMs?: Partial<Record<string, number>>;
   supportsPromptRollback?: boolean;
+  replayUpdates?: SessionUpdate[];
 };
 
 type AcpPermissionRequest = {
@@ -328,6 +329,8 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.send('acp:destroy', id, closedSession),
   acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) =>
     ipcRenderer.invoke('acp:load', id, agentLabel, cwd, acpSessionId, providerEnv) as Promise<AcpSessionInfo>,
+  acpDrainReplay: (id: string) =>
+    ipcRenderer.invoke('acp:drain-replay', id) as Promise<SessionUpdate[]>,
   acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) =>
     ipcRenderer.invoke('acp:resolve-permission', id, toolCallId, outcome, optionId) as Promise<boolean>,
   onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) =>

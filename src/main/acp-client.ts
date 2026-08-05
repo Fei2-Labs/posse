@@ -170,6 +170,7 @@ export interface AcpSessionInfo {
   startupPhase?: AcpStartupPhase;
   startupTimingsMs?: Partial<Record<AcpStartupPhase, number>>;
   supportsPromptRollback?: boolean;
+  replayUpdates?: SessionUpdate[];
 }
 
 export type AcpStartupPhase =
@@ -202,16 +203,40 @@ type PendingPermission = {
   timeout: NodeJS.Timeout;
 };
 
+export class AcpReplayBuffer {
+  private updates: SessionUpdate[] = [];
+
+  capture(update: SessionUpdate): void {
+    this.updates.push(update);
+  }
+
+  take(): SessionUpdate[] {
+    const updates = this.updates;
+    this.updates = [];
+    return updates;
+  }
+}
+
 export class AcpManager {
   private sessions = new Map<string, {
     process: ChildProcess;
     context: ClientContext | null;
     info: AcpSessionInfo;
+    replayBuffer: AcpReplayBuffer | null;
   }>();
   private onUpdate: AcpUpdateHandler;
   private onStatus: AcpStatusHandler;
   private onPermissionRequest: AcpPermissionRequestHandler;
   private pendingPermissions = new Map<string, PendingPermission>();
+
+  private handleSessionUpdate(id: string, update: SessionUpdate): void {
+    const replayBuffer = this.sessions.get(id)?.replayBuffer;
+    if (replayBuffer) {
+      replayBuffer.capture(update);
+      return;
+    }
+    this.onUpdate(id, update);
+  }
 
   constructor(
     onUpdate: AcpUpdateHandler,
@@ -364,6 +389,7 @@ export class AcpManager {
       process: childProcess,
       context: null,
       info,
+      replayBuffer: null,
     });
     this.advanceStartup(id, startup, 'connecting', info);
 
@@ -384,7 +410,7 @@ export class AcpManager {
         return { outcome };
       })
       .onNotification(acp.methods.client.session.update, (ctx) => {
-        this.onUpdate(id, ctx.params.update);
+        this.handleSessionUpdate(id, ctx.params.update);
       });
 
     // Start the connection in the background — connectWith's callback runs
@@ -557,6 +583,14 @@ export class AcpManager {
     return this.sessions.get(id)?.info;
   }
 
+  drainReplay(id: string): SessionUpdate[] {
+    const entry = this.sessions.get(id);
+    if (!entry?.replayBuffer) return [];
+    const updates = entry.replayBuffer.take();
+    if (updates.length === 0) entry.replayBuffer = null;
+    return updates;
+  }
+
   /** Load an existing ACP session by sessionId (for resume). */
   async load(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
     // A retry reuses the renderer session id. Silently retire any previous adapter attempt so
@@ -604,10 +638,12 @@ export class AcpManager {
       supportsPromptRollback: false,
     };
 
+    const replayBuffer = new AcpReplayBuffer();
     this.sessions.set(id, {
       process: childProcess,
       context: null,
       info,
+      replayBuffer,
     });
     this.advanceStartup(id, startup, 'connecting', info);
 
@@ -624,7 +660,7 @@ export class AcpManager {
         return { outcome };
       })
       .onNotification(acp.methods.client.session.update, (ctx) => {
-        this.onUpdate(id, ctx.params.update);
+        this.handleSessionUpdate(id, ctx.params.update);
       });
 
     const sessionReady = new Promise<AcpSessionInfo>((resolve, reject) => {
@@ -675,18 +711,7 @@ export class AcpManager {
           clearTimeout(timeout);
           console.info(`[ACP ${id}] load timings`, info.startupTimingsMs);
 
-          this.onStatus(id, {
-            sessionId: info.sessionId,
-            configOptions: info.configOptions,
-            modes: info.modes,
-            promptCapabilities: info.promptCapabilities,
-            supportsPromptRollback: false,
-            startupPhase: info.startupPhase,
-            startupTimingsMs: info.startupTimingsMs,
-            status: 'idle',
-          });
-
-          resolve(info);
+          resolve({ ...info, replayUpdates: replayBuffer.take() });
 
           return new Promise<void>((resolveExit) => {
             childProcess.on('exit', () => {

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, globalShortcut, Tray, Menu } from 'electron';
+import type { WebContents } from 'electron';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { spawn } from 'child_process';
 import * as path from 'path';
@@ -700,17 +701,29 @@ function parseShellExports(content: string): Map<string, string> {
 
 let mainWindow: BrowserWindow | null = null;
 let embeddedBrowserManager: EmbeddedBrowserManager | null = null;
+const acpOwners = new Map<string, WebContents>();
+
+function sendToAcpOwner(channel: string, id: string, ...args: unknown[]): void {
+  const owner = acpOwners.get(id);
+  if (owner) {
+    if (!owner.isDestroyed()) owner.send(channel, id, ...args);
+    else acpOwners.delete(id);
+    return;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, id, ...args);
+}
 
 // ACP (Agent Client Protocol) manager — structured agent sessions for ACP-compatible agents
 const acpManager = new AcpManager(
   (id, update) => {
-    mainWindow?.webContents.send('acp:update', id, update);
+    sendToAcpOwner('acp:update', id, update);
   },
   (id, info) => {
-    mainWindow?.webContents.send('acp:status', id, info);
+    sendToAcpOwner('acp:status', id, info);
+    if (info.status === 'closed') acpOwners.delete(id);
   },
   (id, toolCallId, toolName, options) => {
-    mainWindow?.webContents.send('acp:permission', id, { toolCallId, toolName, options });
+    sendToAcpOwner('acp:permission', id, { toolCallId, toolName, options });
   },
 );
 
@@ -2522,7 +2535,13 @@ function registerIPC(): void {
     if (remoteBackendForEvent(_e)) {
       throw new Error('ACP sessions are not supported on remote connections');
     }
-    return acpManager.create(id, agentLabel, cwd, providerEnv);
+    acpOwners.set(id, _e.sender);
+    try {
+      return await acpManager.create(id, agentLabel, cwd, providerEnv);
+    } catch (error) {
+      if (acpOwners.get(id) === _e.sender) acpOwners.delete(id);
+      throw error;
+    }
   });
 
   // Send a prompt to an ACP session
@@ -2565,6 +2584,7 @@ function registerIPC(): void {
       }
     }
     acpManager.destroy(id);
+    acpOwners.delete(id);
   });
 
   // Load (resume) an existing ACP session by sessionId
@@ -2572,7 +2592,18 @@ function registerIPC(): void {
     if (remoteBackendForEvent(_e)) {
       throw new Error('ACP sessions are not supported on remote connections');
     }
-    return acpManager.load(id, agentLabel, cwd, acpSessionId, providerEnv);
+    acpOwners.set(id, _e.sender);
+    try {
+      return await acpManager.load(id, agentLabel, cwd, acpSessionId, providerEnv);
+    } catch (error) {
+      if (acpOwners.get(id) === _e.sender) acpOwners.delete(id);
+      throw error;
+    }
+  });
+
+  ipcMain.handle('acp:drain-replay', (_e, id: string) => {
+    if (acpOwners.get(id) !== _e.sender) return [];
+    return acpManager.drainReplay(id);
   });
 
   // Resolve a permission prompt from the renderer
@@ -3909,6 +3940,7 @@ app.on('before-quit', async () => {
   cloudflaredManager?.stopOwnedProcess();
   // App shutdown is not a user close: renderer restores these resumable ACP sessions next launch.
   acpManager.destroyAll(false);
+  acpOwners.clear();
   tray?.destroy();
   tray = null;
 });

@@ -309,3 +309,25 @@ test('ACP history replay renders user message chunks without duplicating live pr
   assert.match(view, /data:\$\{update\.content\.mimeType\};base64/);
   assert.doesNotMatch(view, /case 'user_message_chunk':\s*break;/);
 });
+
+test('ACP resume returns deterministic replay and drains it before entering live mode', () => {
+  const client = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src/preload/index.ts'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+  const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+
+  assert.match(client, /const replayBuffer = new AcpReplayBuffer\(\)/);
+  assert.match(client, /resolve\(\{ \.\.\.info, replayUpdates: replayBuffer\.take\(\) \}\)/);
+  assert.match(client, /if \(updates\.length === 0\) entry\.replayBuffer = null/);
+  assert.match(main, /const acpOwners = new Map<string, WebContents>\(\)/);
+  assert.match(main, /sendToAcpOwner\('acp:update', id, update\)/);
+  assert.match(main, /ipcMain\.handle\('acp:drain-replay'/);
+  assert.match(preload, /acpDrainReplay: \(id: string\)/);
+  assert.match(app, /await view\.replayUpdates\(info\.replayUpdates \|\| \[\]\)/);
+  assert.match(app, /const pending = await window\.posse\.acpDrainReplay\(acpId\)/);
+  assert.match(app, /if \(pending\.length === 0\) break/);
+  assert.match(view, /async replayUpdates\(updates: SessionUpdate\[], batchSize = 100\)/);
+  assert.match(view, /const timeout = window\.setTimeout\(finish, 50\)/);
+  assert.match(view, /requestAnimationFrame\(finish\)/);
+});

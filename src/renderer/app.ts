@@ -207,6 +207,7 @@ declare global {
       acpInfo: (id: string) => Promise<AcpSessionInfo | null>;
       acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) => void;
       acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
+      acpDrainReplay: (id: string) => Promise<SessionUpdate[]>;
       acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) => Promise<boolean>;
       onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) => void;
       onAcpStatus: (cb: (id: string, info: Partial<AcpSessionInfo>) => void) => void;
@@ -4959,8 +4960,16 @@ function mountLoadedAcpSessionView(
     acpContent.appendChild(view.getElement());
   }
   acpViews.set(acpId, view);
+  view.handleStatus({ status: 'initializing', startupPhase: 'loading-session' });
 
-  void window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then((info) => {
+  void window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then(async (info) => {
+    if (acpViews.get(acpId) !== view) return;
+    await view.replayUpdates(info.replayUpdates || []);
+    while (acpViews.get(acpId) === view) {
+      const pending = await window.posse.acpDrainReplay(acpId);
+      if (pending.length === 0) break;
+      await view.replayUpdates(pending);
+    }
     if (acpViews.get(acpId) === view) view.handleStatus(info);
   }).catch((error) => {
     if (acpViews.get(acpId) !== view) return;
