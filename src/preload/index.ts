@@ -81,7 +81,7 @@ contextBridge.exposeInMainWorld('posse', {
   // Move a file/folder to the OS trash (recoverable)
   fileTreeTrash: (p: string) => ipcRenderer.invoke('file-tree:trash', p),
   // Read file contents (for the right-side read-only preview panel)
-  readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath),
+  readFile: (filePath: string) => ipcRenderer.invoke('fs:read-file', filePath) as Promise<{ ok: boolean; content?: string; size?: number; ext?: string; mtimeMs?: number; error?: string }>,
   // Write file contents (for the in-app editable preview). `expectedMtimeMs` enables
   // optimistic-concurrency conflict detection (server returns { ok:false, error:'conflict', mtimeMs }).
   writeFile: (filePath: string, content: string, expectedMtimeMs?: number) =>

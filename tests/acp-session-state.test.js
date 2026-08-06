@@ -268,11 +268,15 @@ test('restored recovery sections reopen and close rendering yields a paint first
 
 test('app theme changes are explicit and structured sessions consume live tokens', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+  // Theme definitions live in the shared canonical list (src/shared/app-themes.ts) since the
+  // theme/editor unification — both the desktop renderer and the terminal client import it.
+  const themes = fs.readFileSync(path.join(__dirname, '..', 'src/shared/app-themes.ts'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
   assert.match(source, /document\.documentElement\.dataset\.appTheme = theme\.id/);
   assert.match(source, /new CustomEvent\('posse:theme-changed'/);
-  assert.match(source, /'--bg-tertiary': '#f6f8fa'/);
-  assert.match(source, /'--border-default': '#d0d7de'/);
+  assert.match(source, /import \{ APP_THEMES \} from '\.\.\/shared\/app-themes'/);
+  assert.match(themes, /'--bg-tertiary': '#f6f8fa'/);
+  assert.match(themes, /'--border-default': '#d0d7de'/);
   assert.match(styles, /\.acp-session-view \{[\s\S]*background: var\(--bg-primary/);
   assert.match(styles, /\.acp-session-view \{[\s\S]*color: var\(--text-primary/);
   assert.match(styles, /\.acp-msg-images img \{[\s\S]*background: var\(--bg-tertiary, var\(--bg-primary/);

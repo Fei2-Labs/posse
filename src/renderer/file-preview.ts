@@ -95,7 +95,7 @@ export interface FilePreviewOptions {
   // Persist the current editor text to disk. Resolves with { ok } so the
   // preview can clear the dirty flag and toast. The host wires this to the
   // file-write IPC; the preview never touches IPC directly.
-  onSave?: (path: string, content: string) => Promise<{ ok: boolean; error?: string }>;
+  onSave?: (path: string, content: string, expectedMtimeMs?: number) => Promise<{ ok: boolean; error?: string; mtimeMs?: number }>;
   // Brief, non-blocking notice (host's toast helper).
   onToast?: (message: string) => void;
 }
@@ -103,7 +103,7 @@ export interface FilePreviewOptions {
 export interface FilePreview {
   // Show text content (markdown/html/source picked by ext). `path` is the
   // absolute file path, threaded through so in-app edits know what to save.
-  show(content: string, ext: string, path?: string, htmlPreviewUrl?: string): void;
+  show(content: string, ext: string, path?: string, htmlPreviewUrl?: string, mtimeMs?: number): void;
   // Show an image from a base64 data URL (or any URL).
   showImage(dataUrl: string, ext: string): void;
   // Show a PDF from a bounded data URL.
@@ -211,10 +211,12 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
   editBtn.type = 'button';
   editBtn.className = 'fp-toggle-btn fp-edit-btn';
   editBtn.textContent = 'Edit';
+  editBtn.title = 'Edit this file in place';
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
   saveBtn.className = 'fp-toggle-btn fp-save-btn';
   saveBtn.textContent = 'Save';
+  saveBtn.title = 'Save changes (⌘S / Ctrl+S)';
   saveBtn.hidden = true;
   editGroup.appendChild(editBtn);
   editGroup.appendChild(saveBtn);
@@ -243,6 +245,7 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
   let curPath = '';
   let curHtmlPreviewUrl = '';
   let curMode: PreviewMode = 'source';
+  let curMtimeMs: number | undefined;
   let showingSource = false;
   // In-app editing state (source view only).
   let isEditing = false;
@@ -330,12 +333,17 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
     const text = view.state.doc.toString();
     let saved = false;
     try {
-      const res = await opts.onSave(curPath, text);
+      const res = await opts.onSave(curPath, text, curMtimeMs);
       if (res.ok) {
         curContent = text;
         isDirty = false;
         saved = true;
+        if (typeof res.mtimeMs === 'number') curMtimeMs = res.mtimeMs;
         opts.onToast?.('Saved');
+      } else if (res.error === 'conflict') {
+        // The file changed on disk after we loaded it. Refuse to clobber; the user can
+        // reload (losing their edits) or copy their text out before reloading.
+        opts.onToast?.('Save blocked: file changed on disk — reload to see the new version');
       } else {
         opts.onToast?.(`Save failed: ${res.error || 'unknown error'}`);
       }
@@ -632,11 +640,15 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
   }
 
   return {
-    show(content: string, ext: string, filePath = '', htmlPreviewUrl = '') {
+    show(content: string, ext: string, filePath = '', htmlPreviewUrl = '', mtimeMs?: number) {
       curContent = content;
       curExt = ext;
       curPath = filePath;
       curHtmlPreviewUrl = htmlPreviewUrl;
+      // Conflict-aware saves: remember the on-disk mtime at load; on save the main process
+      // rejects the write if the file changed underneath us (fs:write-file returns
+      // { ok:false, error:'conflict' }) instead of silently clobbering external edits.
+      curMtimeMs = typeof mtimeMs === 'number' ? mtimeMs : undefined;
       curMode = modeForExt(ext);
       if (curMode === 'html' && !curHtmlPreviewUrl) curMode = 'source';
       showingSource = false;

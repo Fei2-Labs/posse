@@ -129,35 +129,13 @@ function displayName(session: PtySession): string {
   return session.presetCommand.split(/\s+/)[0] || 'Shell';
 }
 
-type TermTheme = {
-  background: string; foreground: string; cursor: string; selectionBackground: string;
-};
-type MoodTheme = {
-  id: string; name: string;
-  chrome: { bg: string; panel: string; panel2: string; panel3: string; border: string; text: string; muted: string; accent: string; accent2: string; danger: string };
-  term: TermTheme;
-};
+// Themes come from the shared canonical list (src/shared/app-themes.ts) — the same source
+// the desktop renderer uses — so the terminal client and the app cannot drift.
+import { APP_THEMES, toTerminalClientTheme, type TerminalClientTheme } from '../shared/app-themes';
 
-const THEMES: MoodTheme[] = [
-  { id: 'midnight', name: 'Midnight',
-    chrome: { bg: '#111316', panel: '#181b20', panel2: '#20242b', panel3: '#282d35', border: '#343a44', text: '#e6e8eb', muted: '#8f98a3', accent: '#47d18c', accent2: '#65a8ff', danger: '#f66b6b' },
-    term: { background: '#111316', foreground: '#e6e8eb', cursor: '#47d18c', selectionBackground: '#334155' } },
-  { id: 'dracula', name: 'Dracula',
-    chrome: { bg: '#282a36', panel: '#21222c', panel2: '#343746', panel3: '#424458', border: '#44475a', text: '#f8f8f2', muted: '#9aa0b5', accent: '#bd93f9', accent2: '#8be9fd', danger: '#ff5555' },
-    term: { background: '#282a36', foreground: '#f8f8f2', cursor: '#f8f8f2', selectionBackground: '#44475a' } },
-  { id: 'nord', name: 'Nord',
-    chrome: { bg: '#2e3440', panel: '#2b303b', panel2: '#3b4252', panel3: '#434c5e', border: '#434c5e', text: '#eceff4', muted: '#a3adbf', accent: '#88c0d0', accent2: '#81a1c1', danger: '#bf616a' },
-    term: { background: '#2e3440', foreground: '#d8dee9', cursor: '#88c0d0', selectionBackground: '#434c5e' } },
-  { id: 'solarized', name: 'Solarized',
-    chrome: { bg: '#002b36', panel: '#073642', panel2: '#0a4250', panel3: '#0d4d5c', border: '#0f5562', text: '#eee8d5', muted: '#93a1a1', accent: '#859900', accent2: '#268bd2', danger: '#dc322f' },
-    term: { background: '#002b36', foreground: '#839496', cursor: '#93a1a1', selectionBackground: '#073642' } },
-  { id: 'monokai', name: 'Monokai',
-    chrome: { bg: '#1e1f1c', panel: '#272822', panel2: '#34352e', panel3: '#3e3f37', border: '#49483e', text: '#f8f8f2', muted: '#a6a28c', accent: '#a6e22e', accent2: '#66d9ef', danger: '#f92672' },
-    term: { background: '#272822', foreground: '#f8f8f2', cursor: '#f8f8f2', selectionBackground: '#49483e' } },
-  { id: 'daylight', name: 'Daylight',
-    chrome: { bg: '#ffffff', panel: '#f5f6f8', panel2: '#eceef1', panel3: '#e1e4e8', border: '#d0d7de', text: '#1f2328', muted: '#6e7781', accent: '#1a7f37', accent2: '#0969da', danger: '#cf222e' },
-    term: { background: '#ffffff', foreground: '#1f2328', cursor: '#1a7f37', selectionBackground: '#b6e3ff' } },
-];
+type MoodTheme = TerminalClientTheme;
+
+const THEMES: MoodTheme[] = APP_THEMES.map(toTerminalClientTheme);
 
 const THEME_STORAGE_KEY = 'posse_terminal_theme';
 let activeTheme: MoodTheme = THEMES[0];
