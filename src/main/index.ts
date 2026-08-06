@@ -27,7 +27,9 @@ import {
   registerProjectPreviewRoot,
   revokeProjectPreviewRoots,
   createProjectPreviewUrl,
+  isRegisteredProjectRoot,
 } from './project-preview';
+import { gitStatus, gitDiff, gitDiffUntracked } from './git-inspector';
 import {
   EmbeddedBrowserManager,
   type EmbeddedBrowserBounds,
@@ -2956,6 +2958,32 @@ function registerIPC(): void {
   ipcMain.handle('inspector:project-preview-url', (event, token: string, relativePath: string) => {
     if (remoteBackendForEvent(event)) return { ok: false, error: 'remote-unsupported' };
     return createProjectPreviewUrl(event.sender.id, token, relativePath);
+  });
+
+  // ========== Read-only Git inspector (workspace UX Phase 4) ==========
+  // Local-only for now: remote projects report remote-unsupported until a remote git
+  // gateway exists. Authorization reuses the inspector's root-token boundary: the renderer
+  // must register the project root (inspector:register-project-root) before git calls, and
+  // the root must be registered for the CALLING webContents — not an arbitrary-fs oracle.
+  const gitRootAllowed = (event: Electron.IpcMainInvokeEvent, rootPath: string): boolean => {
+    const abs = String(rootPath || '').trim();
+    if (!abs) return false;
+    return isRegisteredProjectRoot(event.sender.id, abs);
+  };
+
+  ipcMain.handle('inspector:git-status', async (event, rootPath: string) => {
+    if (remoteBackendForEvent(event)) return { ok: false, error: 'remote-unsupported' };
+    if (!gitRootAllowed(event, rootPath)) return { ok: false, error: 'path-not-allowed' };
+    return gitStatus(rootPath);
+  });
+
+  ipcMain.handle('inspector:git-diff', async (event, rootPath: string, relPath: string, staged: boolean, untracked: boolean) => {
+    if (remoteBackendForEvent(event)) return { ok: false, error: 'remote-unsupported' };
+    if (!gitRootAllowed(event, rootPath)) return { ok: false, error: 'path-not-allowed' };
+    const rel = String(relPath || '').replace(/\\/g, '/');
+    if (!rel || rel.startsWith('/') || rel.includes('..')) return { ok: false, error: 'invalid-path' };
+    if (untracked) return gitDiffUntracked(rootPath, rel);
+    return gitDiff(rootPath, rel, !!staged);
   });
 
   // Move a file/folder to the OS trash (recoverable). Used by the file-tree context menu.

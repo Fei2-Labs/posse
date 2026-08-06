@@ -245,9 +245,12 @@
         </div>
       </section>
 
-      <section id="inspector-git-panel" class="inspector-tab-panel inspector-empty-panel" role="tabpanel" aria-labelledby="inspector-git-tab" hidden>
-        <strong>Git inspector is coming next</strong>
-        <span>Status and read-only diffs will appear here. Use the terminal for Git changes.</span>
+      <section id="inspector-git-panel" class="inspector-tab-panel" role="tabpanel" aria-labelledby="inspector-git-tab" hidden>
+        <div id="inspector-git-header" class="inspector-git-header">
+          <span id="inspector-git-branch" class="inspector-git-branch"></span>
+          <button id="inspector-git-refresh" class="inspector-git-refresh" type="button" title="Refresh git status" aria-label="Refresh git status">⟳</button>
+        </div>
+        <div id="inspector-git-body" class="inspector-git-body"></div>
       </section>
     </aside>
 

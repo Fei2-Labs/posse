@@ -137,3 +137,20 @@ export function revokeProjectPreviewRoots(ownerWebContentsId: number): void {
     if (project.ownerWebContentsId === ownerWebContentsId) projectsByToken.delete(token);
   }
 }
+
+/**
+ * True when rootPath (canonicalized) is registered as a preview root owned by this
+ * webContents. Used by the read-only Git inspector to share the inspector's authorization
+ * boundary instead of inventing a second one.
+ */
+export function isRegisteredProjectRoot(ownerWebContentsId: number, rootPath: string): boolean {
+  try {
+    const canonical = fs.realpathSync(rootPath);
+    for (const project of projectsByToken.values()) {
+      if (project.ownerWebContentsId === ownerWebContentsId && project.rootPath === canonical) return true;
+    }
+  } catch {
+    /* unresolvable path — not registered */
+  }
+  return false;
+}

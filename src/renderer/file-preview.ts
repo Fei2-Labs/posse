@@ -24,8 +24,9 @@ const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', '
 const MERMAID_EXTS = new Set(['mmd', 'mermaid']);
 const CSV_EXTS = new Set(['csv', 'tsv']);
 const PDF_EXTS = new Set(['pdf']);
+const NOTEBOOK_EXTS = new Set(['ipynb']);
 
-export type PreviewMode = 'markdown' | 'html' | 'image' | 'svg' | 'mermaid' | 'csv' | 'pdf' | 'source';
+export type PreviewMode = 'markdown' | 'html' | 'image' | 'svg' | 'mermaid' | 'csv' | 'pdf' | 'notebook' | 'source';
 
 // Choose the preview mode for a given file extension.
 export function modeForExt(ext: string): PreviewMode {
@@ -37,13 +38,14 @@ export function modeForExt(ext: string): PreviewMode {
   if (MERMAID_EXTS.has(e)) return 'mermaid';
   if (CSV_EXTS.has(e)) return 'csv';
   if (PDF_EXTS.has(e)) return 'pdf';
+  if (NOTEBOOK_EXTS.has(e)) return 'notebook';
   return 'source';
 }
 
 // Whether a file extension has a dedicated rich preview (used by terminal link routing).
 export function isPreviewableExt(ext: string): boolean {
   const e = ext.toLowerCase();
-  return MARKDOWN_EXTS.has(e) || HTML_EXTS.has(e) || IMAGE_EXTS.has(e) || MERMAID_EXTS.has(e) || CSV_EXTS.has(e) || PDF_EXTS.has(e);
+  return MARKDOWN_EXTS.has(e) || HTML_EXTS.has(e) || IMAGE_EXTS.has(e) || MERMAID_EXTS.has(e) || CSV_EXTS.has(e) || PDF_EXTS.has(e) || NOTEBOOK_EXTS.has(e);
 }
 
 // MIME type for image data URLs.
@@ -186,6 +188,10 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
   pdfHost.className = 'fp-pdf';
   pdfHost.hidden = true;
 
+  const notebookHost = document.createElement('div');
+  notebookHost.className = 'fp-notebook';
+  notebookHost.hidden = true;
+
   // --- Image container ---
   const imgHost = document.createElement('div');
   imgHost.className = 'fp-image';
@@ -227,6 +233,7 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
   parent.appendChild(csvHost);
   parent.appendChild(svgHost);
   parent.appendChild(pdfHost);
+  parent.appendChild(notebookHost);
   parent.appendChild(imgHost);
   parent.appendChild(cmHost);
 
@@ -265,10 +272,11 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
     csvHost.hidden = !(curMode === 'csv' && renderedVisible);
     svgHost.hidden = !(curMode === 'svg' && renderedVisible);
     pdfHost.hidden = !(curMode === 'pdf' && renderedVisible);
+    notebookHost.hidden = !(curMode === 'notebook' && renderedVisible);
     imgHost.hidden = curMode !== 'image';
     // Toolbar shows for md/html (rendered toggle) and any editable source view.
-    toggleBar.hidden = !(curMode === 'markdown' || curMode === 'html' || curMode === 'svg' || curMode === 'mermaid' || curMode === 'csv' || curMode === 'pdf' || editAvailable());
-    toggleBtn.hidden = !(curMode === 'markdown' || curMode === 'html' || curMode === 'svg' || curMode === 'mermaid' || curMode === 'csv' || curMode === 'pdf');
+    toggleBar.hidden = !(curMode === 'markdown' || curMode === 'html' || curMode === 'svg' || curMode === 'mermaid' || curMode === 'csv' || curMode === 'pdf' || curMode === 'notebook' || editAvailable());
+    toggleBtn.hidden = !(curMode === 'markdown' || curMode === 'html' || curMode === 'svg' || curMode === 'mermaid' || curMode === 'csv' || curMode === 'pdf' || curMode === 'notebook');
     toggleBtn.textContent = showingSource ? 'Rendered' : 'Source';
     editGroup.hidden = !editAvailable();
     updateEditUi();
@@ -532,6 +540,61 @@ export function createFilePreview(parent: HTMLElement, opts: FilePreviewOptions 
     } else if (curMode === 'csv') {
       const requestId = ++renderRequestId;
       void renderCsv(requestId);
+    } else if (curMode === 'notebook') {
+      renderNotebook();
+    }
+  }
+
+  // Read-only Jupyter notebook renderer: markdown cells rendered (marked + DOMPurify, same
+  // pipeline as markdown mode), code cells as source blocks, plain-text outputs shown.
+  // Execution is out of scope; images/stream outputs beyond text are summarized as labels.
+  function renderNotebook(): void {
+    if (!hasBoundedContent(10 * 1024 * 1024)) {
+      renderPreviewError(notebookHost, 'Notebook previews are limited to 10 MB. Open Source or use an external viewer.');
+      return;
+    }
+    type NbCell = { cell_type?: string; source?: string | string[]; outputs?: Array<{ output_type?: string; text?: string | string[]; data?: Record<string, unknown> }> };
+    let cells: NbCell[];
+    try {
+      const nb = JSON.parse(curContent) as { cells?: NbCell[] };
+      if (!Array.isArray(nb.cells)) throw new Error('no cells');
+      cells = nb.cells;
+    } catch {
+      renderPreviewError(notebookHost, 'Not a valid notebook JSON. Open Source to inspect the raw file.');
+      return;
+    }
+    notebookHost.replaceChildren();
+    const src = (v: string | string[] | undefined): string => Array.isArray(v) ? v.join('') : (v || '');
+    for (const cell of cells) {
+      const cellEl = document.createElement('div');
+      cellEl.className = `fp-nb-cell fp-nb-${cell.cell_type === 'markdown' ? 'markdown' : cell.cell_type === 'code' ? 'code' : 'raw'}`;
+      if (cell.cell_type === 'markdown') {
+        const md = document.createElement('div');
+        md.className = 'fp-nb-markdown markdown-body';
+        md.innerHTML = DOMPurify.sanitize(marked.parse(src(cell.source), { async: false }) as string);
+        cellEl.appendChild(md);
+      } else if (cell.cell_type === 'code') {
+        const input = document.createElement('pre');
+        input.className = 'fp-nb-input';
+        input.textContent = src(cell.source);
+        cellEl.appendChild(input);
+        for (const out of cell.outputs || []) {
+          const text = src(out.text) || (typeof out.data?.['text/plain'] === 'string' || Array.isArray(out.data?.['text/plain']) ? src(out.data?.['text/plain'] as string | string[]) : '');
+          const outEl = document.createElement('pre');
+          outEl.className = 'fp-nb-output';
+          outEl.textContent = text || (out.output_type === 'error' ? '[error output]' : `[${out.output_type || 'output'} — open in Jupyter to view]`);
+          cellEl.appendChild(outEl);
+        }
+      } else {
+        const raw = document.createElement('pre');
+        raw.className = 'fp-nb-output';
+        raw.textContent = src(cell.source);
+        cellEl.appendChild(raw);
+      }
+      notebookHost.appendChild(cellEl);
+    }
+    if (cells.length === 0) {
+      renderPreviewError(notebookHost, 'This notebook has no cells.');
     }
   }
 

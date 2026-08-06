@@ -92,6 +92,14 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('inspector:register-project-root', rootPath) as Promise<{ ok: boolean; token?: string; rootName?: string; error?: string }>,
   inspectorProjectPreviewUrl: (token: string, relativePath: string) =>
     ipcRenderer.invoke('inspector:project-preview-url', token, relativePath) as Promise<{ ok: boolean; url?: string; error?: string }>,
+  inspectorGitStatus: (rootPath: string) =>
+    ipcRenderer.invoke('inspector:git-status', rootPath) as Promise<{
+      ok: boolean; error?: string; notARepo?: boolean;
+      branch?: string; ahead?: number; behind?: number;
+      files?: Array<{ path: string; group: 'staged' | 'unstaged' | 'untracked' | 'conflicted'; code: string; oldPath?: string }>;
+    }>,
+  inspectorGitDiff: (rootPath: string, relPath: string, staged: boolean, untracked: boolean) =>
+    ipcRenderer.invoke('inspector:git-diff', rootPath, relPath, staged, untracked) as Promise<{ ok: boolean; error?: string; diff?: string; truncated?: boolean }>,
   browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) =>
     ipcRenderer.send('browser:set-bounds', bounds),
   browserGetState: () => ipcRenderer.invoke('browser:get-state') as Promise<{

@@ -107,6 +107,12 @@ declare global {
       readFileBase64: (filePath: string) => Promise<{ ok: boolean; dataUrl?: string; size?: number; ext?: string; error?: string }>;
       inspectorRegisterProjectRoot: (rootPath: string) => Promise<{ ok: boolean; token?: string; rootName?: string; error?: string }>;
       inspectorProjectPreviewUrl: (token: string, relativePath: string) => Promise<{ ok: boolean; url?: string; error?: string }>;
+      inspectorGitStatus: (rootPath: string) => Promise<{
+        ok: boolean; error?: string; notARepo?: boolean;
+        branch?: string; ahead?: number; behind?: number;
+        files?: Array<{ path: string; group: 'staged' | 'unstaged' | 'untracked' | 'conflicted'; code: string; oldPath?: string }>;
+      }>;
+      inspectorGitDiff: (rootPath: string, relPath: string, staged: boolean, untracked: boolean) => Promise<{ ok: boolean; error?: string; diff?: string; truncated?: boolean }>;
       browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
       browserGetState: () => Promise<EmbeddedBrowserState | null>;
       browserNavigate: (input: string) => Promise<{ ok: boolean; error?: string }>;
@@ -1795,6 +1801,163 @@ if (savedInspectorTab === 'files' || savedInspectorTab === 'preview' || savedIns
   setInspectorTab(savedInspectorTab, false);
 }
 
+// ========== Inspector: read-only Git tab (workspace UX Phase 4) ==========
+// Status + expandable diffs for the CURRENT project root (currentCwd). Read-only by design:
+// no stage/commit/branch controls — Git mutation stays in the terminal.
+const gitBranchEl = document.getElementById('inspector-git-branch')!;
+const gitBodyEl = document.getElementById('inspector-git-body')!;
+const gitRefreshBtn = document.getElementById('inspector-git-refresh') as HTMLButtonElement | null;
+
+type GitStatusFile = { path: string; group: 'staged' | 'unstaged' | 'untracked' | 'conflicted'; code: string; oldPath?: string };
+
+function gitInspectorEmpty(title: string, detail: string): void {
+  gitBranchEl.textContent = '';
+  gitBodyEl.innerHTML = '';
+  const empty = document.createElement('div');
+  empty.className = 'inspector-git-empty';
+  const strong = document.createElement('strong');
+  strong.textContent = title;
+  const span = document.createElement('span');
+  span.textContent = detail;
+  empty.appendChild(strong);
+  empty.appendChild(span);
+  gitBodyEl.appendChild(empty);
+}
+
+/** Render a unified diff with minimal +/-/@@ coloring. Diff text comes from git (trusted-ish) — always textContent into spans, never innerHTML. */
+function buildDiffElement(diff: string, truncated: boolean): HTMLElement {
+  const pre = document.createElement('pre');
+  pre.className = 'inspector-git-diff';
+  for (const line of diff.split('\n')) {
+    const row = document.createElement('span');
+    row.className =
+      line.startsWith('+') && !line.startsWith('+++') ? 'diff-line diff-add' :
+      line.startsWith('-') && !line.startsWith('---') ? 'diff-line diff-del' :
+      line.startsWith('@@') ? 'diff-line diff-hunk' :
+      'diff-line';
+    row.textContent = line;
+    pre.appendChild(row);
+  }
+  if (truncated) {
+    const note = document.createElement('span');
+    note.className = 'diff-line diff-truncated';
+    note.textContent = '… diff truncated (200KB cap) — view in terminal';
+    pre.appendChild(note);
+  }
+  return pre;
+}
+
+async function renderGitInspector(): Promise<void> {
+  if (activeConnectionIsRemote) {
+    gitInspectorEmpty('Git inspector is local-only', 'Remote projects are not supported yet. Use the terminal for git on remote hosts.');
+    return;
+  }
+  const root = getActiveSessionCwd() || currentCwd;
+  if (!root) {
+    gitInspectorEmpty('No project selected', 'Open a project to see its git status.');
+    return;
+  }
+  gitBranchEl.textContent = '…';
+  gitBodyEl.innerHTML = '';
+  const loading = document.createElement('div');
+  loading.className = 'inspector-git-empty';
+  loading.textContent = 'Loading git status…';
+  gitBodyEl.appendChild(loading);
+
+  // Register the root first — the main process authorizes git IPC against the inspector's
+  // root-token boundary (same token system as the HTML preview).
+  const reg = await window.posse.inspectorRegisterProjectRoot(root);
+  if (!reg.ok) {
+    gitInspectorEmpty('Project unavailable', reg.error || 'Could not register project root.');
+    return;
+  }
+  const status = await window.posse.inspectorGitStatus(root);
+  if (!status.ok) {
+    if (status.notARepo) {
+      gitInspectorEmpty('Not a git repository', 'This project has no .git — nothing to inspect.');
+    } else {
+      gitInspectorEmpty('Git status failed', status.error || 'unknown error');
+    }
+    return;
+  }
+
+  const aheadBehind = (status.ahead || status.behind)
+    ? ` ↑${status.ahead || 0} ↓${status.behind || 0}`
+    : '';
+  gitBranchEl.textContent = `${status.branch || '(detached)'}${aheadBehind}`;
+  gitBodyEl.innerHTML = '';
+
+  const files = status.files || [];
+  if (files.length === 0) {
+    gitInspectorEmpty('Clean working tree', 'No staged, unstaged, or untracked changes.');
+    return;
+  }
+
+  const GROUPS: Array<{ key: GitStatusFile['group']; label: string }> = [
+    { key: 'conflicted', label: 'Conflicted' },
+    { key: 'staged', label: 'Staged' },
+    { key: 'unstaged', label: 'Unstaged' },
+    { key: 'untracked', label: 'Untracked' },
+  ];
+  for (const group of GROUPS) {
+    const groupFiles = files.filter((f) => f.group === group.key);
+    if (groupFiles.length === 0) continue;
+    const groupEl = document.createElement('details');
+    groupEl.className = 'inspector-git-group';
+    groupEl.open = group.key === 'conflicted' || group.key === 'unstaged';
+    const summary = document.createElement('summary');
+    summary.className = 'inspector-git-group-summary';
+    summary.textContent = `${group.label} (${groupFiles.length})`;
+    groupEl.appendChild(summary);
+    for (const file of groupFiles) {
+      const row = document.createElement('div');
+      row.className = 'inspector-git-file';
+      const codeEl = document.createElement('span');
+      codeEl.className = 'inspector-git-file-code';
+      codeEl.textContent = file.code;
+      const pathEl = document.createElement('span');
+      pathEl.className = 'inspector-git-file-path';
+      pathEl.textContent = file.oldPath ? `${file.oldPath} → ${file.path}` : file.path;
+      row.appendChild(codeEl);
+      row.appendChild(pathEl);
+      groupEl.appendChild(row);
+      // Expandable read-only diff under the row (lazy: fetched on first expand).
+      const diffHost = document.createElement('div');
+      diffHost.className = 'inspector-git-diff-host';
+      diffHost.hidden = true;
+      let diffLoaded = false;
+      row.addEventListener('click', async () => {
+        diffHost.hidden = !diffHost.hidden;
+        if (diffHost.hidden || diffLoaded) return;
+        diffLoaded = true;
+        diffHost.textContent = 'Loading diff…';
+        const res = await window.posse.inspectorGitDiff(root, file.path, group.key === 'staged', group.key === 'untracked');
+        diffHost.innerHTML = '';
+        if (!res.ok) {
+          diffHost.textContent = res.error || 'diff failed';
+          return;
+        }
+        if (!res.diff) {
+          diffHost.textContent = '(no diff)';
+          return;
+        }
+        diffHost.appendChild(buildDiffElement(res.diff, !!res.truncated));
+      });
+      groupEl.appendChild(diffHost);
+    }
+    gitBodyEl.appendChild(groupEl);
+  }
+}
+
+// Refresh on tab select and via the refresh button. Re-render when the project changes while
+// the tab is visible (cwd switches land via refreshGitInspectorIfActive from project clicks).
+function refreshGitInspectorIfActive(): void {
+  if (activeInspectorTab === 'git') void renderGitInspector();
+}
+gitRefreshBtn?.addEventListener('click', () => void renderGitInspector());
+const gitTabBtn = document.getElementById('inspector-git-tab');
+gitTabBtn?.addEventListener('click', () => void renderGitInspector());
+
 const filePreviewName = document.getElementById('file-preview-name')!;
 const filePreviewMeta = document.getElementById('file-preview-meta')!;
 const filePreviewBody = document.getElementById('file-preview-body')!;
@@ -3247,6 +3410,8 @@ async function renderFileTree(focusPath?: string): Promise<void> {
     fileTreeExpandedDirs.clear();
     fileTreeExpandedDirs.add(rootCwd);
     void loadClaudeHistory(rootCwd);
+    // Project/session switched: refresh the Git tab too when it's the visible inspector tab.
+    refreshGitInspectorIfActive();
   }
 
   fileTreeList.innerHTML = '';
