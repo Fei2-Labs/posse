@@ -65,6 +65,16 @@ Posse is single-instance on macOS; launching it again while it is already runnin
 
 The desktop sidebar footer shows the running app version so you can confirm the newest build at a glance.
 
+## Relationship to Warp
+
+Posse is not a Warp fork, client, or port. `warpdotdev/warp` (public Rust workspace) is tracked as a **reference remote** only:
+
+```bash
+git fetch warp-reference   # read-only inspection; push is DISABLED
+```
+
+Hard rule for agents and contributors: never run `git merge --allow-unrelated-histories` (or any merge/cherry-pick) against `warp-reference`. The repos share no Git history and different stacks; merging would be destructive and would import AGPL-licensed code. Alignment happens incrementally through small, Posse-native changes informed by Warp's public architecture concepts — never by importing Warp source, assets, or branding. Posse is not "Warp-compatible" and makes no interoperability claim.
+
 ## Build
 
 ```bash
