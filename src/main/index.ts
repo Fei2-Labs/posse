@@ -167,6 +167,63 @@ function saveClosedSessions(sessions: ClosedSession[]): ClosedSession[] {
   return filtered;
 }
 
+// ========== History session title overrides ==========
+// Copilot/Kiro (and any agent whose store has no writable title format) cannot persist a
+// rename into their own session files. To keep those renames from reverting on the next
+// projects:list reload, Posse keeps a local override map keyed by `<agent>:<id>` (the same
+// id/renderer routing pair used elsewhere). buildProjectsList merges this map onto the
+// discovered sessions before returning them, so the sidebar reflects the rename durably.
+const HISTORY_TITLES_FILE = path.join(app.getPath('userData'), 'history-titles.json');
+const MAX_HISTORY_TITLE_OVERRIDES = 500;
+
+type HistoryTitleOverride = { key: string; title: string; mtimeMs: number };
+
+function loadHistoryTitleOverrides(): Map<string, HistoryTitleOverride> {
+  try {
+    const raw = fs.readFileSync(HISTORY_TITLES_FILE, 'utf-8');
+    const list: HistoryTitleOverride[] = JSON.parse(raw);
+    const map = new Map<string, HistoryTitleOverride>();
+    for (const o of list) if (o?.key && typeof o.title === 'string') map.set(o.key, o);
+    return map;
+  } catch { return new Map(); }
+}
+
+function saveHistoryTitleOverrides(map: Map<string, HistoryTitleOverride>): void {
+  const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+  const list = Array.from(map.values())
+    .filter(o => o.mtimeMs > cutoff)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, MAX_HISTORY_TITLE_OVERRIDES);
+  fs.writeFileSync(HISTORY_TITLES_FILE, JSON.stringify(list, null, 2));
+}
+
+// Record (or clear) a local title override for an agent/session pair. `title` of '' removes
+// the override so the agent store's own title shows through again. Returns the resulting map.
+function setHistoryTitleOverride(agent: string, id: string, title: string): Map<string, HistoryTitleOverride> {
+  const key = `${String(agent || '').trim().toLowerCase()}:${String(id || '').trim()}`;
+  if (!key || key.endsWith(':')) return loadHistoryTitleOverrides();
+  const map = loadHistoryTitleOverrides();
+  if (title) {
+    map.set(key, { key, title: String(title).slice(0, 200), mtimeMs: Date.now() });
+  } else {
+    map.delete(key);
+  }
+  saveHistoryTitleOverrides(map);
+  return map;
+}
+
+// Apply any local title overrides onto discovered sessions. Mutates each session in place:
+// when an override exists it wins over the agent-store title.
+function applyHistoryTitleOverrides(sessions: ProjectSession[]): void {
+  if (!sessions.length) return;
+  const map = loadHistoryTitleOverrides();
+  if (!map.size) return;
+  for (const s of sessions) {
+    const o = map.get(`${s.agent}:${s.id}`);
+    if (o) s.title = o.title;
+  }
+}
+
 function addClosedSession(session: { title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string }): void {
   const list = loadClosedSessions().filter(existing => !session.resumeId
     || existing.resumeId !== session.resumeId
@@ -2276,6 +2333,9 @@ async function buildProjectsList(
     for (const [agent, sessions] of b.agentMap) {
       sessions.sort((a, b2) => b2.mtimeMs - a.mtimeMs);
       const capped = sessions.slice(0, PROJECTS_MAX_SESSIONS_PER_AGENT);
+      // Merge Posse-local title overrides (Copilot/Kiro etc.) so durable renames win
+      // over the agent store's own (often unwritable) title.
+      applyHistoryTitleOverrides(capped);
       if (capped.length > 0) lastActiveMs = Math.max(lastActiveMs, capped[0].mtimeMs);
       agents.push({ agent, sessions: capped });
     }
@@ -3548,6 +3608,9 @@ function registerIPC(): void {
       if (result.ok) {
         try { setSessionArchived(id, false); } catch { /* ignore */ }
         removeClosedSessionsByResumeId(id);
+        // Also drop any Posse-local history-title override so it cannot re-title a
+        // different session that later reuses the same id.
+        try { setHistoryTitleOverride(agent, id, ''); } catch { /* ignore */ }
       }
       return result;
     } catch (e) {
@@ -3559,8 +3622,10 @@ function registerIPC(): void {
   // file, mirroring closed-sessions:rename. Resolves the agent kind from the history row's
   // storeAgent/agent and writes via the shared title writers using the on-disk session id
   // (uuid for Claude / thread id for Codex). Best-effort: never throws across IPC.
-  // Copilot/Kiro have no writable session-title format, so propagation is a deliberate no-op for
-  // them (the renderer still updates Posse's own displayed title so the sidebar reflects the rename).
+  // Copilot/Kiro have no writable session-title format in their own stores, so for those (and any
+  // unknown agent) the rename is recorded in Posse's local history-title override map instead —
+  // buildProjectsList merges that map onto discovered sessions so the rename survives reloads
+  // (the renderer also updates the displayed title immediately).
   ipcMain.handle('history-sessions:rename', (_e, meta: { id: string; agent: string; title: string }) => {
     try {
       const id = String(meta?.id || '').trim();
@@ -3573,8 +3638,10 @@ function registerIPC(): void {
         writeCodexSessionTitle(id, title);
       } else if (agent === 'devin') {
         writeDevinSessionTitle(id, title);
+      } else {
+        // copilot/kiro/unknown: no agent-store title format to write — persist Posse-local override.
+        setHistoryTitleOverride(agent, id, title);
       }
-      // else: copilot/kiro/unknown — no writable title format, skip (no-op, not an error).
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
