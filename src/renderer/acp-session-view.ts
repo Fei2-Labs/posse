@@ -71,6 +71,17 @@ interface ComposerImage {
   name: string;
 }
 
+// A non-image document dropped onto the composer. ACP has no native file/resource content
+// block transport, so on submit these are appended to the prompt text as absolute paths
+// (the agent reads them as file references). `error` marks a chip that could not be attached
+// (directory, oversized, unreadable) so it stays visible but is excluded from the payload.
+interface ComposerFile {
+  path: string;
+  name: string;
+  size: number;
+  error?: string;
+}
+
 interface QueuedPrompt {
   blocks: ContentBlock[];
   text: string;
@@ -100,6 +111,7 @@ export class AcpSessionView {
   private inputEl: HTMLTextAreaElement;
   private slashCommandsEl: HTMLElement;
   private attachmentsEl: HTMLElement;
+  private composerEl: HTMLElement;
   private imageInputEl: HTMLInputElement;
   private queueEl: HTMLElement;
   private sendBtn: HTMLButtonElement;
@@ -127,6 +139,7 @@ export class AcpSessionView {
   private filteredCommands: AvailableCommand[] = [];
   private activeCommandIndex = 0;
   private composerImages: ComposerImage[] = [];
+  private composerFiles: ComposerFile[] = [];
   private promptQueue = new AcpPromptQueue<QueuedPrompt>();
   private contextUsage: ContextUsageState | undefined;
   private planEl: HTMLElement | null = null;
@@ -223,6 +236,7 @@ export class AcpSessionView {
     this.inputEl = this.requiredElement(`#acp-input-${sessionId}`);
     this.slashCommandsEl = this.requiredElement(`#acp-slash-commands-${sessionId}`);
     this.attachmentsEl = this.requiredElement(`#acp-attachments-${sessionId}`);
+    this.composerEl = this.requiredElement(`.acp-composer`);
     this.imageInputEl = this.requiredElement(`#acp-image-input-${sessionId}`);
     this.queueEl = this.requiredElement(`#acp-queue-${sessionId}`);
     this.sendBtn = this.requiredElement(`#acp-send-${sessionId}`);
@@ -295,6 +309,12 @@ export class AcpSessionView {
       if (file) this.addComposerImage(file);
       this.imageInputEl.value = '';
     });
+
+    // Drag-and-drop documents/files onto the composer (#107). Images route to the existing
+    // image-attach path; other files become path-reference chips appended to the prompt on
+    // submit. Directories are rejected via webkitGetAsEntry. preventDefault on dragover also
+    // stops Electron from navigating the window to the dropped file.
+    this.setupComposerDrop();
 
     this.inputEl.addEventListener('keydown', (e) => {
       if (this.handleSlashCommandKeydown(e)) return;
@@ -464,7 +484,8 @@ export class AcpSessionView {
 
   private renderAttachments(): void {
     this.attachmentsEl.innerHTML = '';
-    this.attachmentsEl.style.display = this.composerImages.length > 0 ? 'flex' : 'none';
+    const hasAny = this.composerImages.length > 0 || this.composerFiles.length > 0;
+    this.attachmentsEl.style.display = hasAny ? 'flex' : 'none';
     this.composerImages.forEach((image, index) => {
       const chip = document.createElement('div');
       chip.className = 'acp-attachment-chip';
@@ -486,6 +507,126 @@ export class AcpSessionView {
       chip.append(preview, name, remove);
       this.attachmentsEl.appendChild(chip);
     });
+    this.composerFiles.forEach((file, index) => {
+      const chip = document.createElement('div');
+      chip.className = 'acp-attachment-chip acp-file-chip' + (file.error ? ' acp-file-chip-error' : '');
+      const icon = document.createElement('span');
+      icon.className = 'acp-file-chip-icon';
+      icon.textContent = '📄';
+      icon.setAttribute('aria-hidden', 'true');
+      const name = document.createElement('span');
+      name.className = 'acp-attachment-name';
+      name.textContent = file.name;
+      if (file.error) name.title = file.error;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'acp-attachment-remove';
+      remove.textContent = '×';
+      remove.title = 'Remove file';
+      remove.addEventListener('click', () => {
+        this.composerFiles.splice(index, 1);
+        this.renderAttachments();
+      });
+      chip.append(icon, name, remove);
+      this.attachmentsEl.appendChild(chip);
+    });
+  }
+
+  // Drag-and-drop wiring for the composer. Images are delegated to addComposerImage (native
+  // image content blocks); other files become ComposerFile path-reference chips. Directories
+  // are rejected via the web entry API so a folder drop surfaces an actionable chip rather
+  // than silently being treated as a file.
+  private setupComposerDrop(): void {
+    const composer = this.composerEl;
+    composer.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
+      composer.classList.add('acp-composer-drag-over');
+    });
+    composer.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget && composer.contains(e.relatedTarget as Node)) return;
+      e.stopPropagation();
+      composer.classList.remove('acp-composer-drag-over');
+    });
+    composer.addEventListener('drop', (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      composer.classList.remove('acp-composer-drag-over');
+      const items = Array.from(e.dataTransfer.items || []);
+      // Prefer the entry API so directories can be distinguished from files.
+      const entries = items
+        .map(item => item.webkitGetAsEntry?.())
+        .filter((entry): entry is FileSystemEntry => !!entry);
+      if (entries.length > 0) {
+        for (const entry of entries) this.addDroppedEntry(entry);
+        return;
+      }
+      // Fallback: no entry API — treat each File directly (path-based, no dir detection).
+      for (const file of Array.from(e.dataTransfer.files || [])) {
+        this.addComposerFileFromElectronFile(file);
+      }
+    });
+  }
+
+  private addDroppedEntry(entry: FileSystemEntry): void {
+    if (entry.isDirectory) {
+      this.composerFiles.push({
+        path: entry.name,
+        name: entry.name,
+        size: 0,
+        error: 'Directories are not supported. Drop individual files.',
+      });
+      this.renderAttachments();
+      return;
+    }
+    if (!entry.isFile) return;
+    const fileEntry = entry as FileSystemFileEntry;
+    fileEntry.file((file) => this.addComposerFileFromElectronFile(file), () => {
+      this.composerFiles.push({
+        path: entry.name,
+        name: entry.name,
+        size: 0,
+        error: 'Could not read dropped file.',
+      });
+      this.renderAttachments();
+    });
+  }
+
+  private addComposerFileFromElectronFile(file: File): void {
+    // Images (sized within limits) go through the existing image-attach path so they ship
+    // as real image content blocks. Everything else becomes a path-reference chip.
+    if (file.type.startsWith('image/')) {
+      this.addComposerImage(file);
+      return;
+    }
+    const maxBytes = 25 * 1024 * 1024;
+    const filePath = (file as File & { path?: string }).path || file.name;
+    if (!filePath || filePath === file.name) {
+      // No resolvable absolute path (e.g. some web drops) — can't produce a stable reference.
+      this.composerFiles.push({
+        path: file.name,
+        name: file.name,
+        size: file.size,
+        error: 'No absolute path available; drop files from Finder instead.',
+      });
+      this.renderAttachments();
+      return;
+    }
+    if (file.size > maxBytes) {
+      this.composerFiles.push({
+        path: filePath,
+        name: file.name,
+        size: file.size,
+        error: `File is larger than ${Math.round(maxBytes / 1024 / 1024)} MB.`,
+      });
+      this.renderAttachments();
+      return;
+    }
+    this.composerFiles.push({ path: filePath, name: file.name, size: file.size });
+    this.renderAttachments();
   }
 
   private renderQueue(): void {
@@ -542,10 +683,21 @@ export class AcpSessionView {
   }
 
   private captureComposer(): QueuedPrompt | null {
-    const text = this.inputEl.value.trim();
-    if (!text && this.composerImages.length === 0) return null;
-
+    const typed = this.inputEl.value.trim();
     const images = this.composerImages.slice();
+    // Only valid (non-error) file references are appended to the prompt; errored chips are
+    // dropped silently on submit so the user isn't forced to remove them first.
+    const files = this.composerFiles.filter(f => !f.error);
+    if (!typed && images.length === 0 && files.length === 0) return null;
+
+    // ACP has no native file/resource content block, so dropped documents ride as absolute
+    // path references appended to the prompt text on their own line. The agent reads them as
+    // file references. Ordering is stable (drag order preserved).
+    const pathBlock = files.length > 0
+      ? files.map(f => f.path).join('\n')
+      : '';
+    const text = pathBlock ? (typed ? `${typed}\n${pathBlock}` : pathBlock) : typed;
+
     const blocks: ContentBlock[] = [];
     if (text) blocks.push({ type: 'text', text });
     for (const image of images) {
@@ -557,6 +709,7 @@ export class AcpSessionView {
     this.inputEl.value = '';
     this.inputEl.style.height = 'auto';
     this.composerImages = [];
+    this.composerFiles = [];
     this.renderAttachments();
     return { blocks, text, images };
   }
