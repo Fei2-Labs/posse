@@ -38,9 +38,10 @@ import {
   type EmbeddedBrowserCredentialAction,
   type EmbeddedBrowserCredentialMappings,
 } from './browser-controller';
+import { startBrowserOpsServer, type BrowserOpsServer } from './browser-ops-server';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir, stopSshTunnel, stopAllSshTunnels } from './remote-bootstrap';
-import { AcpManager, getAcpCommand, isAcpEligible } from './acp-client';
+import { AcpManager, getAcpCommand, isAcpEligible, setBrowserMcpConfig } from './acp-client';
 import { autoUpdater } from 'electron-updater';
 import buildStamp from './build-stamp.json';
 import {
@@ -845,6 +846,10 @@ function parseShellExports(content: string): Map<string, string> {
 
 let mainWindow: BrowserWindow | null = null;
 let embeddedBrowserManager: EmbeddedBrowserManager | null = null;
+// Local-loopback bridge the agent MCP subprocess calls to drive the embedded browser.
+// Null until startBrowserOpsServer runs at launch; null also means agent browser tools
+// are unavailable (no live server to hit).
+let browserOpsServer: BrowserOpsServer | null = null;
 const acpOwners = new Map<string, WebContents>();
 
 function sendToAcpOwner(channel: string, id: string, ...args: unknown[]): void {
@@ -4175,6 +4180,18 @@ app.whenReady().then(async () => {
   createTray();
 
   embeddedBrowserManager = new EmbeddedBrowserManager();
+  // Start the agent browser-ops loopback server before any ACP session is created.
+  // The ACP client reads this config to build the McpServerStdio entry passed to agents.
+  browserOpsServer = startBrowserOpsServer(embeddedBrowserManager);
+  if (browserOpsServer) {
+    setBrowserMcpConfig({
+      baseUrl: browserOpsServer.baseUrl,
+      token: browserOpsServer.token,
+    });
+    console.info(`[BrowserOps] agent bridge ready on ${browserOpsServer.baseUrl}`);
+  } else {
+    console.warn('[BrowserOps] agent bridge unavailable (server failed to start)');
+  }
   registerIPC();
   cloudflaredManager = new CloudflaredManager(path.join(__dirname, '../..'));
   createWindow(appIcon);
@@ -4265,6 +4282,8 @@ app.on('before-quit', async () => {
   // App shutdown is not a user close: renderer restores these resumable ACP sessions next launch.
   acpManager.destroyAll(false);
   acpOwners.clear();
+  browserOpsServer?.close();
+  browserOpsServer = null;
   tray?.destroy();
   tray = null;
 });

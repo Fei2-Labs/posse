@@ -7,6 +7,9 @@ import { performance } from 'node:perf_hooks';
 import type {
   ClientContext,
   ContentBlock,
+  EnvVariable,
+  McpServer,
+  McpServerStdio,
   PermissionOption,
   PromptCapabilities,
   RequestPermissionOutcome,
@@ -43,6 +46,58 @@ let acpSdkPromise: Promise<AcpSdk> | null = null;
 
 const ACP_CREATE_TIMEOUT_MS = 30_000;
 const ACP_LOAD_TIMEOUT_MS = 90_000;
+
+// ===================== Agent browser bridge (MCP) =====================
+// ACP has no in-process transport; the only universally-required transport is stdio.
+// So the browser-control MCP server runs as a stdio subprocess (browser-mcp.js) that
+// calls back into the Electron main process over a loopback HTTP bridge. This config
+// holds the bridge's baseUrl + bearer token; index.ts sets it at launch via
+// setBrowserMcpConfig after startBrowserOpsServer binds a port. When unset, no
+// browser tools are offered (sessions still create with mcpServers: []).
+export interface BrowserMcpConfig {
+  baseUrl: string;
+  token: string;
+}
+
+let browserMcpConfig: BrowserMcpConfig | null = null;
+
+export function setBrowserMcpConfig(config: BrowserMcpConfig | null): void {
+  browserMcpConfig = config;
+}
+
+// Resolve the bundled browser-mcp.js. In dev it lives next to this file in dist/main;
+// packaged, electron-builder ships dist/** under the asar, so __dirname (inside asar)
+// still reaches the sibling file. process.execPath is the Electron binary when running
+// as the app (needs ELECTRON_RUN_AS_NODE=1 to behave as plain node) or plain node in
+// headless mode.
+function resolveBrowserMcpCommand(): { command: string; args: string[]; env: EnvVariable[] } | null {
+  if (!browserMcpConfig) return null;
+  const scriptPath = path.join(__dirname, 'browser-mcp.js');
+  // ELECTRON_RUN_AS_NODE=1 makes the Electron binary run as plain node (the pty-daemon
+  // pattern). In headless/standalone-node contexts process.versions.electron is undefined
+  // and the flag is unnecessary (and already inherited if set).
+  const env: EnvVariable[] = [
+    { name: 'POSSE_BROWSER_OPS_URL', value: browserMcpConfig.baseUrl },
+    { name: 'POSSE_BROWSER_OPS_TOKEN', value: browserMcpConfig.token },
+  ];
+  if (process.versions.electron && !process.env.ELECTRON_RUN_AS_NODE) {
+    env.push({ name: 'ELECTRON_RUN_AS_NODE', value: '1' });
+    return { command: process.execPath, args: [scriptPath], env };
+  }
+  return { command: process.execPath, args: [scriptPath], env };
+}
+
+function buildBrowserMcpServer(): McpServer | null {
+  const resolved = resolveBrowserMcpCommand();
+  if (!resolved) return null;
+  const stdio: McpServerStdio = {
+    name: 'posse-browser',
+    command: resolved.command,
+    args: resolved.args,
+    env: resolved.env,
+  };
+  return stdio;
+}
 
 function loadAcpSdk(): Promise<AcpSdk> {
   if (!acpSdkPromise) {
@@ -475,9 +530,10 @@ export class AcpManager {
 
           // Create a new session
           this.advanceStartup(id, startup, 'creating-session', info);
+          const browserServer = buildBrowserMcpServer();
           const session = await ctx.request(acp.methods.agent.session.new, {
             cwd,
-            mcpServers: [],
+            mcpServers: browserServer ? [browserServer] : [],
           });
           const entry = this.sessions.get(id);
           if (!entry) {
@@ -722,9 +778,10 @@ export class AcpManager {
 
           // Load the existing session
           this.advanceStartup(id, startup, 'loading-session', info);
+          const loadBrowserServer = buildBrowserMcpServer();
           const loadResp = await ctx.request(acp.methods.agent.session.load, {
             sessionId: acpSessionId,
-            mcpServers: [],
+            mcpServers: loadBrowserServer ? [loadBrowserServer] : [],
             cwd,
           });
 
