@@ -15,6 +15,13 @@ import type {
   SessionUpdate,
   SetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk';
+import {
+  upsertAcpSession,
+  closeAcpSession,
+  removeAcpSession,
+  listAcpSessions,
+  type AcpStoredSession,
+} from './acp-session-store';
 
 // When Posse is launched from Finder/Dock, the app inherits macOS's minimal PATH
 // (/usr/bin:/bin:/usr/sbin:/sbin) — node/npx (homebrew) and user CLIs are missing.
@@ -162,6 +169,7 @@ export interface AcpSessionInfo {
   agentLabel: string;
   cwd: string;
   sessionId: string | null;       // ACP session ID from agent
+  presetCommand: string;          // canonical ACP preset (for resume + session list)
   configOptions: SessionConfigOption[];
   modes: SessionModeState | null;
   promptCapabilities: PromptCapabilities | null;
@@ -208,6 +216,10 @@ type PendingPermission = {
 export interface AcpRemoteListener {
   onUpdate: (id: string, update: SessionUpdate) => void;
   onStatus: (id: string, info: Partial<AcpSessionInfo>) => void;
+  // Fired when the agent requests a permission decision AND no auto-allow option
+  // is available (or auto-allow is disabled for headless). The remote consumer
+  // (mobile) renders a prompt and calls resolvePermission() with the outcome.
+  onPermissionRequest?: (id: string, toolCallId: string, toolName: string, options: PermissionOption[]) => void;
 }
 
 export class AcpReplayBuffer {
@@ -239,6 +251,13 @@ export class AcpManager {
   // events as the desktop owner, so a mobile client can render structured
   // ACP sessions while the desktop keeps its IPC path.
   private remoteListeners = new Set<AcpRemoteListener>();
+  // When false (headless), preferredAllowPermission auto-allow is suppressed so
+  // permission requests surface to mobile via onPermissionRequest fan-out instead
+  // of being silently approved. Desktop keeps true to preserve its safe default
+  // (bypass-mode presets never reach requestPermission; normal-mode agents get
+  // their offered allow_always option auto-selected, matching the desktop renderer
+  // which only prompts when no allow option exists).
+  private readonly autoAllowPermissions: boolean;
 
   private handleSessionUpdate(id: string, update: SessionUpdate): void {
     const replayBuffer = this.sessions.get(id)?.replayBuffer;
@@ -274,10 +293,12 @@ export class AcpManager {
     onUpdate: AcpUpdateHandler,
     onStatus: AcpStatusHandler,
     onPermissionRequest: AcpPermissionRequestHandler,
+    autoAllowPermissions = true,
   ) {
     this.onUpdate = onUpdate;
     this.onStatus = onStatus;
     this.onPermissionRequest = onPermissionRequest;
+    this.autoAllowPermissions = autoAllowPermissions;
   }
 
   private startStartup(id: string): StartupTracker {
@@ -314,9 +335,14 @@ export class AcpManager {
     toolName: string,
     options: PermissionOption[],
   ): Promise<RequestPermissionOutcome> {
-    const defaultAllow = preferredAllowPermission(options);
-    if (defaultAllow) {
-      return Promise.resolve({ outcome: 'selected', optionId: defaultAllow.optionId });
+    // Desktop preserves its safe default: auto-select an offered allow_always/allow_once
+    // option so the renderer only prompts when no allow choice exists. Headless
+    // (autoAllowPermissions=false) must NOT auto-allow — surface to mobile instead.
+    if (this.autoAllowPermissions) {
+      const defaultAllow = preferredAllowPermission(options);
+      if (defaultAllow) {
+        return Promise.resolve({ outcome: 'selected', optionId: defaultAllow.optionId });
+      }
     }
 
     const key = `${id}:${toolCallId}`;
@@ -333,7 +359,13 @@ export class AcpManager {
         resolve({ outcome: 'cancelled' });
       }, 300000);
       this.pendingPermissions.set(key, { resolve, timeout });
+      // Fan out to the desktop renderer (no-op in headless) AND to remote/mobile
+      // listeners so a mobile client can render a permission prompt.
       this.onPermissionRequest(id, toolCallId, toolName, options);
+      for (const listener of this.remoteListeners) {
+        try { listener.onPermissionRequest?.(id, toolCallId, toolName, options); }
+        catch { /* listener must not throw the agent loop */ }
+      }
     });
   }
 
@@ -408,6 +440,7 @@ export class AcpManager {
       agentLabel,
       cwd,
       sessionId: null,
+      presetCommand: canonicalAcpPresetCommand(agentLabel) || agentLabel,
       configOptions: [],
       modes: null,
       promptCapabilities: null,
@@ -496,6 +529,7 @@ export class AcpManager {
           clearTimeout(timeout);
           console.info(`[ACP ${id}] startup timings`, info.startupTimingsMs);
 
+          this.persistSession(info);
           this.fanoutStatus(id, {
             sessionId: session.sessionId,
             configOptions: info.configOptions,
@@ -521,6 +555,7 @@ export class AcpManager {
               this.cancelPendingPermissions(id);
               this.sessions.delete(id);
               info.status = 'closed';
+              closeAcpSession(id);
               this.fanoutStatus(id, { status: 'closed' });
               resolveExit();
             });
@@ -623,6 +658,30 @@ export class AcpManager {
     return updates;
   }
 
+  /** List ACP sessions persisted to disk (for the mobile recent list + resume). */
+  listStoredSessions(): AcpStoredSession[] {
+    return listAcpSessions();
+  }
+
+  /** Remove a stored ACP session record (used when the user deletes a session). */
+  removeStoredSession(id: string): void {
+    removeAcpSession(id);
+  }
+
+  private persistSession(info: AcpSessionInfo): void {
+    if (!info.sessionId) return;
+    upsertAcpSession({
+      id: info.id,
+      acpSessionId: info.sessionId,
+      agentLabel: info.agentLabel,
+      cwd: info.cwd,
+      presetCommand: info.presetCommand,
+      title: info.agentLabel,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  }
+
   /** Load an existing ACP session by sessionId (for resume). */
   async load(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
     // A retry reuses the renderer session id. Silently retire any previous adapter attempt so
@@ -661,6 +720,7 @@ export class AcpManager {
       agentLabel,
       cwd,
       sessionId: null,
+      presetCommand: canonicalAcpPresetCommand(agentLabel) || agentLabel,
       configOptions: [],
       modes: null,
       promptCapabilities: null,
@@ -743,6 +803,7 @@ export class AcpManager {
           clearTimeout(timeout);
           console.info(`[ACP ${id}] load timings`, info.startupTimingsMs);
 
+          this.persistSession(info);
           resolve({ ...info, replayUpdates: replayBuffer.take() });
 
           return new Promise<void>((resolveExit) => {
@@ -754,6 +815,7 @@ export class AcpManager {
               this.cancelPendingPermissions(id);
               this.sessions.delete(id);
               info.status = 'closed';
+              closeAcpSession(id);
               this.fanoutStatus(id, { status: 'closed' });
               resolveExit();
             });
@@ -795,7 +857,13 @@ export class AcpManager {
     this.sessions.delete(id);
     try { session.process.kill(); } catch { /* already exited */ }
     session.info.status = 'closed';
-    if (notify) this.onStatus(id, { status: 'closed' });
+    closeAcpSession(id);
+    if (notify) {
+      this.onStatus(id, { status: 'closed' });
+      for (const listener of this.remoteListeners) {
+        try { listener.onStatus(id, { status: 'closed' }); } catch { /* listener must not throw */ }
+      }
+    }
   }
 
   destroyAll(notify = true): void {

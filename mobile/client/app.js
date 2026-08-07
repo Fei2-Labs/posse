@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v27';
+const CLIENT_BUILD = 'posse-v28';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -1098,13 +1098,25 @@ function renderSessionList(snapshot) {
   list.querySelectorAll('.session-card').forEach(card => {
     if (card.dataset.recentId) return;
     const id = card.dataset.id;
-    card.onclick = () => openSession(id);
+    const session = lastSessionSnapshot.live.find(s => s.id === id);
+    card.onclick = () => {
+      if (session && session.isAcp) {
+        openAcpSession(id, session.title || session.presetCommand || 'Agent');
+      } else {
+        openSession(id);
+      }
+    };
   });
 
   list.querySelectorAll('.recent-session-card').forEach(card => {
     card.onclick = () => {
       const session = lastSessionSnapshot.recent.find(item => item.id === card.dataset.recentId);
-      if (session) resumeSession(session.cwd, session.resumeCommand);
+      if (!session) return;
+      if (session.isAcp && session.acpSessionId) {
+        resumeAcpSession(session);
+      } else {
+        resumeSession(session.cwd, session.resumeCommand);
+      }
     };
   });
 }
@@ -1820,6 +1832,11 @@ let acpIsPrompting = false;
 let acpCurrentMsgEl = null;  // current agent message element (for chunk accumulation)
 let acpCurrentUserMsgEl = null;
 let acpToolCallEls = new Map(); // toolCallId -> element
+let acpConfigOptions = [];   // SessionConfigOption[] from the agent
+let acpCurrentModeId = '';   // current mode id
+let acpAvailableCommands = []; // AvailableCommand[] for slash-command hints
+let acpContextUsage = null;  // { used, size, percentage } | null
+let acpPlanEl = null;        // current plan container (collapsed/expanded)
 
 const acpHelpers = window.PosseAcpHelpers || {
   escapeHtml: (s) => String(s || ''),
@@ -1867,6 +1884,7 @@ function openAcpSession(id, agentLabel) {
   acpCurrentMsgEl = null;
   acpCurrentUserMsgEl = null;
   acpIsPrompting = false;
+  resetAcpStatusbarState();
 
   // Reset the messages container
   const messagesEl = $('acp-messages');
@@ -1925,6 +1943,15 @@ function connectAcpSse(sessionId) {
     }
   });
 
+  acpSse.addEventListener('acp:permission', (e) => {
+    try {
+      const req = JSON.parse(e.data);
+      showAcpPermissionPrompt(req.toolCallId, req.toolName, req.options || []);
+    } catch (err) {
+      console.error('[acp] permission parse error', err);
+    }
+  });
+
   acpSse.onerror = () => {
     // The browser auto-reconnects EventSource; we just log.
     console.warn('[acp] SSE error, will auto-reconnect');
@@ -1941,6 +1968,19 @@ function closeAcpSession() {
 
 function handleAcpStatus(info) {
   if (!acpSessionId || info.id && info.id !== acpSessionId) return;
+  // Sync config options and modes from status updates so the status bar can render.
+  if (info.configOptions) {
+    acpConfigOptions = info.configOptions;
+    renderAcpStatusbar();
+  }
+  if (info.modes) {
+    // Some agents report currentModeId via modes state
+    const modeState = info.modes;
+    if (modeState && typeof modeState === 'object' && modeState.currentModeId) {
+      acpCurrentModeId = modeState.currentModeId;
+    }
+    renderAcpStatusbar();
+  }
   if (info.status) {
     const status = info.status;
     $('acp-detail-status').className = `status-dot ${status}`;
@@ -1988,16 +2028,23 @@ function handleAcpUpdate(update) {
       // Thoughts are rendered inline as a subtle note for the minimal slice.
       handleAcpThoughtChunk(update);
       break;
-    case 'usage_update':
-    case 'config_option_update':
-    case 'current_mode_update':
-    case 'available_commands_update':
     case 'plan':
-    case 'plan_update':
-    case 'plan_removed':
-    case 'session_info_update':
-      // These update types are acknowledged but not rendered in the minimal slice.
-      // Full rendering (plan, context usage, config) is a follow-up.
+      handleAcpPlan(update);
+      break;
+    case 'usage_update':
+      handleAcpUsageUpdate(update);
+      break;
+    case 'config_option_update':
+      acpConfigOptions = update.configOptions || [];
+      renderAcpStatusbar();
+      break;
+    case 'current_mode_update':
+      acpCurrentModeId = update.currentModeId || '';
+      renderAcpStatusbar();
+      break;
+    case 'available_commands_update':
+      acpAvailableCommands = update.availableCommands || [];
+      renderAcpStatusbar();
       break;
     default:
       console.log('[acp] unhandled update:', update.sessionUpdate);
@@ -2173,6 +2220,167 @@ function appendAcpMessage(el) {
 function acpScrollToBottom() {
   const messagesEl = $('acp-messages');
   messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// ========== ACP permission prompt ==========
+// When the agent requests a permission decision (and no auto-allow option is
+// available — headless mode suppresses auto-allow), the backend emits an
+// 'acp:permission' SSE event. The mobile client renders an inline card with the
+// tool name and the agent-provided options (allow_always / allow_once / deny),
+// then POSTs the user's choice to the permission route.
+function showAcpPermissionPrompt(toolCallId, toolName, options) {
+  // Remove any existing prompt for the same toolCallId to avoid duplicates.
+  const existing = document.querySelector(`.acp-perm-prompt-mobile[data-tool-call-id="${acpHelpers.escapeHtml(toolCallId || '')}"]`);
+  if (existing) existing.remove();
+
+  const el = document.createElement('div');
+  el.className = 'acp-perm-prompt-mobile';
+  el.dataset.toolCallId = toolCallId || '';
+  const kind = acpHelpers.guessToolKind(toolName);
+  const emoji = acpHelpers.toolKindEmoji(kind);
+  el.innerHTML =
+    `<div class="acp-perm-header-mobile">` +
+    `<span class="acp-perm-icon">${emoji}</span>` +
+    `<div class="acp-perm-body">` +
+    `<div class="acp-perm-title">${acpHelpers.escapeHtml(toolName || 'Tool')}</div>` +
+    `<div class="acp-perm-desc">wants to run — approve?</div>` +
+    `</div></div>` +
+    `<div class="acp-perm-actions-mobile"></div>`;
+
+  const actionsEl = el.querySelector('.acp-perm-actions-mobile');
+  for (const opt of options) {
+    const btn = document.createElement('button');
+    const kindClass = opt.kind === 'allow_always' ? 'acp-perm-allow-always'
+      : opt.kind === 'allow_once' ? 'acp-perm-allow-once'
+      : 'acp-perm-deny';
+    btn.className = `acp-perm-btn-mobile ${kindClass}`;
+    btn.textContent = opt.name || opt.kind || '?';
+    btn.addEventListener('click', async () => {
+      el.remove();
+      try {
+        await api(`/api/acp/sessions/${acpSessionId}/permission`, {
+          method: 'POST',
+          body: JSON.stringify({ toolCallId, outcome: 'selected', optionId: opt.optionId }),
+        });
+      } catch (err) {
+        addAcpSystemMessage(`Permission response failed: ${err.message}`);
+      }
+    });
+    actionsEl.appendChild(btn);
+  }
+  appendAcpMessage(el);
+}
+
+// ========== ACP plan / usage / statusbar ==========
+// Mirrors the desktop AcpSessionView handlers for plan (collapsible checklist),
+// usage_update (context usage bar), and config_option/current_mode/
+// available_commands (status bar). Mobile-appropriate fidelity.
+
+function handleAcpPlan(update) {
+  const entries = update.entries || [];
+  if (!entries.length) return;
+  const completed = entries.filter(e => e.status === 'completed').length;
+
+  if (!acpPlanEl || !acpPlanEl.isConnected) {
+    acpPlanEl = document.createElement('div');
+    acpPlanEl.className = 'acp-plan-mobile';
+    appendAcpMessage(acpPlanEl);
+  }
+
+  acpPlanEl.innerHTML =
+    `<div class="acp-plan-header-mobile">` +
+    `<span class="acp-plan-chevron-mobile">▾</span>` +
+    `<span class="acp-plan-title-mobile">Plan</span>` +
+    `<span class="acp-plan-count-mobile">${completed}/${entries.length}</span>` +
+    `</div>` +
+    `<div class="acp-plan-items-mobile"></div>`;
+
+  const itemsEl = acpPlanEl.querySelector('.acp-plan-items-mobile');
+  for (const entry of entries) {
+    const item = document.createElement('div');
+    item.className = `acp-plan-item-mobile acp-plan-${entry.status || 'pending'}`;
+    const checkbox = entry.status === 'completed' ? '✓'
+      : entry.status === 'in_progress' ? '◐' : '☐';
+    const priority = entry.priority
+      ? ` <span class="acp-plan-priority-mobile">${acpHelpers.escapeHtml(entry.priority)}</span>` : '';
+    item.innerHTML =
+      `<span class="acp-plan-checkbox-mobile">${checkbox}</span>` +
+      `<span class="acp-plan-text-mobile">${acpHelpers.escapeHtml(entry.content || '')}</span>${priority}`;
+    itemsEl.appendChild(item);
+  }
+
+  const header = acpPlanEl.querySelector('.acp-plan-header-mobile');
+  if (header) {
+    header.onclick = () => {
+      const items = acpPlanEl.querySelector('.acp-plan-items-mobile');
+      const chevron = acpPlanEl.querySelector('.acp-plan-chevron-mobile');
+      if (!items || !chevron) return;
+      const collapsed = items.style.display === 'none';
+      items.style.display = collapsed ? '' : 'none';
+      chevron.textContent = collapsed ? '▾' : '▸';
+    };
+  }
+  acpScrollToBottom();
+}
+
+function handleAcpUsageUpdate(update) {
+  const used = Number(update.used) || 0;
+  const size = Number(update.size) || 0;
+  if (size > 0) {
+    const pct = Math.min(100, Math.round((used / size) * 100));
+    acpContextUsage = { used, size, percentage: pct };
+  } else {
+    acpContextUsage = null;
+  }
+  renderAcpStatusbar();
+}
+
+function formatTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(0) + 'k';
+  return String(n);
+}
+
+function renderAcpStatusbar() {
+  const bar = $('acp-statusbar');
+  if (!bar) return;
+
+  // Mode label from config options or current_mode_update
+  let modeLabel = '';
+  const modeOption = acpConfigOptions.find(o => o.id === 'mode' || o.category === 'mode');
+  if (modeOption && modeOption.type === 'select') {
+    const flatOpts = modeOption.options.flatMap(o => o.group ? o.options : [o]);
+    const currentId = acpCurrentModeId || modeOption.currentValue;
+    const current = flatOpts.find(o => o.value === currentId);
+    modeLabel = current ? (current.name || current.value || '') : '';
+  }
+
+  const ctxHtml = acpContextUsage
+    ? `<span class="acp-sb-ctx-mobile" title="Context: ${formatTokens(acpContextUsage.used)}/${formatTokens(acpContextUsage.size)}">` +
+      `<div class="acp-sb-ctx-bar-mobile"><div class="acp-sb-ctx-fill-mobile" style="width:${acpContextUsage.percentage}%;background:${acpContextUsage.percentage > 80 ? 'var(--red, #e5484d)' : acpContextUsage.percentage > 60 ? 'var(--yellow, #f5a524)' : 'var(--green, #3dd68c)'}"></div></div>` +
+      `<span>${formatTokens(acpContextUsage.used)}/${formatTokens(acpContextUsage.size)}</span></span>`
+    : '';
+
+  const modeHtml = modeLabel
+    ? `<span class="acp-sb-mode-mobile">${acpHelpers.escapeHtml(modeLabel)}</span>`
+    : '';
+
+  const cmdsHtml = acpAvailableCommands.length
+    ? `<span class="acp-sb-commands-mobile">${acpHelpers.escapeHtml(acpAvailableCommands.slice(0, 5).map(c => '/' + (c.name || '')).join('  '))}</span>`
+    : '';
+
+  bar.innerHTML = modeHtml + ctxHtml + cmdsHtml;
+}
+
+// Initialize status bar state on session open
+function resetAcpStatusbarState() {
+  acpConfigOptions = [];
+  acpCurrentModeId = '';
+  acpAvailableCommands = [];
+  acpContextUsage = null;
+  acpPlanEl = null;
+  const bar = $('acp-statusbar');
+  if (bar) bar.innerHTML = '';
 }
 
 function setupAcpInputHandlers() {
@@ -3039,6 +3247,29 @@ async function resumeSession(cwd, cmd) {
     await refreshSessions({ fresh: true });
   } catch (e) {
     alert('恢复失败: ' + e.message);
+  }
+}
+
+// Resume a stored ACP session: relaunch the adapter against the existing agent
+// sessionId so the user picks up where they left off on mobile.
+async function resumeAcpSession(session) {
+  if (!session || !session.acpSessionId) return;
+  try {
+    const res = await api(`/api/acp/sessions/acp-resume-${Date.now()}/load`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agentLabel: session.title || session.presetCommand || 'Agent',
+        cwd: session.cwd || '',
+        acpSessionId: session.acpSessionId,
+      }),
+    });
+    openAcpSession(res.id, res.agentLabel || session.title || 'Agent');
+    // Replay updates arrive via the SSE 'acp:replay' event when connectAcpSse
+    // opens the stream; the load response also includes them but the SSE path
+    // is the canonical replay delivery for mobile.
+    await refreshSessions({ fresh: true });
+  } catch (e) {
+    alert('恢复 ACP 失败: ' + e.message);
   }
 }
 

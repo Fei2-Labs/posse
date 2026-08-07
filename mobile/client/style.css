@@ -1630,3 +1630,61 @@ header h2 {
   background: var(--red, #e5484d); padding: 8px 12px;
 }
 
+/* ACP permission prompt */
+.acp-perm-prompt-mobile {
+  align-self: stretch; margin: 6px 4px; padding: 10px 12px;
+  background: var(--bg3); border: 1px solid var(--accent, #6366f1); border-radius: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.acp-perm-header-mobile { display: flex; align-items: center; gap: 8px; }
+.acp-perm-icon { font-size: 18px; flex: 0 0 auto; }
+.acp-perm-body { flex: 1; min-width: 0; }
+.acp-perm-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-perm-desc { font-size: 12px; color: var(--text2); }
+.acp-perm-actions-mobile { display: flex; gap: 8px; flex-wrap: wrap; }
+.acp-perm-btn-mobile {
+  flex: 1 1 auto; padding: 8px 12px; border: none; border-radius: 8px;
+  font-size: 13px; font-weight: 600; min-width: 80px;
+}
+.acp-perm-allow-always { background: var(--green, #3dd68c); color: #fff; }
+.acp-perm-allow-once { background: var(--accent, #6366f1); color: #fff; }
+.acp-perm-deny { background: var(--red, #e5484d); color: #fff; }
+
+/* ACP plan (collapsible checklist) */
+.acp-plan-mobile {
+  align-self: stretch; margin: 6px 4px; background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+.acp-plan-header-mobile {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+  cursor: pointer; font-weight: 600; font-size: 13px;
+}
+.acp-plan-chevron-mobile { flex: 0 0 auto; }
+.acp-plan-title-mobile { flex: 1; }
+.acp-plan-count-mobile { color: var(--text2); font-size: 12px; }
+.acp-plan-items-mobile { padding: 0 10px 8px; }
+.acp-plan-item-mobile {
+  display: flex; align-items: flex-start; gap: 6px; padding: 4px 0; font-size: 13px;
+}
+.acp-plan-checkbox-mobile { flex: 0 0 auto; font-size: 14px; line-height: 1.4; }
+.acp-plan-text-mobile { flex: 1; min-width: 0; }
+.acp-plan-item-mobile.acp-plan-completed .acp-plan-text-mobile { text-decoration: line-through; color: var(--text2); }
+.acp-plan-item-mobile.acp-plan-in_progress .acp-plan-checkbox-mobile { color: var(--yellow, #f5a524); }
+.acp-plan-item-mobile.acp-plan-completed .acp-plan-checkbox-mobile { color: var(--green, #3dd68c); }
+
+/* ACP status bar (context usage + mode) */
+.acp-statusbar-mobile {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 4px 10px;
+  background: var(--bg2); border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text2); overflow-x: auto; white-space: nowrap;
+}
+.acp-sb-mode-mobile {
+  flex: 0 0 auto; padding: 2px 8px; border-radius: 6px;
+  background: var(--bg3); border: 1px solid var(--border); font-weight: 500;
+}
+.acp-sb-ctx-mobile { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+.acp-sb-ctx-bar-mobile { width: 60px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.acp-sb-ctx-fill-mobile { height: 100%; border-radius: 2px; transition: width 0.3s; }
+.acp-sb-commands-mobile { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+
+

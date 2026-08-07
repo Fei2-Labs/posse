@@ -15,7 +15,25 @@ function loadAcpClientModule() {
   const loaded = new Module(filename, module);
   loaded.filename = filename;
   loaded.paths = Module._nodeModulePaths(path.dirname(filename));
+  // acp-client.ts imports ./acp-session-store (a .ts file). Node can't resolve
+  // .ts by default, so mock the store module to avoid filesystem side effects
+  // during this unit test (the store is tested separately in
+  // mobile-acp-extensions.test.js).
+  const storeExports = {
+    upsertAcpSession: () => [],
+    closeAcpSession: () => [],
+    removeAcpSession: () => [],
+    listAcpSessions: () => [],
+  };
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === './acp-session-store' && parent === loaded) {
+      return storeExports;
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
   loaded._compile(output, filename);
+  Module._load = origLoad;
   return loaded.exports;
 }
 

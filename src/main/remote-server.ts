@@ -78,6 +78,7 @@ type MobileLiveSession = {
   lastActivityMs: number;
   resumeId: string | null;
   agentSessionId: string | null;
+  isAcp?: boolean;
 };
 
 type MobileRecentSession = {
@@ -90,6 +91,8 @@ type MobileRecentSession = {
   displayName: string;
   agent: string;
   updatedAt: number;
+  isAcp?: boolean;
+  acpSessionId?: string;
 };
 
 type MobileSessionListSnapshot = {
@@ -814,6 +817,32 @@ export function startRemoteServer(
       if (session.resumeId) liveResumeIds.add(session.resumeId);
       if (session.agentSessionId) liveResumeIds.add(session.agentSessionId);
     }
+    // Include live ACP sessions so stored ACP records that are currently live
+    // don't also appear as recent (resume) cards.
+    if (cachedAcpManager) {
+      for (const info of cachedAcpManager.listStoredSessions()) {
+        const live = cachedAcpManager.getSession(info.id);
+        if (live && live.sessionId) liveResumeIds.add(live.sessionId);
+      }
+    }
+    // Add stored ACP sessions as recent candidates so mobile can resume them.
+    if (cachedAcpManager) {
+      for (const stored of cachedAcpManager.listStoredSessions()) {
+        candidates.push({
+          id: `acp-${stored.id}`,
+          title: stored.title || stored.agentLabel,
+          cwd: stored.cwd,
+          presetCommand: stored.presetCommand,
+          resumeId: stored.acpSessionId,
+          resumeCommand: stored.presetCommand,
+          displayName: getDisplayName(stored.presetCommand),
+          agent: agentFromCommand(stored.presetCommand),
+          updatedAt: stored.updatedAt,
+          isAcp: true,
+          acpSessionId: stored.acpSessionId,
+        });
+      }
+    }
     const seen = new Set<string>();
     recentSessionCache = candidates
       .filter((session) => Boolean(session.resumeCommand) && !liveResumeIds.has(session.resumeId))
@@ -829,11 +858,39 @@ export function startRemoteServer(
     return recentSessionCache;
   };
 
-  const getMobileSessionList = (fresh = false): MobileSessionListSnapshot => ({
-    version: 1,
-    live: ptyManager.getAllSessions().map(mapSessionToApi),
-    recent: getMobileRecentSessions(fresh),
-  });
+  // Map an AcpSessionInfo (live ACP session) to the mobile live-session shape.
+  function mapAcpSessionToApi(info: AcpSessionInfo): MobileLiveSession {
+    return {
+      id: info.id,
+      title: info.agentLabel,
+      cwd: info.cwd,
+      presetCommand: info.presetCommand || info.agentLabel,
+      displayName: getDisplayName(info.presetCommand || info.agentLabel),
+      provider: getCliProvider(info.presetCommand || info.agentLabel),
+      status: info.status,
+      createdAt: 0,
+      lastActivityMs: Date.now(),
+      resumeId: info.sessionId,
+      agentSessionId: info.sessionId,
+      isAcp: true,
+    };
+  }
+
+  const getMobileSessionList = (fresh = false): MobileSessionListSnapshot => {
+    const ptLive = ptyManager.getAllSessions().map(mapSessionToApi);
+    const mgr = cachedAcpManager;
+    const acpLive = mgr ? mgr.listStoredSessions()
+      .filter(s => {
+        const live = mgr.getSession(s.id);
+        return live && live.status !== 'closed' && live.status !== 'error';
+      })
+      .map(s => mapAcpSessionToApi(mgr.getSession(s.id)!)) : [];
+    return {
+      version: 1,
+      live: [...ptLive, ...acpLive],
+      recent: getMobileRecentSessions(fresh),
+    };
+  };
 
   // Session list — read directly from ptyManager
   app.get('/api/sessions', (_req, res) => {
@@ -1238,6 +1295,13 @@ export function startRemoteServer(
     res.json({ eligible: isAcpEligible(presetCommand), presetCommand });
   });
 
+  // List stored ACP sessions (for mobile resume). Returns metadata sufficient to
+  // relaunch the adapter via POST /api/acp/sessions/:id/load.
+  app.get('/api/acp/sessions', (_req, res) => {
+    if (!cachedAcpManager) { res.json([]); return; }
+    res.json(cachedAcpManager.listStoredSessions());
+  });
+
   // Create an ACP session. Returns the initial AcpSessionInfo (without the full
   // replay buffer — the mobile client opens the SSE stream to receive updates).
   app.post('/api/acp/sessions', async (req, res) => {
@@ -1264,10 +1328,12 @@ export function startRemoteServer(
         agentLabel: info.agentLabel,
         cwd: info.cwd,
         sessionId: info.sessionId,
+        presetCommand: info.presetCommand,
         status: info.status,
         startupPhase: info.startupPhase,
         promptCapabilities: info.promptCapabilities,
       });
+      recentSessionCacheAt = 0;
     } catch (e: any) {
       res.status(500).json({ error: 'ACP creation failed: ' + (e.message || e) });
     }
@@ -1300,11 +1366,69 @@ export function startRemoteServer(
     }
   });
 
-  // Destroy an ACP session.
+  // Destroy an ACP session. Also removes the persisted metadata so the session
+  // no longer appears in the mobile recent list.
   app.delete('/api/acp/sessions/:id', (req, res) => {
     if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
     cachedAcpManager.destroy(req.params.id);
+    cachedAcpManager.removeStoredSession(req.params.id);
+    recentSessionCacheAt = 0;
     res.json({ ok: true });
+  });
+
+  // Load (resume) an existing ACP session by its agent-side sessionId. This is
+  // the resume path for mobile: a stored session card calls here to relaunch the
+  // adapter against an existing agent session so the user picks up where they
+  // left off.
+  app.post('/api/acp/sessions/:id/load', async (req, res) => {
+    if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
+    const { agentLabel, cwd, acpSessionId, providerEnv } = req.body;
+    if (typeof acpSessionId !== 'string' || !acpSessionId) {
+      res.status(400).json({ error: 'acpSessionId is required' });
+      return;
+    }
+    try {
+      const info = await cachedAcpManager.load(
+        req.params.id,
+        String(agentLabel || ''),
+        cwd || process.env.HOME || os.homedir(),
+        acpSessionId,
+        providerEnv && typeof providerEnv === 'object' ? providerEnv : undefined,
+      );
+      recentSessionCacheAt = 0;
+      res.json({
+        id: info.id,
+        agentLabel: info.agentLabel,
+        cwd: info.cwd,
+        sessionId: info.sessionId,
+        presetCommand: info.presetCommand,
+        status: info.status,
+        startupPhase: info.startupPhase,
+        promptCapabilities: info.promptCapabilities,
+        replayUpdates: info.replayUpdates,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: 'ACP load failed: ' + (e.message || e) });
+    }
+  });
+
+  // Resolve a pending permission request from the mobile client. The mobile UI
+  // renders a prompt on 'acp:permission' SSE events and POSTs the user's choice
+  // here. This is the mobile equivalent of the desktop IPC 'acp:resolve-permission'.
+  app.post('/api/acp/sessions/:id/permission', async (req, res) => {
+    if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
+    const { toolCallId, outcome, optionId } = req.body;
+    if (typeof toolCallId !== 'string' || typeof outcome !== 'string') {
+      res.status(400).json({ error: 'toolCallId and outcome are required' });
+      return;
+    }
+    const resolved = cachedAcpManager.resolvePermission(
+      req.params.id,
+      String(toolCallId),
+      String(outcome),
+      typeof optionId === 'string' ? optionId : undefined,
+    );
+    res.json({ ok: resolved });
   });
 
   // Get the current status of an ACP session (without subscribing to the stream).
@@ -1359,6 +1483,10 @@ export function startRemoteServer(
       onStatus: (id: string, statusInfo: Partial<AcpSessionInfo>) => {
         if (id !== sessionId) return;
         res.write(`event: acp:status\ndata: ${JSON.stringify(statusInfo)}\n\n`);
+      },
+      onPermissionRequest: (id: string, toolCallId: string, toolName: string, options) => {
+        if (id !== sessionId) return;
+        res.write(`event: acp:permission\ndata: ${JSON.stringify({ toolCallId, toolName, options })}\n\n`);
       },
     };
     cachedAcpManager.addRemoteListener(listener);

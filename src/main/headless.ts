@@ -68,11 +68,15 @@ async function main(): Promise<void> {
   // ACP manager for structured agent sessions. The headless backend has no renderer
   // to forward events to, so the onUpdate/onStatus handlers are no-ops — mobile clients
   // receive ACP events via the SSE /api/acp/sessions/:id/events stream, which registers
-  // a remote listener on this manager.
+  // a remote listener on this manager. autoAllowPermissions=false means permission
+  // requests are NOT auto-approved in headless: they fan out to mobile listeners so
+  // a phone user sees a prompt. Safe defaults are preserved (bypass-mode presets never
+  // reach requestPermission; the agent itself decides whether to ask).
   const acpManager = new AcpManager(
     () => { /* no desktop renderer in headless mode */ },
     () => { /* no desktop renderer in headless mode */ },
-    () => { /* permissions auto-resolved via preferredAllowPermission in headless mode */ },
+    () => { /* headless: permission requests fan out to mobile remote listeners */ },
+    false,
   );
 
   // Start the token-auth remote server. Same wiring as the Electron main, minus all
