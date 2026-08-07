@@ -1,12 +1,13 @@
 // Posse Mobile - Service Worker
 
-const CACHE_NAME = 'posse-v26';
+const CACHE_NAME = 'posse-v27';
 const ASSETS = [
   '/',
   '/index.html',
   '/style.css',
   '/app.js',
   '/session-list-helpers.js',
+  '/acp-helpers.js',
   '/manifest.json',
   '/icon-192.svg',
   '/icon-192.png',

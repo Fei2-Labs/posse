@@ -17,6 +17,13 @@ import sharp from 'sharp';
 import { getDisplayName } from './pty-manager';
 import { PtyBackend, PtySessionSnapshot } from './pty-backend';
 import { resolveGitProjectRoots } from './git-project-root';
+import {
+  AcpManager,
+  isAcpEligible,
+  type AcpSessionInfo,
+  type AcpRemoteListener,
+} from './acp-client';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 
 // App version provider. Electron's main process sets this to `app.getVersion()`;
 // the headless backend sets it to the version read from package.json. Keeping this
@@ -111,6 +118,8 @@ function tailRawBuffer(buf: string, maxBytes: number): string {
 // Cache ptyManager and callbacks for remote creation (set in startRemoteServer)
 let cachedPtyManager: PtyBackend | null = null;
 let cachedOnRemoteCreate: ((sessionInfo: any) => void) | null = null;
+// Cache AcpManager for mobile ACP sessions (optional — null when no ACP backend is wired).
+let cachedAcpManager: AcpManager | null = null;
 
 // Resolve the model provider actually used from the preset command (kept consistent with index.ts)
 function getCliProvider(presetCommand: string): string | null {
@@ -421,10 +430,12 @@ export function startRemoteServer(
   onConnectionStatusChanged?: (status: RemoteConnectionStatus) => void,
   listResumableSessions?: (cwd: string) => Array<{ id: string; title: string; cwd: string; mtimeMs: number; agent: string; resumeCommand: string }>,
   listRecentSessions?: () => RemoteRecentSession[],
+  acpManager?: AcpManager | null,
 ): void {
   // Cache for use by Bridge events
   cachedPtyManager = ptyManager;
   cachedOnRemoteCreate = onRemoteCreate || null;
+  cachedAcpManager = acpManager ?? null;
 
   const config = loadOrCreateConfig();
   const LOCAL_IP = getLocalIP();
@@ -1212,6 +1223,151 @@ export function startRemoteServer(
     } catch (e: any) {
       res.status(500).json({ error: e.message || String(e) });
     }
+  });
+
+  // ========== ACP (structured agent) session API ==========
+  // These routes let the mobile client create and drive ACP sessions (built-in
+  // agents like Claude/Codex/Copilot) and receive structured SessionUpdate events
+  // over SSE, instead of rendering a raw PTY TUI. The PTY path above remains the
+  // fallback for non-ACP-eligible presets and custom commands.
+
+  // Check whether a preset command is ACP-eligible (mobile uses this to decide
+  // whether to open the structured ACP view or fall back to the PTY terminal).
+  app.get('/api/acp/eligible', (req, res) => {
+    const presetCommand = String(req.query.presetCommand || '');
+    res.json({ eligible: isAcpEligible(presetCommand), presetCommand });
+  });
+
+  // Create an ACP session. Returns the initial AcpSessionInfo (without the full
+  // replay buffer — the mobile client opens the SSE stream to receive updates).
+  app.post('/api/acp/sessions', async (req, res) => {
+    if (!cachedAcpManager) {
+      res.status(503).json({ error: 'ACP sessions are not available on this server' });
+      return;
+    }
+    const { cwd, agentLabel, providerEnv } = req.body;
+    const targetCwd = cwd || process.env.HOME || os.homedir();
+    const label = String(agentLabel || '');
+    if (!label) {
+      res.status(400).json({ error: 'agentLabel is required' });
+      return;
+    }
+    try {
+      const info = await cachedAcpManager.create(
+        label,
+        label,
+        targetCwd,
+        providerEnv && typeof providerEnv === 'object' ? providerEnv : undefined,
+      );
+      res.json({
+        id: info.id,
+        agentLabel: info.agentLabel,
+        cwd: info.cwd,
+        sessionId: info.sessionId,
+        status: info.status,
+        startupPhase: info.startupPhase,
+        promptCapabilities: info.promptCapabilities,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: 'ACP creation failed: ' + (e.message || e) });
+    }
+  });
+
+  // Send a prompt to an ACP session.
+  app.post('/api/acp/sessions/:id/prompt', async (req, res) => {
+    if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
+    const { content } = req.body;
+    if (typeof content !== 'string' || !content.trim()) {
+      res.status(400).json({ error: 'content is required' });
+      return;
+    }
+    try {
+      await cachedAcpManager.prompt(req.params.id, content);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  // Cancel the current prompt of an ACP session.
+  app.post('/api/acp/sessions/:id/cancel', async (req, res) => {
+    if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
+    try {
+      await cachedAcpManager.cancel(req.params.id);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || String(e) });
+    }
+  });
+
+  // Destroy an ACP session.
+  app.delete('/api/acp/sessions/:id', (req, res) => {
+    if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
+    cachedAcpManager.destroy(req.params.id);
+    res.json({ ok: true });
+  });
+
+  // Get the current status of an ACP session (without subscribing to the stream).
+  app.get('/api/acp/sessions/:id', (req, res) => {
+    if (!cachedAcpManager) { res.status(503).json({ error: 'ACP unavailable' }); return; }
+    const info = cachedAcpManager.getSession(req.params.id);
+    if (!info) { res.status(404).json({ error: 'Session not found' }); return; }
+    res.json({
+      id: info.id,
+      agentLabel: info.agentLabel,
+      cwd: info.cwd,
+      sessionId: info.sessionId,
+      status: info.status,
+      errorMessage: info.errorMessage,
+    });
+  });
+
+  // SSE stream of ACP session update + status events.
+  // Each event is an SSE frame: `event: <type>\ndata: <json>\n\n`
+  // Event types: 'acp:update' (a SessionUpdate), 'acp:status' (Partial<AcpSessionInfo>),
+  // 'acp:replay' (an array of replayed SessionUpdates drained on connect).
+  app.get('/api/acp/sessions/:id/events', (req, res) => {
+    if (!cachedAcpManager) {
+      res.status(503).json({ error: 'ACP unavailable' });
+      return;
+    }
+    const sessionId = req.params.id;
+    const info = cachedAcpManager.getSession(sessionId);
+    if (!info) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // Drain any replay updates buffered during session/load, then stream live events.
+    const replayUpdates = cachedAcpManager.drainReplay(sessionId);
+    if (replayUpdates.length > 0) {
+      res.write(`event: acp:replay\ndata: ${JSON.stringify(replayUpdates)}\n\n`);
+    }
+    // Send the current status immediately so the mobile UI can sync its state.
+    res.write(`event: acp:status\ndata: ${JSON.stringify(info)}\n\n`);
+
+    const listener: AcpRemoteListener = {
+      onUpdate: (id: string, update: SessionUpdate) => {
+        if (id !== sessionId) return;
+        res.write(`event: acp:update\ndata: ${JSON.stringify(update)}\n\n`);
+      },
+      onStatus: (id: string, statusInfo: Partial<AcpSessionInfo>) => {
+        if (id !== sessionId) return;
+        res.write(`event: acp:status\ndata: ${JSON.stringify(statusInfo)}\n\n`);
+      },
+    };
+    cachedAcpManager.addRemoteListener(listener);
+
+    const heartbeat = setInterval(() => { res.write(': heartbeat\n\n'); }, 3000);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      cachedAcpManager?.removeRemoteListener(listener);
+    });
   });
 
   // SSE event stream

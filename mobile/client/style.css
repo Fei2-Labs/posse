@@ -1518,3 +1518,115 @@ header h2 {
 .resumable-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 14px; }
 .resumable-agent { flex: 0 0 auto; font-size: 11px; color: var(--accent); font-family: 'SF Mono', Menlo, monospace; }
 .resumable-divider { text-align: center; color: var(--text2); font-size: 12px; margin: 8px 0 4px; }
+
+/* ========== ACP structured session (mobile) ========== */
+#acp-detail-header {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); flex: 0 0 auto;
+}
+#acp-detail-header .detail-title { flex: 1; display: flex; align-items: center; gap: 6px; }
+#acp-detail-name { font-weight: 600; font-size: 15px; }
+#acp-detail-header .status-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+#acp-detail-header .status-dot.initializing { background: var(--text2); opacity: 0.6; }
+#acp-detail-header .status-dot.idle { background: var(--green); }
+#acp-detail-header .status-dot.prompting { background: var(--yellow); }
+#acp-detail-header .status-dot.error { background: var(--red, #e5484d); }
+#acp-detail-header .status-dot.closed { background: var(--text2); opacity: 0.4; }
+
+.acp-messages-mobile {
+  flex: 1; overflow-y: auto; padding: 10px 8px;
+  display: flex; flex-direction: column; gap: 8px;
+  -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain;
+}
+
+.acp-welcome-mobile {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 32px 16px; text-align: center; color: var(--text2);
+}
+.acp-welcome-mobile .acp-welcome-avatar {
+  width: 48px; height: 48px; border-radius: 50%; background: var(--accent, #6366f1);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 700; margin-bottom: 4px;
+}
+.acp-welcome-mobile .acp-welcome-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.acp-welcome-mobile .acp-welcome-sub { font-size: 13px; }
+
+.acp-msg-mobile {
+  display: flex; gap: 8px; max-width: 92%;
+  animation: chatBubbleIn 0.15s ease-out;
+}
+.acp-msg-agent-mobile { align-self: flex-start; align-items: flex-start; }
+.acp-msg-user-mobile { align-self: flex-end; flex-direction: row-reverse; }
+.acp-msg-agent-mobile .acp-agent-avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--accent, #6366f1); color: #fff; font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.acp-msg-mobile .acp-msg-body {
+  padding: 8px 12px; border-radius: 12px; font-size: 14px; line-height: 1.5;
+  word-break: break-word;
+}
+.acp-msg-agent-mobile .acp-msg-body { background: var(--bg3); border: 1px solid var(--border); }
+.acp-msg-user-mobile .acp-msg-body { background: var(--accent, #6366f1); color: #fff; }
+.acp-user-text { white-space: pre-wrap; }
+
+.acp-msg-system-mobile {
+  align-self: center; font-size: 12px; color: var(--text2);
+  padding: 4px 12px; border-radius: 8px; background: var(--bg3); text-align: center;
+}
+
+/* Tool calls — compact cards */
+.acp-tool-call-mobile {
+  align-self: flex-start; max-width: 92%; padding: 8px 10px; border-radius: 10px;
+  background: var(--bg3); border: 1px solid var(--border); font-size: 13px;
+}
+.acp-tool-call-mobile.acp-tool-failed { border-color: var(--red, #e5484d); }
+.acp-tool-header-mobile { display: flex; align-items: center; gap: 6px; }
+.acp-tool-icon { font-size: 14px; flex: 0 0 auto; }
+.acp-tool-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.acp-tool-status { flex: 0 0 auto; font-size: 11px; color: var(--text2); }
+.acp-tool-call-mobile.acp-tool-completed .acp-tool-status { color: var(--green); }
+.acp-tool-call-mobile.acp-tool-failed .acp-tool-status { color: var(--red, #e5484d); }
+.acp-tool-preview { margin-top: 4px; font-size: 12px; color: var(--text2); font-family: 'SF Mono', Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+
+/* Thoughts */
+.acp-thought-mobile {
+  align-self: flex-start; max-width: 92%; padding: 6px 10px; border-radius: 8px;
+  background: transparent; border: 1px dashed var(--border); font-size: 12px; color: var(--text2);
+}
+.acp-thought-label { font-weight: 600; margin-right: 4px; }
+.acp-thought-text { white-space: pre-wrap; }
+
+/* Markdown in agent messages */
+.acp-msg-body .acp-code-block { background: var(--bg); border-radius: 6px; margin: 4px 0; overflow: hidden; }
+.acp-msg-body .acp-code-header { padding: 4px 8px; font-size: 11px; color: var(--text2); border-bottom: 1px solid var(--border); }
+.acp-msg-body .acp-code-block pre { margin: 0; padding: 8px; overflow-x: auto; }
+.acp-msg-body .acp-code-block code { font-family: 'SF Mono', Menlo, monospace; font-size: 12px; }
+.acp-msg-body .acp-inline-code { font-family: 'SF Mono', Menlo, monospace; font-size: 12px; padding: 1px 4px; border-radius: 3px; background: rgba(0,0,0,0.15); }
+.acp-msg-body .acp-md-h1, .acp-msg-body .acp-md-h2, .acp-msg-body .acp-md-h3, .acp-msg-body .acp-md-h4 { font-weight: 700; margin: 4px 0; }
+.acp-msg-body .acp-md-h1 { font-size: 16px; }
+.acp-msg-body .acp-md-h2 { font-size: 15px; }
+.acp-msg-body .acp-md-h3 { font-size: 14px; }
+.acp-msg-body .acp-md-li { margin-left: 4px; }
+.acp-msg-body .acp-md-quote { padding-left: 8px; border-left: 3px solid var(--border); color: var(--text2); }
+.acp-msg-body a { color: var(--accent, #6366f1); }
+
+/* ACP input area */
+.acp-input-area-mobile {
+  flex: 0 0 auto; display: flex; align-items: flex-end; gap: 6px; padding: 8px 10px;
+  background: var(--bg2); border-top: 1px solid var(--border);
+}
+.acp-input-area-mobile textarea {
+  flex: 1; resize: none; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 14px; background: var(--bg); color: var(--text);
+  max-height: 120px; line-height: 1.4;
+}
+.acp-input-area-mobile textarea:focus { border-color: var(--accent, #6366f1); outline: none; }
+.acp-input-area-mobile button {
+  flex: 0 0 auto; padding: 8px 16px; border: none; border-radius: 8px;
+  background: var(--accent, #6366f1); color: #fff; font-size: 14px; font-weight: 600;
+}
+.acp-input-area-mobile .acp-cancel-btn {
+  background: var(--red, #e5484d); padding: 8px 12px;
+}
+

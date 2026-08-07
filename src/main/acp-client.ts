@@ -203,6 +203,13 @@ type PendingPermission = {
   timeout: NodeJS.Timeout;
 };
 
+// Listener interface for remote consumers (mobile/headless). These are fan-out
+// mirrors of the constructor-bound desktop handlers — see AcpManager.addRemoteListener.
+export interface AcpRemoteListener {
+  onUpdate: (id: string, update: SessionUpdate) => void;
+  onStatus: (id: string, info: Partial<AcpSessionInfo>) => void;
+}
+
 export class AcpReplayBuffer {
   private updates: SessionUpdate[] = [];
 
@@ -228,6 +235,10 @@ export class AcpManager {
   private onStatus: AcpStatusHandler;
   private onPermissionRequest: AcpPermissionRequestHandler;
   private pendingPermissions = new Map<string, PendingPermission>();
+  // Remote (mobile/headless) listeners. Each receives the same update/status
+  // events as the desktop owner, so a mobile client can render structured
+  // ACP sessions while the desktop keeps its IPC path.
+  private remoteListeners = new Set<AcpRemoteListener>();
 
   private handleSessionUpdate(id: string, update: SessionUpdate): void {
     const replayBuffer = this.sessions.get(id)?.replayBuffer;
@@ -236,6 +247,27 @@ export class AcpManager {
       return;
     }
     this.onUpdate(id, update);
+    for (const listener of this.remoteListeners) {
+      try { listener.onUpdate(id, update); } catch { /* listener must not throw the agent loop */ }
+    }
+  }
+
+  private fanoutStatus(id: string, info: Partial<AcpSessionInfo>): void {
+    this.onStatus(id, info);
+    for (const listener of this.remoteListeners) {
+      try { listener.onStatus(id, info); } catch { /* listener must not throw the agent loop */ }
+    }
+  }
+
+  /** Register a remote listener that receives every ACP update/status event. */
+  addRemoteListener(listener: AcpRemoteListener): AcpRemoteListener {
+    this.remoteListeners.add(listener);
+    return listener;
+  }
+
+  /** Unregister a previously-added remote listener. */
+  removeRemoteListener(listener: AcpRemoteListener): void {
+    this.remoteListeners.delete(listener);
   }
 
   constructor(
@@ -251,7 +283,7 @@ export class AcpManager {
   private startStartup(id: string): StartupTracker {
     const now = performance.now();
     const tracker: StartupTracker = { phase: 'loading-adapter', phaseStartedAt: now, timings: {} };
-    this.onStatus(id, { status: 'initializing', startupPhase: tracker.phase, startupTimingsMs: {} });
+    this.fanoutStatus(id, { status: 'initializing', startupPhase: tracker.phase, startupTimingsMs: {} });
     return tracker;
   }
 
@@ -269,7 +301,7 @@ export class AcpManager {
       info.startupPhase = phase;
       info.startupTimingsMs = { ...tracker.timings };
     }
-    this.onStatus(id, {
+    this.fanoutStatus(id, {
       status: phase === 'ready' ? 'idle' : 'initializing',
       startupPhase: phase,
       startupTimingsMs: { ...tracker.timings },
@@ -424,7 +456,7 @@ export class AcpManager {
         info.errorMessage = error.message;
         this.sessions.delete(id);
         try { childProcess.kill(); } catch { /* process may already be dead */ }
-        this.onStatus(id, { status: 'error', errorMessage: error.message });
+        this.fanoutStatus(id, { status: 'error', errorMessage: error.message });
         reject(error);
       }, ACP_CREATE_TIMEOUT_MS);
 
@@ -464,7 +496,7 @@ export class AcpManager {
           clearTimeout(timeout);
           console.info(`[ACP ${id}] startup timings`, info.startupTimingsMs);
 
-          this.onStatus(id, {
+          this.fanoutStatus(id, {
             sessionId: session.sessionId,
             configOptions: info.configOptions,
             modes: info.modes,
@@ -489,7 +521,7 @@ export class AcpManager {
               this.cancelPendingPermissions(id);
               this.sessions.delete(id);
               info.status = 'closed';
-              this.onStatus(id, { status: 'closed' });
+              this.fanoutStatus(id, { status: 'closed' });
               resolveExit();
             });
           });
@@ -499,7 +531,7 @@ export class AcpManager {
           info.errorMessage = err instanceof Error ? err.message : String(err);
           this.sessions.delete(id);
           try { childProcess.kill(); } catch { /* process may already be dead */ }
-          this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
+          this.fanoutStatus(id, { status: 'error', errorMessage: info.errorMessage });
           reject(err);
         }
       }).catch((err) => {
@@ -507,7 +539,7 @@ export class AcpManager {
         if (info.status !== 'closed' && info.status !== 'error') {
           info.status = 'error';
           info.errorMessage = err instanceof Error ? err.message : String(err);
-          this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
+          this.fanoutStatus(id, { status: 'error', errorMessage: info.errorMessage });
         }
         reject(err);
       });
@@ -517,7 +549,7 @@ export class AcpManager {
     childProcess.on('error', (err) => {
       info.status = 'error';
       info.errorMessage = `Failed to spawn ACP agent: ${err.message}`;
-      this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
+      this.fanoutStatus(id, { status: 'error', errorMessage: info.errorMessage });
     });
 
     return sessionReady;
@@ -530,7 +562,7 @@ export class AcpManager {
     }
 
     session.info.status = 'prompting';
-    this.onStatus(id, { status: 'prompting' });
+    this.fanoutStatus(id, { status: 'prompting' });
 
     try {
       const acp = await loadAcpSdk();
@@ -539,11 +571,11 @@ export class AcpManager {
         prompt: typeof content === 'string' ? [{ type: 'text', text: content }] : content,
       });
       session.info.status = 'idle';
-      this.onStatus(id, { status: 'idle' });
+      this.fanoutStatus(id, { status: 'idle' });
     } catch (err) {
       session.info.status = 'error';
       session.info.errorMessage = err instanceof Error ? err.message : String(err);
-      this.onStatus(id, { status: 'error', errorMessage: session.info.errorMessage });
+      this.fanoutStatus(id, { status: 'error', errorMessage: session.info.errorMessage });
       throw err;
     }
   }
@@ -575,7 +607,7 @@ export class AcpManager {
     );
 
     session.info.configOptions = result?.configOptions || [];
-    this.onStatus(id, { configOptions: session.info.configOptions });
+    this.fanoutStatus(id, { configOptions: session.info.configOptions });
     return session.info.configOptions;
   }
 
@@ -670,7 +702,7 @@ export class AcpManager {
         info.errorMessage = error.message;
         if (this.sessions.get(id)?.process === childProcess) this.sessions.delete(id);
         try { childProcess.kill(); } catch { /* process may already be dead */ }
-        this.onStatus(id, {
+        this.fanoutStatus(id, {
           status: 'error',
           errorMessage: error.message,
           startupPhase: info.startupPhase,
@@ -722,7 +754,7 @@ export class AcpManager {
               this.cancelPendingPermissions(id);
               this.sessions.delete(id);
               info.status = 'closed';
-              this.onStatus(id, { status: 'closed' });
+              this.fanoutStatus(id, { status: 'closed' });
               resolveExit();
             });
           });
@@ -732,7 +764,7 @@ export class AcpManager {
           info.errorMessage = err instanceof Error ? err.message : String(err);
           if (this.sessions.get(id)?.process === childProcess) this.sessions.delete(id);
           try { childProcess.kill(); } catch { /* process may already be dead */ }
-          this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
+          this.fanoutStatus(id, { status: 'error', errorMessage: info.errorMessage });
           reject(err);
         }
       }).catch((err) => {
@@ -740,7 +772,7 @@ export class AcpManager {
         if (info.status !== 'closed' && info.status !== 'error') {
           info.status = 'error';
           info.errorMessage = err instanceof Error ? err.message : String(err);
-          this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
+          this.fanoutStatus(id, { status: 'error', errorMessage: info.errorMessage });
         }
         reject(err);
       });
@@ -749,7 +781,7 @@ export class AcpManager {
     childProcess.on('error', (err) => {
       info.status = 'error';
       info.errorMessage = `Failed to spawn ACP agent: ${err.message}`;
-      this.onStatus(id, { status: 'error', errorMessage: info.errorMessage });
+      this.fanoutStatus(id, { status: 'error', errorMessage: info.errorMessage });
     });
 
     return sessionReady;

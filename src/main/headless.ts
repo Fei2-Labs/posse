@@ -26,6 +26,7 @@ import {
   type RemoteConnectionStatus,
 } from './remote-server';
 import { listResumableSessions } from './resumable-sessions';
+import { AcpManager } from './acp-client';
 
 function readPackageVersion(): string {
   try {
@@ -64,6 +65,16 @@ async function main(): Promise<void> {
   });
   console.log('[headless] pty-daemon connected.');
 
+  // ACP manager for structured agent sessions. The headless backend has no renderer
+  // to forward events to, so the onUpdate/onStatus handlers are no-ops — mobile clients
+  // receive ACP events via the SSE /api/acp/sessions/:id/events stream, which registers
+  // a remote listener on this manager.
+  const acpManager = new AcpManager(
+    () => { /* no desktop renderer in headless mode */ },
+    () => { /* no desktop renderer in headless mode */ },
+    () => { /* permissions auto-resolved via preferredAllowPermission in headless mode */ },
+  );
+
   // Start the token-auth remote server. Same wiring as the Electron main, minus all
   // BrowserWindow / tray / cloudflared callbacks (no-ops here).
   // listResumableSessions now comes from the shared electron-free resumable-sessions module,
@@ -89,6 +100,8 @@ async function main(): Promise<void> {
       );
     },
     listResumableSessions,
+    undefined,
+    acpManager,
   );
 
   const shutdown = (signal: string): void => {

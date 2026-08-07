@@ -14,7 +14,7 @@ let token = localStorage.getItem('duocli_token') || '';
 let currentSessionId = null;
 let sseSource = null;
 // bump in lockstep with sw.js CACHE_NAME so a stale client cache is visible
-const CLIENT_BUILD = 'posse-v26';
+const CLIENT_BUILD = 'posse-v27';
 let lastServerInfo = null;
 
 // xterm.js 相关
@@ -1808,6 +1808,447 @@ function wsSend(data) {
   }
 }
 
+// ========== ACP 结构化会话 (built-in agents) ==========
+// Mobile rendering of ACP SessionUpdate events as chat bubbles, mirroring the
+// desktop AcpSessionView. Falls back to the PTY terminal path (openSession) for
+// non-ACP-eligible presets.
+
+let acpSse = null;           // EventSource for /api/acp/sessions/:id/events
+let acpSessionId = null;      // current ACP session id
+let acpAgentLabel = '';
+let acpIsPrompting = false;
+let acpCurrentMsgEl = null;  // current agent message element (for chunk accumulation)
+let acpCurrentUserMsgEl = null;
+let acpToolCallEls = new Map(); // toolCallId -> element
+
+const acpHelpers = window.PosseAcpHelpers || {
+  escapeHtml: (s) => String(s || ''),
+  renderMarkdown: (s) => String(s || ''),
+  toolStatusLabel: () => '',
+  toolStatusIcon: () => '',
+  guessToolKind: () => 'other',
+  toolKindEmoji: () => '🔧',
+  toolContentPreview: () => '',
+  isInternalTaskNotification: () => false,
+};
+
+// Check whether a preset command is ACP-eligible, then create an ACP session
+// and open the structured view. Falls back to openSession (PTY) on any error.
+async function openAcpOrTerminalSession(presetCommand, cwd, providerEnv) {
+  let eligible = false;
+  try {
+    const result = await api(`/api/acp/eligible?presetCommand=${encodeURIComponent(presetCommand)}`);
+    eligible = Boolean(result.eligible);
+  } catch {
+    eligible = false;
+  }
+  if (!eligible) {
+    // Not ACP-eligible — create a normal PTY session and open the terminal view.
+    const session = await api('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ cwd: cwd || undefined, presetCommand: presetCommand, themeId: 'default' }),
+    });
+    openSession(session.id);
+    return;
+  }
+  // ACP-eligible — create an ACP session and open the structured view.
+  const session = await api('/api/acp/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ cwd: cwd || undefined, agentLabel: presetCommand, providerEnv }),
+  });
+  openAcpSession(session.id, session.agentLabel || presetCommand);
+}
+
+function openAcpSession(id, agentLabel) {
+  closeAcpSession();
+  acpSessionId = id;
+  acpAgentLabel = agentLabel || 'Agent';
+  acpToolCallEls = new Map();
+  acpCurrentMsgEl = null;
+  acpCurrentUserMsgEl = null;
+  acpIsPrompting = false;
+
+  // Reset the messages container
+  const messagesEl = $('acp-messages');
+  messagesEl.innerHTML = '';
+
+  // Show the ACP detail page
+  showPage('acp-detail-page');
+  $('acp-detail-name').textContent = acpAgentLabel;
+  $('acp-detail-status').className = 'status-dot initializing';
+
+  // Add a welcome message
+  const welcome = document.createElement('div');
+  welcome.className = 'acp-welcome-mobile';
+  welcome.innerHTML = `<div class="acp-welcome-avatar">${acpHelpers.escapeHtml(acpAgentLabel.charAt(0).toUpperCase())}</div><div class="acp-welcome-title">${acpHelpers.escapeHtml(acpAgentLabel)}</div><div class="acp-welcome-sub">Ready to work</div>`;
+  messagesEl.appendChild(welcome);
+
+  // Connect the SSE stream
+  connectAcpSse(id);
+
+  // Wire input handlers
+  setupAcpInputHandlers();
+}
+
+function connectAcpSse(sessionId) {
+  if (acpSse) { acpSse.close(); acpSse = null; }
+  acpSse = new EventSource(`${API}/api/acp/sessions/${sessionId}/events?token=${encodeURIComponent(token)}`);
+
+  acpSse.addEventListener('acp:replay', (e) => {
+    try {
+      const updates = JSON.parse(e.data);
+      if (Array.isArray(updates)) {
+        for (const update of updates) handleAcpUpdate(update);
+        acpScrollToBottom();
+      }
+    } catch (err) {
+      console.error('[acp] replay parse error', err);
+    }
+  });
+
+  acpSse.addEventListener('acp:update', (e) => {
+    try {
+      const update = JSON.parse(e.data);
+      handleAcpUpdate(update);
+      acpScrollToBottom();
+    } catch (err) {
+      console.error('[acp] update parse error', err);
+    }
+  });
+
+  acpSse.addEventListener('acp:status', (e) => {
+    try {
+      const info = JSON.parse(e.data);
+      handleAcpStatus(info);
+    } catch (err) {
+      console.error('[acp] status parse error', err);
+    }
+  });
+
+  acpSse.onerror = () => {
+    // The browser auto-reconnects EventSource; we just log.
+    console.warn('[acp] SSE error, will auto-reconnect');
+  };
+}
+
+function closeAcpSession() {
+  if (acpSse) { acpSse.close(); acpSse = null; }
+  acpSessionId = null;
+  acpCurrentMsgEl = null;
+  acpCurrentUserMsgEl = null;
+  acpToolCallEls = new Map();
+}
+
+function handleAcpStatus(info) {
+  if (!acpSessionId || info.id && info.id !== acpSessionId) return;
+  if (info.status) {
+    const status = info.status;
+    $('acp-detail-status').className = `status-dot ${status}`;
+    if (status === 'prompting') {
+      acpIsPrompting = true;
+      $('acp-cancel-btn').style.display = '';
+      $('acp-send-btn').textContent = '排队';
+    } else if (status === 'idle' || status === 'ready') {
+      acpIsPrompting = false;
+      $('acp-cancel-btn').style.display = 'none';
+      $('acp-send-btn').textContent = '发送';
+    } else if (status === 'error') {
+      acpIsPrompting = false;
+      $('acp-cancel-btn').style.display = 'none';
+      $('acp-send-btn').textContent = '发送';
+      if (info.errorMessage) addAcpSystemMessage(`Error: ${info.errorMessage}`);
+    } else if (status === 'closed') {
+      acpIsPrompting = false;
+      $('acp-cancel-btn').style.display = 'none';
+      $('acp-send-btn').textContent = '发送';
+      addAcpSystemMessage('Session closed.');
+    }
+  }
+}
+
+function handleAcpUpdate(update) {
+  if (!update || !update.sessionUpdate) return;
+  // Any non-user-message update ends the current user message accumulation
+  if (update.sessionUpdate !== 'user_message_chunk') acpCurrentUserMsgEl = null;
+
+  switch (update.sessionUpdate) {
+    case 'agent_message_chunk':
+      handleAcpAgentMessageChunk(update);
+      break;
+    case 'user_message_chunk':
+      handleAcpUserMessageChunk(update);
+      break;
+    case 'tool_call':
+      handleAcpToolCall(update);
+      break;
+    case 'tool_call_update':
+      handleAcpToolCallUpdate(update);
+      break;
+    case 'agent_thought_chunk':
+      // Thoughts are rendered inline as a subtle note for the minimal slice.
+      handleAcpThoughtChunk(update);
+      break;
+    case 'usage_update':
+    case 'config_option_update':
+    case 'current_mode_update':
+    case 'available_commands_update':
+    case 'plan':
+    case 'plan_update':
+    case 'plan_removed':
+    case 'session_info_update':
+      // These update types are acknowledged but not rendered in the minimal slice.
+      // Full rendering (plan, context usage, config) is a follow-up.
+      break;
+    default:
+      console.log('[acp] unhandled update:', update.sessionUpdate);
+  }
+}
+
+function handleAcpAgentMessageChunk(update) {
+  if (!update.content || update.content.type !== 'text') return;
+  const text = update.content.text;
+  const messageId = update.messageId;
+  const sameMessage = acpCurrentMsgEl && (
+    (messageId && acpCurrentMsgEl.dataset.messageId === messageId)
+    || (!messageId && !acpCurrentMsgEl.dataset.messageId)
+  );
+
+  if (sameMessage && acpCurrentMsgEl) {
+    const raw = (acpCurrentMsgEl.dataset.raw || '') + text;
+    acpCurrentMsgEl.dataset.raw = raw;
+    // Suppress internal task notifications
+    if (acpHelpers.isInternalTaskNotification(raw)) {
+      acpCurrentMsgEl.dataset.internalNotification = 'true';
+      acpCurrentMsgEl.remove();
+      return;
+    }
+    const bodyEl = acpCurrentMsgEl.querySelector('.acp-msg-body');
+    if (bodyEl) bodyEl.innerHTML = acpHelpers.renderMarkdown(raw);
+  } else {
+    acpCurrentMsgEl = addAcpAgentMessage(text);
+    if (messageId) acpCurrentMsgEl.dataset.messageId = messageId;
+    acpCurrentMsgEl.dataset.raw = text;
+    if (acpHelpers.isInternalTaskNotification(text)) {
+      acpCurrentMsgEl.dataset.internalNotification = 'true';
+      acpCurrentMsgEl.remove();
+      return;
+    }
+    const bodyEl = acpCurrentMsgEl.querySelector('.acp-msg-body');
+    if (bodyEl) bodyEl.innerHTML = acpHelpers.renderMarkdown(text);
+  }
+}
+
+function handleAcpUserMessageChunk(update) {
+  // Locally submitted prompts are rendered before the request; only replay chunks create bubbles.
+  if (acpIsPrompting || !update.content) return;
+  if (update.content.type !== 'text') return;
+  const text = update.content.text;
+  const messageId = update.messageId;
+  const sameMessage = acpCurrentUserMsgEl && (
+    (messageId && acpCurrentUserMsgEl.dataset.messageId === messageId)
+    || (!messageId && !acpCurrentUserMsgEl.dataset.messageId)
+  );
+  if (sameMessage && acpCurrentUserMsgEl) {
+    const raw = (acpCurrentUserMsgEl.dataset.raw || '') + text;
+    acpCurrentUserMsgEl.dataset.raw = raw;
+    const textEl = acpCurrentUserMsgEl.querySelector('.acp-user-text');
+    if (textEl) textEl.textContent = raw;
+  } else {
+    acpCurrentUserMsgEl = addAcpUserMessage(text);
+    if (messageId) acpCurrentUserMsgEl.dataset.messageId = messageId;
+    acpCurrentUserMsgEl.dataset.raw = text;
+  }
+}
+
+function handleAcpThoughtChunk(update) {
+  if (!update.content || update.content.type !== 'text') return;
+  const messageId = update.messageId;
+  let thoughtEl = document.querySelector('.acp-thought-mobile[data-message-id="' + (messageId || '') + '"]');
+  if (!thoughtEl) {
+    thoughtEl = document.createElement('div');
+    thoughtEl.className = 'acp-thought-mobile';
+    if (messageId) thoughtEl.dataset.messageId = messageId;
+    thoughtEl.innerHTML = '<span class="acp-thought-label">💭 Thought</span><div class="acp-thought-text"></div>';
+    appendAcpMessage(thoughtEl);
+  }
+  const raw = (thoughtEl.dataset.raw || '') + update.content.text;
+  thoughtEl.dataset.raw = raw;
+  const textEl = thoughtEl.querySelector('.acp-thought-text');
+  if (textEl) textEl.textContent = raw.replace(/\n{3,}/g, '\n\n');
+}
+
+function handleAcpToolCall(update) {
+  const toolCallId = update.toolCallId;
+  if (!toolCallId) return;
+  const state = {
+    toolCallId,
+    title: update.title || 'Tool call',
+    status: update.status || 'pending',
+    content: update.content || [],
+    raw: '',
+  };
+  const el = createAcpToolCallEl(state);
+  acpToolCallEls.set(toolCallId, { el, state });
+  appendAcpMessage(el);
+}
+
+function handleAcpToolCallUpdate(update) {
+  const entry = acpToolCallEls.get(update.toolCallId);
+  if (!entry) return;
+  const { state } = entry;
+  if (update.status) state.status = update.status;
+  if (update.content) state.content = update.content;
+  if (update.title) state.title = update.title;
+  renderAcpToolCallEl(entry);
+}
+
+function createAcpToolCallEl(state) {
+  const el = document.createElement('div');
+  el.className = 'acp-tool-call-mobile';
+  el.dataset.toolCallId = state.toolCallId;
+  renderAcpToolCallElInner(el, state);
+  return el;
+}
+
+function renderAcpToolCallEl(entry) {
+  renderAcpToolCallElInner(entry.el, entry.state);
+}
+
+function renderAcpToolCallElInner(el, state) {
+  const kind = acpHelpers.guessToolKind(state.title);
+  const emoji = acpHelpers.toolKindEmoji(kind);
+  const statusIcon = acpHelpers.toolStatusIcon(state.status);
+  const statusLabel = acpHelpers.toolStatusLabel(state.status);
+  const preview = acpHelpers.toolContentPreview(state.content);
+  el.className = `acp-tool-call-mobile acp-tool-${state.status}`;
+  el.innerHTML =
+    `<div class="acp-tool-header-mobile">` +
+    `<span class="acp-tool-icon">${emoji}</span>` +
+    `<span class="acp-tool-title">${acpHelpers.escapeHtml(state.title)}</span>` +
+    `<span class="acp-tool-status">${statusIcon} ${statusLabel}</span>` +
+    `</div>` +
+    (preview ? `<div class="acp-tool-preview">${acpHelpers.escapeHtml(preview)}</div>` : '');
+}
+
+function addAcpAgentMessage(text) {
+  const messagesEl = $('acp-messages');
+  messagesEl.querySelector('.acp-welcome-mobile')?.remove();
+  const el = document.createElement('div');
+  el.className = 'acp-msg-mobile acp-msg-agent-mobile';
+  el.innerHTML = `<div class="acp-agent-avatar">${acpHelpers.escapeHtml(acpAgentLabel.charAt(0).toUpperCase())}</div><div class="acp-msg-body"></div>`;
+  appendAcpMessage(el);
+  return el;
+}
+
+function addAcpUserMessage(text) {
+  const messagesEl = $('acp-messages');
+  messagesEl.querySelector('.acp-welcome-mobile')?.remove();
+  const el = document.createElement('div');
+  el.className = 'acp-msg-mobile acp-msg-user-mobile';
+  const body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  const textEl = document.createElement('div');
+  textEl.className = 'acp-user-text';
+  textEl.textContent = text || '';
+  body.appendChild(textEl);
+  el.appendChild(body);
+  appendAcpMessage(el);
+  return el;
+}
+
+function addAcpSystemMessage(text) {
+  const messagesEl = $('acp-messages');
+  const el = document.createElement('div');
+  el.className = 'acp-msg-system-mobile';
+  el.textContent = text;
+  appendAcpMessage(el);
+}
+
+function appendAcpMessage(el) {
+  const messagesEl = $('acp-messages');
+  messagesEl.appendChild(el);
+  acpScrollToBottom();
+}
+
+function acpScrollToBottom() {
+  const messagesEl = $('acp-messages');
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function setupAcpInputHandlers() {
+  const inputEl = $('acp-msg-input');
+  const sendBtn = $('acp-send-btn');
+  const cancelBtn = $('acp-cancel-btn');
+
+  // Remove old listeners by cloning (simple approach for the minimal slice)
+  const newInput = inputEl.cloneNode(true);
+  inputEl.parentNode.replaceChild(newInput, inputEl);
+  const newSend = sendBtn.cloneNode(true);
+  sendBtn.parentNode.replaceChild(newSend, sendBtn);
+  const newCancel = cancelBtn.cloneNode(true);
+  cancelBtn.parentNode.replaceChild(newCancel, cancelBtn);
+
+  newSend.addEventListener('click', () => sendAcpPrompt());
+  newCancel.addEventListener('click', () => cancelAcpPrompt());
+  newInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendAcpPrompt();
+    }
+  });
+  newInput.focus();
+}
+
+async function sendAcpPrompt() {
+  if (!acpSessionId) return;
+  const inputEl = $('acp-msg-input');
+  const content = inputEl.value.trim();
+  if (!content) return;
+  inputEl.value = '';
+  // Render the user message locally immediately
+  addAcpUserMessage(content);
+  acpIsPrompting = true;
+  $('acp-cancel-btn').style.display = '';
+  $('acp-send-btn').textContent = '排队';
+  try {
+    await api(`/api/acp/sessions/${acpSessionId}/prompt`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    });
+  } catch (e) {
+    addAcpSystemMessage(`Failed to send: ${e.message}`);
+    acpIsPrompting = false;
+    $('acp-cancel-btn').style.display = 'none';
+    $('acp-send-btn').textContent = '发送';
+  }
+}
+
+async function cancelAcpPrompt() {
+  if (!acpSessionId) return;
+  try {
+    await api(`/api/acp/sessions/${acpSessionId}/cancel`, { method: 'POST' });
+  } catch (e) {
+    console.error('[acp] cancel failed', e);
+  }
+}
+
+// Wire ACP back button and delete button
+$('acp-back-btn').addEventListener('click', () => {
+  closeAcpSession();
+  showPage('main-page');
+  refreshSessions({ showLoading: false });
+});
+$('acp-delete-btn').addEventListener('click', async () => {
+  if (!acpSessionId) return;
+  const id = acpSessionId;
+  closeAcpSession();
+  showPage('main-page');
+  try {
+    await api(`/api/acp/sessions/${id}`, { method: 'DELETE' });
+  } catch { /* session may already be gone */ }
+  refreshSessions({ fresh: true });
+});
+
 // ========== 会话详情 ==========
 
 async function openSession(id) {
@@ -2593,13 +3034,9 @@ $('new-cwd').addEventListener('change', () => loadResumableForCwd($('new-cwd').v
 async function resumeSession(cwd, cmd) {
   $('new-session-modal').classList.remove('active');
   try {
-    const session = await api('/api/sessions', {
-      method: 'POST',
-      body: JSON.stringify({ cwd: cwd || undefined, presetCommand: cmd, themeId: 'default' }),
-    });
     if (cwd) localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
+    await openAcpOrTerminalSession(cmd, cwd);
     await refreshSessions({ fresh: true });
-    openSession(session.id);
   } catch (e) {
     alert('恢复失败: ' + e.message);
   }
@@ -2612,18 +3049,13 @@ $('modal-cancel').onclick = () => {
 $('modal-create').onclick = async () => {
   const cwd = $('new-cwd').value.trim() || '';
   const preset = $('new-preset').value;
-  const themeId = 'default';
   $('new-session-modal').classList.remove('active');
 
   try {
-    const session = await api('/api/sessions', {
-      method: 'POST',
-      body: JSON.stringify({ cwd: cwd || undefined, presetCommand: preset, themeId }),
-    });
     localStorage.setItem(MOBILE_LAST_CWD_KEY, cwd);
     localStorage.setItem(MOBILE_LAST_PRESET_KEY, preset);
+    await openAcpOrTerminalSession(preset, cwd);
     await refreshSessions({ fresh: true });
-    openSession(session.id);
   } catch (e) {
     alert('创建失败: ' + e.message);
   }

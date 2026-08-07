@@ -96,6 +96,28 @@
     <div id="quick-commands"></div>
   </div>
 
+  <!-- ACP 结构化会话详情页 (built-in agents: Claude/Codex/Copilot) -->
+  <div id="acp-detail-page" class="page">
+    <header id="acp-detail-header">
+      <button id="acp-back-btn" class="icon-btn">←</button>
+      <div class="detail-title">
+        <span id="acp-detail-name">Agent</span>
+        <span id="acp-detail-status" class="status-dot idle"></span>
+      </div>
+      <button id="acp-delete-btn" class="icon-btn danger" title="终止会话">✕</button>
+    </header>
+
+    <!-- ACP 消息区域 -->
+    <div id="acp-messages" class="acp-messages-mobile"></div>
+
+    <!-- ACP 输入区域 -->
+    <div id="acp-input-area" class="acp-input-area-mobile">
+      <textarea id="acp-msg-input" rows="1" placeholder="Ask the agent…" enterkeyhint="send" autocomplete="off"></textarea>
+      <button id="acp-cancel-btn" class="acp-cancel-btn" style="display:none;" title="Cancel">■</button>
+      <button id="acp-send-btn">发送</button>
+    </div>
+  </div>
+
   <!-- Chat 详情页 -->
   <div id="chat-detail-page" class="page">
     <header id="chat-detail-header">
@@ -214,6 +236,7 @@
   <script src="addon-web-links.js"></script>
   <script src="chat-helpers.js"></script>
   <script src="session-list-helpers.js"></script>
+  <script src="acp-helpers.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
