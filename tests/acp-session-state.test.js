@@ -314,6 +314,18 @@ test('ACP history replay renders user message chunks without duplicating live pr
   assert.doesNotMatch(view, /case 'user_message_chunk':\s*break;/);
 });
 
+test('ACP resume restores local user prompts when adapter replay omits user chunks', () => {
+  const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
+
+  assert.match(view, /restoreMissingUserPrompts\(stableSessionId: string, updates: SessionUpdate\[]\)/);
+  assert.match(view, /updates\.some\(update => update\.sessionUpdate === 'user_message_chunk'\)/);
+  assert.match(view, /AcpPromptHistory\.load\(key\)/);
+  assert.match(view, /for \(const prompt of prompts\) this\.addUserMessage\(prompt\)/);
+  assert.match(view, /replayUserFallbackRendered = true/);
+  assert.match(app, /view\.restoreMissingUserPrompts\(acpSessionId, replayUpdates\)/);
+});
+
 test('ACP resume returns deterministic replay and drains it before entering live mode', () => {
   const client = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
@@ -328,9 +340,12 @@ test('ACP resume returns deterministic replay and drains it before entering live
   assert.match(main, /sendToAcpOwner\('acp:update', id, update\)/);
   assert.match(main, /ipcMain\.handle\('acp:drain-replay'/);
   assert.match(preload, /acpDrainReplay: \(id: string\)/);
-  assert.match(app, /await view\.replayUpdates\(info\.replayUpdates \|\| \[\]\)/);
+  assert.match(app, /const replayUpdates = \[\.\.\.\(info\.replayUpdates \|\| \[\]\)\]/);
   assert.match(app, /const pending = await window\.posse\.acpDrainReplay\(acpId\)/);
   assert.match(app, /if \(pending\.length === 0\) break/);
+  assert.match(app, /replayUpdates\.push\(\.\.\.pending\)/);
+  assert.match(app, /view\.restoreMissingUserPrompts\(acpSessionId, replayUpdates\)/);
+  assert.match(app, /await view\.replayUpdates\(replayUpdates\)/);
   assert.match(view, /async replayUpdates\(updates: SessionUpdate\[], batchSize = 100\)/);
   assert.match(view, /const timeout = window\.setTimeout\(finish, 50\)/);
   assert.match(view, /requestAnimationFrame\(finish\)/);

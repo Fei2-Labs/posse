@@ -148,6 +148,7 @@ export class AcpSessionView {
   private conversationPreferences: ConversationPreferences;
   private promptHistory = new AcpPromptHistory();
   private promptHistoryKey: string;
+  private replayUserFallbackRendered = false;
   private startupPhase: AcpSessionInfo['startupPhase'];
   private openSessionLink: SessionLinkHandler;
   private retrySession: (() => void | Promise<void>) | null;
@@ -804,6 +805,24 @@ export class AcpSessionView {
       default:
         console.log('[ACP] Unhandled update type:', update.sessionUpdate);
     }
+  }
+
+  /**
+   * ACP adapters are required to replay user_message_chunk during session/load, but several
+   * currently replay only agent/tool activity. Recover locally submitted prompts from the
+   * session-scoped composer history only when the adapter supplied zero user turns. This is a
+   * fallback, not a second source: once adapters comply, their ordered replay wins unchanged.
+   */
+  restoreMissingUserPrompts(stableSessionId: string, updates: SessionUpdate[]): void {
+    if (this.destroyed || this.replayUserFallbackRendered) return;
+    if (updates.some(update => update.sessionUpdate === 'user_message_chunk')) return;
+    const key = this.historyStorageKey(stableSessionId);
+    this.promptHistoryKey = key;
+    this.promptHistory = AcpPromptHistory.load(key);
+    const prompts = this.promptHistory.values();
+    if (prompts.length === 0) return;
+    this.replayUserFallbackRendered = true;
+    for (const prompt of prompts) this.addUserMessage(prompt);
   }
 
   async replayUpdates(updates: SessionUpdate[], batchSize = 100): Promise<void> {

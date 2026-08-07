@@ -5269,12 +5269,17 @@ function mountLoadedAcpSessionView(
 
   void window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then(async (info) => {
     if (acpViews.get(acpId) !== view) return;
-    await view.replayUpdates(info.replayUpdates || []);
+    // Drain the complete load stream before deciding whether user prompts are missing: some
+    // adapters may emit user_message_chunk late. If none exist, recover Posse's session-scoped
+    // locally submitted prompt history, then render the adapter's tool/agent replay.
+    const replayUpdates = [...(info.replayUpdates || [])];
     while (acpViews.get(acpId) === view) {
       const pending = await window.posse.acpDrainReplay(acpId);
       if (pending.length === 0) break;
-      await view.replayUpdates(pending);
+      replayUpdates.push(...pending);
     }
+    view.restoreMissingUserPrompts(acpSessionId, replayUpdates);
+    await view.replayUpdates(replayUpdates);
     if (acpViews.get(acpId) === view) view.handleStatus(info);
   }).catch((error) => {
     if (acpViews.get(acpId) !== view) return;
