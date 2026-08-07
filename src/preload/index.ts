@@ -111,12 +111,12 @@ contextBridge.exposeInMainWorld('posse', {
   browserCredentialCandidates: () => ipcRenderer.invoke('browser:credential-candidates') as Promise<{
     ok: boolean;
     code?: string;
-    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }>;
+    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; organization?: string; collection?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }>;
   }>,
   browserCredentialSearch: (query: string) => ipcRenderer.invoke('browser:credential-search', query) as Promise<{
     ok: boolean;
     code?: string;
-    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }>;
+    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; organization?: string; collection?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }>;
   }>,
   browserCredentialFillLogin: (token: string) =>
     ipcRenderer.invoke('browser:credential-fill-login', token) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,

@@ -46,11 +46,11 @@ test('matches exact origin before same-host candidates and rejects unrelated hos
   assert.equal(result.ok, true);
   assert.deepEqual(result.value.map((item) => [item.id, item.match, item.offItemOrigin]), [
     ['2', 'exact-origin', false],
-    ['1', 'same-host', false],
+    ['1', 'same-host', true],
   ]);
 });
 
-test('matchRbwEntries marks off-item-origin false only for same-host URI hits', () => {
+test('matchRbwEntries requires exact origin binding for a no-warning fill', () => {
   const result = matchRbwEntries([
     { id: '1', name: 'named', uris: [], type: 'login' },
   ], 'https://example.com/login');
@@ -58,10 +58,39 @@ test('matchRbwEntries marks off-item-origin false only for same-host URI hits', 
   assert.equal(result.ok, false);
 });
 
-test('searchRbwEntries searches name, username, folder, and URI fields case-insensitively', () => {
+test('treats subdomains and localhost ports as off-origin even when the host is related', () => {
+  const subdomain = searchRbwEntries([
+    { id: 'subdomain', name: 'Root account', uris: ['https://example.com/login'], type: 'login' },
+    { id: 'port', name: 'Other local app', uris: ['http://localhost:3000'], type: 'login' },
+  ], 'Root account', 'https://login.example.com/oauth/callback');
+  assert.equal(subdomain.ok, true);
+  assert.deepEqual(subdomain.value.map((item) => [item.id, item.match, item.offItemOrigin]), [
+    ['subdomain', 'search', true],
+  ]);
+
+  const local = matchRbwEntries([
+    { id: 'port', name: 'Other local app', uris: ['http://localhost:3000'], type: 'login' },
+  ], 'http://localhost:4173/login');
+  assert.deepEqual(local.ok && local.value.map((item) => [item.match, item.offItemOrigin]), [['same-host', true]]);
+});
+
+test('parses optional organization and collection labels without secret fields', () => {
+  const result = parseRbwList(JSON.stringify([{
+    id: '1', name: 'Work login', user: 'me', folder: 'Engineering',
+    organization: { name: 'Acme' }, collections: [{ name: 'Production' }],
+    uris: [], type: 'login', password: 'must-not-be-used', notes: 'private',
+  }]));
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value[0], {
+    id: '1', name: 'Work login', username: 'me', folder: 'Engineering',
+    organization: 'Acme', collection: 'Production', uris: [], type: 'login',
+  });
+});
+
+test('searchRbwEntries searches name, username, folder, organization, collection, and URI fields case-insensitively', () => {
   const entries = parseRbwList(JSON.stringify([
     { id: '1', name: 'GitHub', user: 'octocat@example.com', folder: 'Work', uris: ['https://github.com/login'], type: 'login' },
-    { id: '2', name: 'GitLab', user: 'other', folder: 'Personal', uris: ['https://gitlab.com'], type: 'login' },
+    { id: '2', name: 'GitLab', user: 'other', folder: 'Personal', organization: 'Acme', collection: 'Production', uris: ['https://gitlab.com'], type: 'login' },
     { id: '3', name: 'Notes', user: null, folder: null, uris: [], type: 'note' },
   ])).value;
   const result = searchRbwEntries(entries, 'octocat', 'https://github.com/login');
@@ -73,6 +102,7 @@ test('searchRbwEntries searches name, username, folder, and URI fields case-inse
   const folder = searchRbwEntries(entries, 'personal', 'https://example.com');
   assert.equal(folder.ok, true);
   assert.deepEqual(folder.value.map((item) => item.id), ['2']);
+  assert.deepEqual(searchRbwEntries(entries, 'acme production', 'https://example.com').value.map((item) => item.id), ['2']);
   // URI fragment search.
   const uri = searchRbwEntries(entries, 'gitlab.com', 'https://example.com');
   assert.equal(uri.ok, true);
@@ -95,7 +125,7 @@ test('searchRbwEntries ranks exact-origin before same-host before search and is 
   assert.equal(result.ok, true);
   assert.deepEqual(result.value.map((item) => [item.id, item.match, item.offItemOrigin]), [
     ['1', 'exact-origin', false],
-    ['2', 'same-host', false],
+    ['2', 'same-host', true],
     ['3', 'search', true],
   ]);
 });

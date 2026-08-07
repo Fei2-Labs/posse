@@ -18,6 +18,8 @@ export type RbwEntryMetadata = {
   name: string;
   username?: string;
   folder?: string;
+  organization?: string;
+  collection?: string;
   uris: string[];
   type: string;
 };
@@ -33,6 +35,8 @@ export type CredentialCandidate = {
   name: string;
   username?: string;
   folder?: string;
+  organization?: string;
+  collection?: string;
   match: 'exact-origin' | 'same-host' | 'search';
   // True when the candidate's URIs do not list the current page origin. Computed
   // only in main so URIs never reach the renderer. Off-origin fills require explicit
@@ -96,6 +100,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function metadataLabel(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (isRecord(value) && typeof value.name === 'string' && value.name.trim()) return value.name.trim();
+  if (Array.isArray(value)) {
+    const labels = value.map(metadataLabel).filter((label): label is string => Boolean(label));
+    return labels.length ? labels.join(', ') : undefined;
+  }
+  return undefined;
+}
+
+function firstMetadataLabel(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const label = metadataLabel(record[key]);
+    if (label) return label;
+  }
+  return undefined;
+}
+
 export function parseRbwList(raw: string): CredentialResult<RbwEntryMetadata[]> {
   try {
     const value: unknown = JSON.parse(raw);
@@ -111,6 +133,8 @@ export function parseRbwList(raw: string): CredentialResult<RbwEntryMetadata[]> 
       const rawUris = Array.isArray(item.uris) ? item.uris : [];
       const uris = rawUris.filter((uri): uri is string => typeof uri === 'string');
       if (uris.length !== rawUris.length || uris.length > 100) return { ok: false, code: 'invalid-output' };
+      const organization = firstMetadataLabel(item, ['organization', 'organizationName', 'org', 'orgName']);
+      const collection = firstMetadataLabel(item, ['collection', 'collectionName', 'collections', 'collectionNames']);
       entries.push({
         id: item.id,
         name: item.name,
@@ -118,6 +142,8 @@ export function parseRbwList(raw: string): CredentialResult<RbwEntryMetadata[]> 
         folder: typeof item.folder === 'string' ? item.folder : undefined,
         uris,
         type: typeof item.type === 'string' ? item.type.toLowerCase() : 'login',
+        ...(organization ? { organization } : {}),
+        ...(collection ? { collection } : {}),
       });
     }
     return { ok: true, value: entries };
@@ -145,22 +171,27 @@ export function matchRbwEntries(entries: RbwEntryMetadata[], pageUrl: string): C
     for (const uri of entry.uris) {
       const target = originAndHost(uri);
       if (!target || target.host !== page.host) continue;
-      offItemOrigin = false;
       if (target.origin === page.origin) best = 'exact-origin';
       else if (!best) best = 'same-host';
+      if (target.origin === page.origin) offItemOrigin = false;
     }
-    if (best) candidates.push({ id: entry.id, name: entry.name, username: entry.username, folder: entry.folder, match: best, offItemOrigin });
+    if (best) candidates.push({
+      id: entry.id, name: entry.name, username: entry.username, folder: entry.folder,
+      match: best, offItemOrigin,
+      ...(entry.organization ? { organization: entry.organization } : {}),
+      ...(entry.collection ? { collection: entry.collection } : {}),
+    });
   }
   candidates.sort((a, b) => Number(b.match === 'exact-origin') - Number(a.match === 'exact-origin') || a.name.localeCompare(b.name));
   return candidates.length ? { ok: true, value: candidates } : { ok: false, code: 'no-match' };
 }
 
 // Metadata-only manual search over already-parsed rbw list fields: name, username,
-// folder, URI. Case-insensitive, deterministic. Never retrieves secrets — rbw list --raw
-// carries no password/TOTP. Organization/collection are unavailable from rbw list --raw,
-// so they are intentionally not searched (adding a secret-bearing rbw call would violate
-// the no-secrets-to-search contract). Returns origin-aware candidates so the UI can rank
-// exact/same-host hits first and mark off-origin selections for confirmation.
+// folder, organization, collection, URI. Case-insensitive, deterministic. Never retrieves
+// secrets — rbw list --raw carries no password/TOTP. Optional organization/collection
+// labels are accepted for rbw versions that expose them, while current rbw output simply
+// leaves them undefined. Returns origin-aware candidates so the UI can rank exact/same-host
+// hits first and mark every non-exact-origin selection for confirmation.
 export function searchRbwEntries(entries: RbwEntryMetadata[], query: string, pageUrl: string): CredentialResult<CredentialCandidate[]> {
   const page = originAndHost(pageUrl);
   if (!page) return { ok: false, code: 'no-match' };
@@ -170,7 +201,7 @@ export function searchRbwEntries(entries: RbwEntryMetadata[], query: string, pag
   const candidates: CredentialCandidate[] = [];
   for (const entry of entries) {
     if (entry.type !== 'login') continue;
-    const haystack = [entry.name, entry.username, entry.folder, ...entry.uris]
+    const haystack = [entry.name, entry.username, entry.folder, entry.organization, entry.collection, ...entry.uris]
       .filter((value): value is string => typeof value === 'string' && value.length > 0)
       .join('\n').toLowerCase();
     if (!tokens.every((token) => haystack.includes(token))) continue;
@@ -181,11 +212,16 @@ export function searchRbwEntries(entries: RbwEntryMetadata[], query: string, pag
     for (const uri of entry.uris) {
       const target = originAndHost(uri);
       if (!target || target.host !== page.host) continue;
-      offItemOrigin = false;
       if (target.origin === page.origin) { best = 'exact-origin'; break; }
       if (best === 'search') best = 'same-host';
     }
-    candidates.push({ id: entry.id, name: entry.name, username: entry.username, folder: entry.folder, match: best, offItemOrigin });
+    if (best === 'exact-origin') offItemOrigin = false;
+    candidates.push({
+      id: entry.id, name: entry.name, username: entry.username, folder: entry.folder,
+      match: best, offItemOrigin,
+      ...(entry.organization ? { organization: entry.organization } : {}),
+      ...(entry.collection ? { collection: entry.collection } : {}),
+    });
   }
   // exact-origin → same-host → search, then name for determinism.
   const rank = (match: CredentialCandidate['match']): number =>

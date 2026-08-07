@@ -117,8 +117,8 @@ declare global {
       browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
       browserGetState: () => Promise<EmbeddedBrowserState | null>;
       browserNavigate: (input: string) => Promise<{ ok: boolean; error?: string }>;
-      browserCredentialCandidates: () => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }> }>;
-      browserCredentialSearch: (query: string) => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }> }>;
+      browserCredentialCandidates: () => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; organization?: string; collection?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }> }>;
+      browserCredentialSearch: (query: string) => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; organization?: string; collection?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }> }>;
       browserCredentialFillLogin: (token: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
       browserCredentialFillTotp: (token: string, autoSubmit: boolean) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
       browserCredentialAcknowledgeOffOrigin: (token: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
@@ -2348,7 +2348,7 @@ function credentialActionLabel(code: string | undefined): string {
 
 type CredentialCandidateView = {
   token: string; id: string; name: string;
-  username?: string; folder?: string;
+  username?: string; folder?: string; organization?: string; collection?: string;
   match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean;
 };
 
@@ -2362,7 +2362,7 @@ function renderCredentialCandidates(candidates: CredentialCandidateView[]): void
     label.className = 'browser-credential-label';
     label.textContent = candidate.name;
     const detail = document.createElement('span');
-    const detailParts = [candidate.username, candidate.folder, candidate.match]
+    const detailParts = [candidate.username, candidate.folder, candidate.organization, candidate.collection, candidate.match]
       .filter((part) => typeof part === 'string' && part.length > 0);
     detail.textContent = detailParts.join(' · ') || candidate.match;
     label.append(detail);
