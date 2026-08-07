@@ -4086,6 +4086,28 @@ select.ai-form-input {
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
+/* Edit-and-resend affordance on past user prompts (#83). Revealed on hover. */
+.acp-msg-edit-btn {
+  margin-top: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted, #8b949e);
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.acp-msg-user:hover .acp-msg-edit-btn,
+.acp-msg-edit-btn:focus-visible { opacity: 1; }
+.acp-msg-edit-btn:hover { color: var(--accent, #3b82f6); border-color: var(--accent, #3b82f6); }
+.acp-msg-edit-btn:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 1px; }
+@media (hover: none) {
+  /* Touch devices have no hover; always show the affordance. */
+  .acp-msg-edit-btn { opacity: 1; }
+}
+
 
 /* System message */
 .acp-msg-system {

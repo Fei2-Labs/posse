@@ -1117,6 +1117,22 @@ export class AcpSessionView {
       textEl.textContent = text;
       body.appendChild(textEl);
     }
+    // Edit-and-resend affordance (#83): loads this prompt back into the composer so the user
+    // can correct it and submit again. NOTE: ACP has no session-trim/rollback primitive
+    // (session/fork is whole-context + experimental), so resending appends a new turn rather
+    // than discarding later execution. True rollback waits on upstream ACP support.
+    if (text) {
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'acp-msg-edit-btn';
+      editBtn.title = 'Edit and resend this prompt';
+      editBtn.setAttribute('aria-label', 'Edit and resend this prompt');
+      editBtn.textContent = 'Edit';
+      editBtn.addEventListener('click', () => {
+        this.loadTextIntoComposer(text);
+      });
+      body.appendChild(editBtn);
+    }
     el.appendChild(body);
     this.appendUserImages(el, images);
     this.linkifyPlainUrls(body, true);
@@ -1124,6 +1140,19 @@ export class AcpSessionView {
     this.currentMessageEl = null;
     this.scrollToBottom();
     return el;
+  }
+
+  private loadTextIntoComposer(text: string): void {
+    // If a prompt is running, focus-only; don't clobber an in-flight composer draft.
+    if (this.isPrompting) {
+      this.addSystemMessage('Wait for the current response to finish before editing a prompt.');
+      return;
+    }
+    this.inputEl.value = text;
+    this.inputEl.focus();
+    const len = text.length;
+    this.inputEl.setSelectionRange(len, len);
+    this.autoGrowInput();
   }
 
   private appendUserImages(messageEl: HTMLElement, images: ComposerImage[]): void {
