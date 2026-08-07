@@ -33,7 +33,11 @@ export type CredentialCandidate = {
   name: string;
   username?: string;
   folder?: string;
-  match: 'exact-origin' | 'same-host';
+  match: 'exact-origin' | 'same-host' | 'search';
+  // True when the candidate's URIs do not list the current page origin. Computed
+  // only in main so URIs never reach the renderer. Off-origin fills require explicit
+  // confirmation + main revalidation (see acknowledgeOffOrigin in the controller).
+  offItemOrigin: boolean;
 };
 
 export type CredentialResult<T> = { ok: true; value: T } | CredentialFailure;
@@ -137,15 +141,56 @@ export function matchRbwEntries(entries: RbwEntryMetadata[], pageUrl: string): C
   for (const entry of entries) {
     if (entry.type !== 'login') continue;
     let best: CredentialCandidate['match'] | null = null;
+    let offItemOrigin = true;
     for (const uri of entry.uris) {
       const target = originAndHost(uri);
       if (!target || target.host !== page.host) continue;
+      offItemOrigin = false;
       if (target.origin === page.origin) best = 'exact-origin';
       else if (!best) best = 'same-host';
     }
-    if (best) candidates.push({ id: entry.id, name: entry.name, username: entry.username, folder: entry.folder, match: best });
+    if (best) candidates.push({ id: entry.id, name: entry.name, username: entry.username, folder: entry.folder, match: best, offItemOrigin });
   }
   candidates.sort((a, b) => Number(b.match === 'exact-origin') - Number(a.match === 'exact-origin') || a.name.localeCompare(b.name));
+  return candidates.length ? { ok: true, value: candidates } : { ok: false, code: 'no-match' };
+}
+
+// Metadata-only manual search over already-parsed rbw list fields: name, username,
+// folder, URI. Case-insensitive, deterministic. Never retrieves secrets — rbw list --raw
+// carries no password/TOTP. Organization/collection are unavailable from rbw list --raw,
+// so they are intentionally not searched (adding a secret-bearing rbw call would violate
+// the no-secrets-to-search contract). Returns origin-aware candidates so the UI can rank
+// exact/same-host hits first and mark off-origin selections for confirmation.
+export function searchRbwEntries(entries: RbwEntryMetadata[], query: string, pageUrl: string): CredentialResult<CredentialCandidate[]> {
+  const page = originAndHost(pageUrl);
+  if (!page) return { ok: false, code: 'no-match' };
+  const needle = query.trim().toLowerCase();
+  if (!needle) return { ok: false, code: 'no-match' };
+  const tokens = needle.split(/\s+/).filter(Boolean);
+  const candidates: CredentialCandidate[] = [];
+  for (const entry of entries) {
+    if (entry.type !== 'login') continue;
+    const haystack = [entry.name, entry.username, entry.folder, ...entry.uris]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .join('\n').toLowerCase();
+    if (!tokens.every((token) => haystack.includes(token))) continue;
+    // Rank origin matches first so the user still sees exact/same-host hits at the top
+    // of a manual search; a search-only hit with no URI overlap is off-origin.
+    let best: CredentialCandidate['match'] = 'search';
+    let offItemOrigin = true;
+    for (const uri of entry.uris) {
+      const target = originAndHost(uri);
+      if (!target || target.host !== page.host) continue;
+      offItemOrigin = false;
+      if (target.origin === page.origin) { best = 'exact-origin'; break; }
+      if (best === 'search') best = 'same-host';
+    }
+    candidates.push({ id: entry.id, name: entry.name, username: entry.username, folder: entry.folder, match: best, offItemOrigin });
+  }
+  // exact-origin → same-host → search, then name for determinism.
+  const rank = (match: CredentialCandidate['match']): number =>
+    match === 'exact-origin' ? 0 : match === 'same-host' ? 1 : 2;
+  candidates.sort((a, b) => rank(a.match) - rank(b.match) || a.name.localeCompare(b.name));
   return candidates.length ? { ok: true, value: candidates } : { ok: false, code: 'no-match' };
 }
 

@@ -100,3 +100,106 @@ test('mounts the browser as an expandable Inspector tab and hides it under overl
   assert.match(renderer, /browserRetryBtn\.addEventListener\('click', async/);
   assert.match(renderer, /window\.posse\.browserNavigate\(input\)/);
 });
+
+test('manual search is metadata-only and never retrieves secrets', () => {
+  assert.match(controller, /searchRbwEntries/);
+  assert.match(controller, /searchCredentialCandidates/);
+  assert.match(controller, /Metadata-only manual search/);
+  // Search must NOT call getRbwLogin or getRbwTotp (no secret retrieval for search).
+  const searchFn = controller.slice(controller.indexOf('async searchCredentialCandidates'));
+  const searchFnEnd = searchFn.indexOf('acknowledgeOffOrigin');
+  const searchBody = searchFn.slice(0, searchFnEnd);
+  assert.doesNotMatch(searchBody, /getRbwLogin/);
+  assert.doesNotMatch(searchBody, /getRbwTotp/);
+});
+
+test('off-origin fills require explicit confirmation + main revalidation for login and TOTP', () => {
+  // Both fillLogin and fillTotp gate on offItemOrigin && !acknowledged.
+  const fillLoginFn = controller.slice(controller.indexOf('async fillLogin'), controller.indexOf('async fillTotp'));
+  assert.match(fillLoginFn, /offItemOrigin && !target.acknowledged/);
+  assert.match(fillLoginFn, /code: 'off-origin'/);
+  const fillTotpFn = controller.slice(controller.indexOf('async fillTotp'), controller.indexOf('private resolveCredentialToken'));
+  assert.match(fillTotpFn, /offItemOrigin && !target.acknowledged/);
+  assert.match(fillTotpFn, /code: 'off-origin'/);
+  // acknowledgeOffOrigin revalidates token + current origin before marking acknowledged.
+  assert.match(controller, /acknowledgeOffOrigin\(token: string\)/);
+  assert.match(controller, /target.acknowledged = true/);
+  // Renderer confirms via confirmDangerDialog before acknowledging.
+  assert.match(renderer, /confirmDangerDialog\([\s\S]*?Fill a login not listed for this origin/);
+  assert.match(renderer, /browserCredentialAcknowledgeOffOrigin/);
+});
+
+test('credential tokens carry off-origin + display metadata and clear on navigation/relist', () => {
+  // Token state extended with offItemOrigin + acknowledged + display metadata.
+  assert.match(controller, /offItemOrigin: boolean/);
+  assert.match(controller, /acknowledged: boolean/);
+  // listCredentialCandidates + searchCredentialCandidates both invalidate prior tokens.
+  const listFn = controller.slice(controller.indexOf('async listCredentialCandidates'), controller.indexOf('async searchCredentialCandidates'));
+  assert.match(listFn, /this\.invalidateCredentialTokens\(\)/);
+  const searchFn = controller.slice(controller.indexOf('async searchCredentialCandidates'), controller.indexOf('acknowledgeOffOrigin(token'));
+  assert.match(searchFn, /this\.invalidateCredentialTokens\(\)/);
+  // Navigation already invalidates (existing behavior preserved).
+  assert.match(controller, /did-navigate[\s\S]*?invalidateCredentialTokens/);
+});
+
+test('persistent origin→item mapping stores only itemId/name/username — no secret, no token', () => {
+  assert.match(controller, /credential-origin-mappings\.json/);
+  assert.match(controller, /writeFileSync\(CREDENTIAL_MAPPINGS_FILE/);
+  assert.match(controller, /readFileSync\(CREDENTIAL_MAPPINGS_FILE/);
+  // The persisted mapping object pushed by rememberCredential must list only
+  // origin/itemId/name/username — no token or password fields in the record.
+  const rememberFn = controller.slice(controller.indexOf('rememberCredential(token: string)'), controller.indexOf('listCredentialMappings():'));
+  const pushLine = rememberFn.match(/mappings\.push\(\{[^}]+\}\)/);
+  assert.ok(pushLine, 'rememberCredential should push a mapping record');
+  assert.doesNotMatch(pushLine[0], /token/i);
+  assert.doesNotMatch(pushLine[0], /password/i);
+  assert.match(pushLine[0], /itemId/);
+  assert.match(pushLine[0], /name/);
+  // loadCredentialMappings only copies origin/itemId/name/username fields.
+  const loadFn = controller.slice(controller.indexOf('function loadCredentialMappings'), controller.indexOf('function saveCredentialMappings'));
+  assert.match(loadFn, /origin: record\.origin/);
+  assert.match(loadFn, /itemId: record\.itemId/);
+  assert.doesNotMatch(loadFn, /record\.token/);
+  assert.doesNotMatch(loadFn, /record\.password/);
+  // Remember resolves the current token in main, not an itemId from the renderer.
+  assert.match(controller, /rememberCredential\(token: string\)[\s\S]*?this\.credentialTokens\.get\(token\)/);
+  // The IPC handler accepts only a token, never an itemId.
+  assert.match(main, /browser:credential-remember'[\s\S]*?token: string/);
+});
+
+test('remembered mappings appear as candidates when applicable but still require off-origin confirmation', () => {
+  // listCredentialCandidates surfaces a remembered mapping for the current origin.
+  assert.match(controller, /loadCredentialMappings\(\)\.find\(\(mapping\) => mapping\.origin === origin\)/);
+  // A remembered mapping that isn't already matched is added with offItemOrigin: true.
+  assert.match(controller, /offItemOrigin: true, acknowledged: false,[\s\S]*?match: 'search'/);
+});
+
+test('renderer exposes search, remember, and mapping management through narrow preload surface', () => {
+  assert.match(preload, /browserCredentialSearch: \(query: string\)/);
+  assert.match(preload, /browserCredentialAcknowledgeOffOrigin: \(token: string\)/);
+  assert.match(preload, /browserCredentialRemember: \(token: string\)/);
+  assert.match(preload, /browserCredentialMappingsList:/);
+  assert.match(preload, /browserCredentialMappingRemove: \(origin: string\)/);
+  // Preload still never leaks webContents or internals.
+  assert.doesNotMatch(preload, /webContents/);
+  // Renderer uses confirmDangerDialog for off-origin warning + mapping delete
+  // (no browser prompt/alert/confirm in the credential menu code).
+  const credStart = renderer.indexOf('function credentialActionLabel');
+  const credEnd = renderer.indexOf('function syncBrowserBounds');
+  const credCode = renderer.slice(credStart, credEnd);
+  assert.match(credCode, /confirmDangerDialog\([\s\S]*?Remove remembered mapping/);
+  assert.doesNotMatch(credCode, /\balert\(/);
+  assert.doesNotMatch(credCode, /\bconfirm\(/);
+  assert.doesNotMatch(credCode, /\bprompt\(/);
+});
+
+test('search debounce and transient UI clear on navigation/profile reset', () => {
+  assert.match(renderer, /credentialSearchTimer/);
+  assert.match(renderer, /setTimeout[\s\S]*?150/);
+  // Navigation clears transient UI.
+  assert.match(renderer, /onBrowserState[\s\S]*?browserCredentialsSearch\.value = ''/);
+  // Clear-profile clears the search + remembered section.
+  const clearFn = renderer.slice(renderer.indexOf('browserClearBtn.addEventListener'), renderer.indexOf('browserCloseBtn.addEventListener'));
+  assert.match(clearFn, /browserCredentialsSearch\.value = ''/);
+  assert.match(clearFn, /browserCredentialsRemembered\.replaceChildren\(\)/);
+});

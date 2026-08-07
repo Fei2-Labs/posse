@@ -6,8 +6,11 @@ import {
   type Rectangle,
   type Session,
   type WebContents,
+  app,
 } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { browserSecurityState, normalizeBrowserUrl } from './browser-url';
 import { scaleAndClampBrowserBounds, type BrowserRawBounds } from './browser-geometry';
 import {
@@ -15,6 +18,7 @@ import {
   getRbwTotp,
   listRbwCredentials,
   matchRbwEntries,
+  searchRbwEntries,
   type CredentialCandidate,
 } from './browser-credentials';
 
@@ -47,6 +51,18 @@ export type EmbeddedBrowserCredentialList =
 export type EmbeddedBrowserCredentialAction =
   | { ok: true; status: 'filled' | 'submitted' | 'site-submitted' }
   | { ok: false; code: string };
+// Remembered origin→item mapping. Stores only itemId/name/username — never a secret or
+// token. The token is transient (random UUID bound to the current origin); a mapping is
+// the durable link so the user can re-select a previously chosen credential for an origin.
+export type CredentialOriginMapping = {
+  origin: string;
+  itemId: string;
+  name: string;
+  username?: string;
+};
+export type EmbeddedBrowserCredentialMappings =
+  | { ok: true; mappings: CredentialOriginMapping[] }
+  | { ok: false; code: string };
 
 type PendingPermission = {
   ownerId: number;
@@ -56,9 +72,54 @@ type PendingPermission = {
   callback: (allowed: boolean) => void;
 };
 
-type CredentialToken = { id: string; origin: string };
+type CredentialToken = {
+  id: string;
+  origin: string;
+  // True when the item's URIs do not list the current origin. Off-origin fills (login
+  // and TOTP) require explicit renderer confirmation + main revalidation via
+  // acknowledgeOffOrigin, which flips this to false for the same token/origin session.
+  offItemOrigin: boolean;
+  acknowledged: boolean;
+  // Display metadata needed for the renderer to render a remembered candidate without
+  // holding secrets or URIs. Resolved in main from the live token; never sent back.
+  name: string;
+  username?: string;
+  folder?: string;
+  match: CredentialCandidate['match'];
+};
 
 const CREDENTIAL_WORLD_ID = 42;
+const CREDENTIAL_MAPPINGS_FILE = join(app.getPath('userData'), 'credential-origin-mappings.json');
+
+function loadCredentialMappings(): CredentialOriginMapping[] {
+  try {
+    const raw = readFileSync(CREDENTIAL_MAPPINGS_FILE, 'utf-8');
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value)) return [];
+    const out: CredentialOriginMapping[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== 'object') continue;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.origin !== 'string' || typeof record.itemId !== 'string' ||
+          typeof record.name !== 'string') continue;
+      out.push({
+        origin: record.origin,
+        itemId: record.itemId,
+        name: record.name,
+        username: typeof record.username === 'string' ? record.username : undefined,
+      });
+    }
+    return out;
+  } catch { /* missing / corrupt -> empty */ }
+  return [];
+}
+
+function saveCredentialMappings(mappings: CredentialOriginMapping[]): void {
+  try {
+    // Persist only origin/itemId/name/username — no secret, no token.
+    writeFileSync(CREDENTIAL_MAPPINGS_FILE, JSON.stringify(mappings, null, 2));
+  } catch { /* ignore — best-effort persistence */ }
+}
 
 function credentialOrigin(value: string): string | null {
   try {
@@ -348,24 +409,108 @@ export class EmbeddedBrowserController {
     this.invalidateCredentialTokens();
     const candidates = matched.value.map((candidate) => {
       const token = randomUUID();
-      this.credentialTokens.set(token, { id: candidate.id, origin });
+      this.credentialTokens.set(token, {
+        id: candidate.id, origin, offItemOrigin: candidate.offItemOrigin, acknowledged: false,
+        name: candidate.name, username: candidate.username, folder: candidate.folder, match: candidate.match,
+      });
+      return { ...candidate, token };
+    });
+    // Surface a remembered mapping for this origin as an extra candidate when present,
+    // so the user can re-fill a previously chosen credential. The mapping resolves the
+    // current token in main (the renderer never sends itemId for a fill).
+    const remembered = loadCredentialMappings().find((mapping) => mapping.origin === origin);
+    if (remembered && !candidates.some((candidate) => candidate.id === remembered.itemId)) {
+      const token = randomUUID();
+      this.credentialTokens.set(token, {
+        id: remembered.itemId, origin, offItemOrigin: true, acknowledged: false,
+        name: remembered.name, username: remembered.username, folder: undefined, match: 'search',
+      });
+      candidates.push({
+        id: remembered.itemId, name: remembered.name, username: remembered.username,
+        folder: undefined, match: 'search', offItemOrigin: true, token,
+      });
+    }
+    return { ok: true, candidates };
+  }
+
+  // Metadata-only manual search. Never retrieves secrets; rbw list --raw carries no
+  // password/TOTP. Returns candidates ranked exact-origin → same-host → search, with
+  // offItemOrigin computed in main (URIs never reach the renderer).
+  async searchCredentialCandidates(query: string): Promise<EmbeddedBrowserCredentialList> {
+    if (typeof query !== 'string') return { ok: false, code: 'no-match' };
+    const origin = credentialOrigin(this.view.webContents.getURL());
+    if (!origin) return { ok: false, code: 'no-match' };
+    const listed = await listRbwCredentials();
+    if (!listed.ok) return listed;
+    const searched = searchRbwEntries(listed.value, query, this.view.webContents.getURL());
+    if (!searched.ok) return searched;
+    this.invalidateCredentialTokens();
+    const candidates = searched.value.map((candidate) => {
+      const token = randomUUID();
+      this.credentialTokens.set(token, {
+        id: candidate.id, origin, offItemOrigin: candidate.offItemOrigin, acknowledged: false,
+        name: candidate.name, username: candidate.username, folder: candidate.folder, match: candidate.match,
+      });
       return { ...candidate, token };
     });
     return { ok: true, candidates };
   }
 
+  // Renderer confirms an off-origin fill. Main revalidates the token + current origin
+  // before marking the token acknowledged; both login and TOTP off-origin fills require
+  // this gate. Returns false (no-match) for unknown/expired tokens.
+  acknowledgeOffOrigin(token: string): EmbeddedBrowserCredentialAction {
+    const target = this.credentialTokens.get(token);
+    if (!target) return { ok: false, code: 'no-match' };
+    const currentOrigin = credentialOrigin(this.view.webContents.getURL());
+    if (!currentOrigin || currentOrigin !== target.origin) return { ok: false, code: 'no-match' };
+    target.acknowledged = true;
+    return { ok: true, status: 'filled' };
+  }
+
+  // Remember the current origin→item mapping. Resolves the current token in main rather
+  // than accepting an itemId from the renderer, so the renderer can never persist an
+  // arbitrary item id. Stores only itemId/name/username — no secret, no token.
+  rememberCredential(token: string): EmbeddedBrowserCredentialAction {
+    const target = this.credentialTokens.get(token);
+    if (!target) return { ok: false, code: 'no-match' };
+    const currentOrigin = credentialOrigin(this.view.webContents.getURL());
+    if (!currentOrigin || currentOrigin !== target.origin) return { ok: false, code: 'no-match' };
+    const mappings = loadCredentialMappings().filter((mapping) =>
+      !(mapping.origin === target.origin && mapping.itemId === target.id));
+    mappings.push({ origin: target.origin, itemId: target.id, name: target.name, username: target.username });
+    saveCredentialMappings(mappings);
+    return { ok: true, status: 'filled' };
+  }
+
+  listCredentialMappings(): EmbeddedBrowserCredentialMappings {
+    return { ok: true, mappings: loadCredentialMappings() };
+  }
+
+  removeCredentialMapping(origin: string): EmbeddedBrowserCredentialAction {
+    if (typeof origin !== 'string' || !origin) return { ok: false, code: 'no-match' };
+    const mappings = loadCredentialMappings().filter((mapping) => mapping.origin !== origin);
+    saveCredentialMappings(mappings);
+    return { ok: true, status: 'filled' };
+  }
+
   async fillLogin(token: string): Promise<EmbeddedBrowserCredentialAction> {
     const target = this.resolveCredentialToken(token);
     if (!target) return { ok: false, code: 'no-match' };
+    // Off-origin fills require explicit renderer confirmation + main revalidation.
+    // 'off-origin' is the signal the renderer must prompt before retrying.
+    if (target.offItemOrigin && !target.acknowledged) return { ok: false, code: 'off-origin' };
     const secret = await getRbwLogin(target.id);
     if (!secret.ok) return secret;
     const result = await this.executeCredentialFill(secret.value.username, secret.value.password, undefined, false);
+    // Secrets live only transiently in this fill script; nothing is logged/stored/returned.
     return result;
   }
 
   async fillTotp(token: string, autoSubmit: boolean): Promise<EmbeddedBrowserCredentialAction> {
     const target = this.resolveCredentialToken(token);
     if (!target) return { ok: false, code: 'no-match' };
+    if (target.offItemOrigin && !target.acknowledged) return { ok: false, code: 'off-origin' };
     const secret = await getRbwTotp(target.id);
     if (!secret.ok) return secret;
     const result = await this.executeCredentialFill(undefined, undefined, secret.value, autoSubmit);
@@ -437,6 +582,13 @@ export class EmbeddedBrowserManager {
     controller.destroy();
     this.controllers.delete(ownerId);
     this.controllersByOwner.delete(owner);
+  }
+
+  // Credential mappings are per-app, not per-window. Any live controller reads/writes
+  // the same file, so the IPC list handler can use the first available controller.
+  anyController(): EmbeddedBrowserController | null {
+    for (const controller of this.controllers.values()) return controller;
+    return null;
   }
 
   resolvePermission(owner: BrowserWindow, requestId: string, allow: boolean): boolean {

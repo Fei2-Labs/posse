@@ -111,12 +111,26 @@ contextBridge.exposeInMainWorld('posse', {
   browserCredentialCandidates: () => ipcRenderer.invoke('browser:credential-candidates') as Promise<{
     ok: boolean;
     code?: string;
-    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' }>;
+    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }>;
+  }>,
+  browserCredentialSearch: (query: string) => ipcRenderer.invoke('browser:credential-search', query) as Promise<{
+    ok: boolean;
+    code?: string;
+    candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }>;
   }>,
   browserCredentialFillLogin: (token: string) =>
     ipcRenderer.invoke('browser:credential-fill-login', token) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
   browserCredentialFillTotp: (token: string, autoSubmit: boolean) =>
     ipcRenderer.invoke('browser:credential-fill-totp', token, autoSubmit) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
+  browserCredentialAcknowledgeOffOrigin: (token: string) =>
+    ipcRenderer.invoke('browser:credential-acknowledge-off-origin', token) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
+  browserCredentialRemember: (token: string) =>
+    ipcRenderer.invoke('browser:credential-remember', token) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
+  browserCredentialMappingsList: () => ipcRenderer.invoke('browser:credential-mappings-list') as Promise<{
+    ok: boolean; code?: string; mappings?: Array<{ origin: string; itemId: string; name: string; username?: string }>;
+  }>,
+  browserCredentialMappingRemove: (origin: string) =>
+    ipcRenderer.invoke('browser:credential-mapping-remove', origin) as Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>,
   browserBack: () => ipcRenderer.send('browser:back'),
   browserForward: () => ipcRenderer.send('browser:forward'),
   browserReloadOrStop: () => ipcRenderer.send('browser:reload-or-stop'),

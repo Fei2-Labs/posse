@@ -36,6 +36,7 @@ import {
   type EmbeddedBrowserState,
   type EmbeddedBrowserCredentialList,
   type EmbeddedBrowserCredentialAction,
+  type EmbeddedBrowserCredentialMappings,
 } from './browser-controller';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir, stopSshTunnel, stopAllSshTunnels } from './remote-bootstrap';
@@ -2509,6 +2510,32 @@ function registerIPC(): void {
     const browser = browserForEvent(event);
     if (!browser || typeof token !== 'string' || typeof autoSubmit !== 'boolean') return { ok: false, code: 'no-match' };
     return browser.controller.fillTotp(token, autoSubmit);
+  });
+  ipcMain.handle('browser:credential-search', async (event, query: string): Promise<EmbeddedBrowserCredentialList> => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof query !== 'string') return { ok: false, code: 'no-match' };
+    return browser.controller.searchCredentialCandidates(query);
+  });
+  ipcMain.handle('browser:credential-acknowledge-off-origin', async (event, token: string): Promise<EmbeddedBrowserCredentialAction> => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof token !== 'string') return { ok: false, code: 'no-match' };
+    return browser.controller.acknowledgeOffOrigin(token);
+  });
+  ipcMain.handle('browser:credential-remember', async (event, token: string): Promise<EmbeddedBrowserCredentialAction> => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof token !== 'string') return { ok: false, code: 'no-match' };
+    return browser.controller.rememberCredential(token);
+  });
+  ipcMain.handle('browser:credential-mappings-list', (): EmbeddedBrowserCredentialMappings => {
+    if (!embeddedBrowserManager) return { ok: false, code: 'failed' };
+    // Mappings are per-app (not per-window); use the first available controller.
+    const controller = embeddedBrowserManager.anyController();
+    return controller ? controller.listCredentialMappings() : { ok: true, mappings: [] };
+  });
+  ipcMain.handle('browser:credential-mapping-remove', (event, origin: string): EmbeddedBrowserCredentialAction => {
+    const browser = browserForEvent(event);
+    if (!browser || typeof origin !== 'string') return { ok: false, code: 'no-match' };
+    return browser.controller.removeCredentialMapping(origin);
   });
   ipcMain.on('browser:back', (event) => { browserForEvent(event)?.controller.goBack(); });
   ipcMain.on('browser:forward', (event) => { browserForEvent(event)?.controller.goForward(); });

@@ -117,9 +117,14 @@ declare global {
       browserSetBounds: (bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
       browserGetState: () => Promise<EmbeddedBrowserState | null>;
       browserNavigate: (input: string) => Promise<{ ok: boolean; error?: string }>;
-      browserCredentialCandidates: () => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' }> }>;
+      browserCredentialCandidates: () => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }> }>;
+      browserCredentialSearch: (query: string) => Promise<{ ok: boolean; code?: string; candidates?: Array<{ token: string; id: string; name: string; username?: string; folder?: string; match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean }> }>;
       browserCredentialFillLogin: (token: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
       browserCredentialFillTotp: (token: string, autoSubmit: boolean) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
+      browserCredentialAcknowledgeOffOrigin: (token: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
+      browserCredentialRemember: (token: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
+      browserCredentialMappingsList: () => Promise<{ ok: boolean; code?: string; mappings?: Array<{ origin: string; itemId: string; name: string; username?: string }> }>;
+      browserCredentialMappingRemove: (origin: string) => Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }>;
       browserBack: () => void;
       browserForward: () => void;
       browserReloadOrStop: () => void;
@@ -2255,6 +2260,8 @@ const browserPermissionDeny = requiredBrowserElement<HTMLButtonElement>('browser
 const browserCredentialsMenu = requiredBrowserElement<HTMLElement>('browser-credentials-menu');
 const browserCredentialsList = requiredBrowserElement<HTMLElement>('browser-credentials-list');
 const browserCredentialsStatus = requiredBrowserElement<HTMLElement>('browser-credentials-status');
+const browserCredentialsSearch = requiredBrowserElement<HTMLInputElement>('browser-credentials-search');
+const browserCredentialsRemembered = requiredBrowserElement<HTMLElement>('browser-credentials-remembered');
 const browserPasskeyExternal = requiredBrowserElement<HTMLButtonElement>('browser-passkey-external');
 
 const BROWSER_RELOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';
@@ -2335,26 +2342,29 @@ function credentialActionLabel(code: string | undefined): string {
   if (code === 'timeout') return 'rbw timed out';
   if (code === 'invalid-output') return 'rbw returned an unsupported response';
   if (code === 'auth-failed') return 'rbw authentication failed';
+  if (code === 'off-origin') return 'Confirm to fill a login not listed for this origin';
   return code ? 'Credential provider unavailable' : 'Find a matching login';
 }
 
-async function loadBrowserCredentials(): Promise<void> {
+type CredentialCandidateView = {
+  token: string; id: string; name: string;
+  username?: string; folder?: string;
+  match: 'exact-origin' | 'same-host' | 'search'; offItemOrigin: boolean;
+};
+
+function renderCredentialCandidates(candidates: CredentialCandidateView[]): void {
   browserCredentialsList.replaceChildren();
-  browserCredentialsStatus.textContent = 'Looking up matching logins...';
-  const result = await window.posse.browserCredentialCandidates();
-  if (!result.ok || !result.candidates?.length) {
-    browserCredentialsStatus.textContent = credentialActionLabel(result.code);
-    return;
-  }
-  browserCredentialsStatus.textContent = `${result.candidates.length} matching login${result.candidates.length === 1 ? '' : 's'}`;
-  for (const candidate of result.candidates) {
+  for (const candidate of candidates) {
     const row = document.createElement('div');
     row.className = 'browser-credential-row';
+    row.dataset.offOrigin = String(candidate.offItemOrigin);
     const label = document.createElement('div');
     label.className = 'browser-credential-label';
     label.textContent = candidate.name;
     const detail = document.createElement('span');
-    detail.textContent = candidate.username || candidate.match;
+    const detailParts = [candidate.username, candidate.folder, candidate.match]
+      .filter((part) => typeof part === 'string' && part.length > 0);
+    detail.textContent = detailParts.join(' · ') || candidate.match;
     label.append(detail);
     const actions = document.createElement('div');
     actions.className = 'browser-credential-actions';
@@ -2364,7 +2374,7 @@ async function loadBrowserCredentials(): Promise<void> {
     fill.textContent = 'Fill login';
     fill.addEventListener('click', async () => {
       fill.disabled = true;
-      const action = await window.posse.browserCredentialFillLogin(candidate.token);
+      const action = await fillCredential(candidate, 'login');
       fill.disabled = false;
       browserCredentialsStatus.textContent = action.ok ? 'Login fields filled' : credentialActionLabel(action.code);
     });
@@ -2374,15 +2384,131 @@ async function loadBrowserCredentials(): Promise<void> {
     totp.textContent = 'Fill TOTP';
     totp.addEventListener('click', async () => {
       totp.disabled = true;
-      const action = await window.posse.browserCredentialFillTotp(candidate.token, true);
+      const action = await fillCredential(candidate, 'totp');
       totp.disabled = false;
       browserCredentialsStatus.textContent = action.ok
         ? (action.status === 'submitted' ? 'TOTP filled and submitted' : action.status === 'site-submitted' ? 'Site submitted the code' : 'TOTP filled only')
         : credentialActionLabel(action.code);
     });
-    actions.append(fill, totp);
+    const remember = document.createElement('button');
+    remember.className = 'browser-credential-action';
+    remember.type = 'button';
+    remember.textContent = 'Remember';
+    remember.addEventListener('click', async () => {
+      remember.disabled = true;
+      const action = await window.posse.browserCredentialRemember(candidate.token);
+      remember.disabled = false;
+      browserCredentialsStatus.textContent = action.ok ? 'Remembered for this origin' : credentialActionLabel(action.code);
+      if (action.ok) await loadRememberedMappings();
+    });
+    actions.append(fill, totp, remember);
     row.append(label, actions);
     browserCredentialsList.append(row);
+  }
+}
+
+// Off-origin fills require explicit confirmation + main revalidation. The renderer never
+// holds secrets or URIs; it only asks the user to confirm the off-origin warning, then
+// calls acknowledgeOffOrigin (which flips the token's acknowledged flag in main) before
+// retrying the fill. Both login and TOTP follow this gate.
+async function fillCredential(
+  candidate: CredentialCandidateView,
+  kind: 'login' | 'totp',
+): Promise<{ ok: boolean; code?: string; status?: 'filled' | 'submitted' | 'site-submitted' }> {
+  if (candidate.offItemOrigin) {
+    const confirmed = await confirmDangerDialog(
+      'Fill a login not listed for this origin?',
+      `“${candidate.name}” is not registered to the current page origin. Fill it only if you trust this site.`,
+      'Fill anyway',
+    );
+    if (!confirmed) return { ok: false, code: 'no-match' };
+    const ack = await window.posse.browserCredentialAcknowledgeOffOrigin(candidate.token);
+    if (!ack.ok) return ack;
+  }
+  return kind === 'login'
+    ? window.posse.browserCredentialFillLogin(candidate.token)
+    : window.posse.browserCredentialFillTotp(candidate.token, true);
+}
+
+async function loadBrowserCredentials(): Promise<void> {
+  browserCredentialsSearch.value = '';
+  browserCredentialsList.replaceChildren();
+  browserCredentialsStatus.textContent = 'Looking up matching logins...';
+  const result = await window.posse.browserCredentialCandidates();
+  if (!result.ok || !result.candidates?.length) {
+    browserCredentialsStatus.textContent = credentialActionLabel(result.code);
+    // No/multiple match → expose manual search so the user can pick a credential.
+    browserCredentialsSearch.focus();
+    return;
+  }
+  browserCredentialsStatus.textContent = `${result.candidates.length} matching login${result.candidates.length === 1 ? '' : 's'}`;
+  renderCredentialCandidates(result.candidates);
+}
+
+// Debounced manual search (~150ms). Metadata-only; never retrieves secrets. Replaces the
+// candidate list with search results ranked exact-origin → same-host → search.
+let credentialSearchTimer: number | null = null;
+browserCredentialsSearch.addEventListener('input', () => {
+  const query = browserCredentialsSearch.value.trim();
+  if (credentialSearchTimer !== null) clearTimeout(credentialSearchTimer);
+  if (!query) {
+    // Empty query → reload origin-matched candidates (clears transient search results).
+    void loadBrowserCredentials();
+    return;
+  }
+  credentialSearchTimer = window.setTimeout(async () => {
+    browserCredentialsStatus.textContent = `Searching “${query}”…`;
+    const result = await window.posse.browserCredentialSearch(query);
+    if (!result.ok || !result.candidates?.length) {
+      browserCredentialsList.replaceChildren();
+      browserCredentialsStatus.textContent = credentialActionLabel(result.code);
+      return;
+    }
+    browserCredentialsStatus.textContent = `${result.candidates.length} search result${result.candidates.length === 1 ? '' : 's'}`;
+    renderCredentialCandidates(result.candidates);
+  }, 150);
+});
+
+async function loadRememberedMappings(): Promise<void> {
+  const result = await window.posse.browserCredentialMappingsList();
+  browserCredentialsRemembered.replaceChildren();
+  if (!result.ok || !result.mappings?.length) {
+    browserCredentialsRemembered.hidden = true;
+    return;
+  }
+  browserCredentialsRemembered.hidden = false;
+  const sub = document.createElement('div');
+  sub.className = 'browser-credentials-subheading';
+  sub.textContent = 'Remembered mappings';
+  browserCredentialsRemembered.append(sub);
+  for (const mapping of result.mappings) {
+    const row = document.createElement('div');
+    row.className = 'browser-credential-row';
+    const label = document.createElement('div');
+    label.className = 'browser-credential-label';
+    label.textContent = mapping.name;
+    const detail = document.createElement('span');
+    detail.textContent = `${mapping.origin}${mapping.username ? ` · ${mapping.username}` : ''}`;
+    label.append(detail);
+    const actions = document.createElement('div');
+    actions.className = 'browser-credential-actions';
+    const remove = document.createElement('button');
+    remove.className = 'browser-credential-action';
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', async () => {
+      const confirmed = await confirmDangerDialog(
+        'Remove remembered mapping?',
+        `“${mapping.name}” will no longer be suggested for ${mapping.origin}.`,
+        'Remove',
+      );
+      if (!confirmed) return;
+      const action = await window.posse.browserCredentialMappingRemove(mapping.origin);
+      if (action.ok) await loadRememberedMappings();
+    });
+    actions.append(remove);
+    row.append(label, actions);
+    browserCredentialsRemembered.append(row);
   }
 }
 
@@ -2448,7 +2574,10 @@ browserDevToolsBtn.addEventListener('click', () => window.posse.browserOpenDevTo
 browserCredentialsBtn.addEventListener('click', async () => {
   const open = browserCredentialsMenu.hidden;
   browserCredentialsMenu.hidden = !open;
-  if (open) await loadBrowserCredentials();
+  if (open) {
+    await loadBrowserCredentials();
+    await loadRememberedMappings();
+  }
   scheduleBrowserBoundsSync();
 });
 browserPasskeyExternal.addEventListener('click', async () => {
@@ -2472,6 +2601,9 @@ browserClearBtn.addEventListener('click', async () => {
   if (!confirmed) return;
   browserCredentialsMenu.hidden = true;
   browserCredentialsList.replaceChildren();
+  browserCredentialsSearch.value = '';
+  browserCredentialsRemembered.hidden = true;
+  browserCredentialsRemembered.replaceChildren();
   await resolveBrowserPermission(false);
   browserHasPage = false;
   browserState = { url: '', title: 'Browser', isLoading: false, canGoBack: false, canGoForward: false, security: 'neutral' };
@@ -2494,8 +2626,12 @@ browserPermissionDeny.addEventListener('click', () => { void resolveBrowserPermi
 
 window.posse.onBrowserState((state) => {
   browserState = state;
+  // Navigation changes origin → tokens clear in main; transient UI clears here too.
   browserCredentialsMenu.hidden = true;
   browserCredentialsList.replaceChildren();
+  browserCredentialsSearch.value = '';
+  browserCredentialsRemembered.hidden = true;
+  browserCredentialsRemembered.replaceChildren();
   if (state.url) browserHasPage = true;
   renderBrowserState();
 });

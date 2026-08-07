@@ -225,7 +225,11 @@
         </div>
         <div id="browser-credentials-menu" class="browser-credentials-menu" hidden>
           <div class="browser-credentials-heading"><strong>Bitwarden</strong><span id="browser-credentials-status">Find a matching login</span></div>
+          <input id="browser-credentials-search" class="browser-credentials-search" type="search" placeholder="Search logins by name, user, folder, URI" autocomplete="off" spellcheck="false" />
           <div id="browser-credentials-list"></div>
+          <div id="browser-credentials-remembered" class="browser-credentials-remembered" hidden>
+            <div class="browser-credentials-subheading">Remembered mappings</div>
+          </div>
           <button id="browser-passkey-external" class="browser-credential-action" type="button">Use passkey in default browser</button>
         </div>
         <div id="browser-permission" role="alert" hidden>
