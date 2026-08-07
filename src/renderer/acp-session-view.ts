@@ -62,6 +62,8 @@ interface ToolCallState {
   content?: ToolCallContent[];
   expanded: boolean;
   activityGroup?: HTMLDetailsElement;
+  // Wall-clock when the call first appeared (for subagent elapsed display). Set once on creation.
+  startedMs?: number;
 }
 
 interface ComposerImage {
@@ -111,6 +113,9 @@ export class AcpSessionView {
   private configOptions: SessionConfigOption[] = [];
   private status: AcpSessionInfo['status'] = 'initializing';
   private toolCalls = new Map<string, ToolCallState>();
+  // 1s tick that re-renders only in-progress subagent panels so their elapsed timer updates
+  // live. Allocated lazily and cleared as soon as no subagent is still running.
+  private subagentTickHandle: ReturnType<typeof setInterval> | null = null;
   private currentMessageEl: HTMLElement | null = null;
   private currentUserMessageEl: HTMLElement | null = null;
   private currentThoughtEl: HTMLElement | null = null;
@@ -869,6 +874,7 @@ export class AcpSessionView {
       content: update.content,
       expanded: this.conversationPreferences.expandToolsByDefault || update.status === 'failed',
       activityGroup: this.ensureActivityGroup(),
+      startedMs: Date.now(),
     };
     this.toolCalls.set(update.toolCallId, state);
     this.renderToolCall(state);
@@ -1043,6 +1049,13 @@ export class AcpSessionView {
 
   private guessToolKind(title: string): string {
     const t = title.toLowerCase();
+    // Subagent / delegated-task tools (Claude Task, Codex delegate, generic agent spawn).
+    // Match before file/edit so a title like "Delegate file research" still classifies as subagent.
+    if (t.includes('subagent') || t.includes('sub-agent') || t.includes('delegate')
+        || t.includes('sub-task') || t === 'task' || t.startsWith('task:') || t.startsWith('task ')
+        || t.includes('launch agent') || t.includes('spawn agent')) {
+      return 'subagent';
+    }
     if (t.includes('bash') || t.includes('shell') || t.includes('exec')) return 'bash';
     if (t.includes('read') || t.includes('file')) return 'file';
     if (t.includes('write') || t.includes('edit') || t.includes('create')) return 'edit';
@@ -1058,6 +1071,7 @@ export class AcpSessionView {
       edit: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 12l2-1 7-7-2-2-7 7-1 2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
       search: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.3"/><path d="M9 9l4 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
       web: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M2 7h10M7 2c1.5 1.5 1.5 8.5 0 10M7 2c-1.5 1.5-1.5 8.5 0 10" stroke="currentColor" stroke-width="1"/></svg>',
+      subagent: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1" y="2" width="9" height="7" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="5" y="6" width="8" height="6" rx="1" fill="var(--bg-elevated, #1e1e2e)" stroke="currentColor" stroke-width="1.2"/></svg>',
       other: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="2" stroke="currentColor" stroke-width="1.3"/></svg>',
     };
     return icons[kind] || icons.other;
@@ -1077,10 +1091,26 @@ export class AcpSessionView {
 
     const kind = this.guessToolKind(state.title);
     const kindIcon = this.toolKindIcon(kind);
-    el.className = `acp-tool-call acp-tool-${state.status}`;
+    const isSubagent = kind === 'subagent';
+    el.className = `acp-tool-call acp-tool-${state.status}${isSubagent ? ' acp-tool-subagent' : ''}`;
     (el as HTMLDetailsElement).open = state.expanded;
 
     const statusIcon = this.toolStatusIcon(state.status);
+    const statusLabel = this.toolStatusLabel(state.status);
+
+    // Subagent panels get a richer collapsed summary: nested-window icon, task title, live
+    // elapsed, status, and a one-line latest-activity preview drawn from the tool-call content.
+    // This surfaces what each delegated agent is doing without expanding it — the full structured
+    // content stays available under the disclosure.
+    let summaryExtras = '';
+    if (isSubagent) {
+      const elapsed = this.formatElapsed(state.startedMs, state.status);
+      const preview = this.subagentPreview(state.content);
+      summaryExtras = `
+        <span class="acp-subagent-elapsed" aria-hidden="true">${this.escapeHtml(elapsed)}</span>
+        <span class="acp-subagent-status acp-subagent-status-${state.status}">${statusIcon}<span class="acp-subagent-status-text">${this.escapeHtml(statusLabel)}</span></span>
+        ${preview ? `<span class="acp-subagent-preview">${this.escapeHtml(preview)}</span>` : ''}`;
+    }
 
     let contentHtml = '';
     if (state.content) {
@@ -1100,17 +1130,97 @@ export class AcpSessionView {
     }
 
     el.innerHTML = `
-      <summary class="acp-tool-header">
+      <summary class="acp-tool-header${isSubagent ? ' acp-subagent-header' : ''}">
         <span class="acp-disclosure-chevron" aria-hidden="true">›</span>
         <span class="acp-tool-kind-icon">${kindIcon}</span>
         <span class="acp-tool-title">${this.escapeHtml(state.title)}</span>
-        <span class="acp-tool-status-icon">${statusIcon}</span>
+        ${summaryExtras}
+        ${!isSubagent ? `<span class="acp-tool-status-icon">${statusIcon}</span>` : ''}
       </summary>
       ${contentHtml}
     `;
     this.linkifyPlainUrls(el, true);
 
+    this.maybeReconcileSubagentTick();
     this.scrollToBottom();
+  }
+
+  // One-line latest-activity preview for a subagent tool call: the last non-empty text chunk,
+  // trimmed and clipped. Returns '' when there is nothing to show.
+  private subagentPreview(content?: ToolCallContent[]): string {
+    if (!content || !content.length) return '';
+    let last = '';
+    for (const c of content) {
+      if (c.type === 'content' && c.content?.type === 'text') {
+        const t = (c.content.text || '').trim();
+        if (t) last = t;
+      }
+    }
+    if (!last) return '';
+    const single = last.replace(/\s+/g, ' ');
+    return single.length > 140 ? single.slice(0, 140) + '…' : single;
+  }
+
+  // Human-readable elapsed for a subagent: from startedMs to now while running, frozen once
+  // the call reaches a terminal status (completed/failed).
+  private formatElapsed(startedMs: number | undefined, status: ToolCallStatus): string {
+    if (!startedMs) return '';
+    const terminal = status === 'completed' || status === 'failed';
+    const end = terminal ? startedMs : Date.now();
+    const ms = Math.max(0, end - startedMs);
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    if (m < 60) return `${m}m ${rem}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+  }
+
+  private toolStatusLabel(status: ToolCallStatus): string {
+    switch (status) {
+      case 'pending': return 'Queued';
+      case 'in_progress': return 'Running';
+      case 'completed': return 'Completed';
+      case 'failed': return 'Failed';
+      default: return '';
+    }
+  }
+
+  // Ensure the 1s subagent-tick runs only while at least one subagent tool call is in a
+  // non-terminal state, and is stopped otherwise (no steady timer when idle).
+  private maybeReconcileSubagentTick(): void {
+    const hasActive = Array.from(this.toolCalls.values()).some(
+      s => this.guessToolKind(s.title) === 'subagent' && (s.status === 'pending' || s.status === 'in_progress'),
+    );
+    if (hasActive && this.subagentTickHandle === null && !this.destroyed) {
+      this.subagentTickHandle = setInterval(() => this.tickSubagentElapsed(), 1000);
+    } else if (!hasActive && this.subagentTickHandle !== null) {
+      clearInterval(this.subagentTickHandle);
+      this.subagentTickHandle = null;
+    }
+  }
+
+  // Re-render only the elapsed/status bits of still-running subagent panels. Cheaper than a full
+  // renderToolCall and avoids resetting scroll/expand state on each tick.
+  private tickSubagentElapsed(): void {
+    if (this.destroyed) {
+      if (this.subagentTickHandle !== null) { clearInterval(this.subagentTickHandle); this.subagentTickHandle = null; }
+      return;
+    }
+    let stillActive = false;
+    for (const state of this.toolCalls.values()) {
+      if (this.guessToolKind(state.title) !== 'subagent') continue;
+      if (state.status !== 'pending' && state.status !== 'in_progress') continue;
+      stillActive = true;
+      const el = this.toolCallEls.get(state.toolCallId);
+      const elapsedEl = el?.querySelector<HTMLElement>('.acp-subagent-elapsed');
+      if (elapsedEl) elapsedEl.textContent = this.formatElapsed(state.startedMs, state.status);
+    }
+    if (!stillActive && this.subagentTickHandle !== null) {
+      clearInterval(this.subagentTickHandle);
+      this.subagentTickHandle = null;
+    }
   }
 
   private toolStatusIcon(status: ToolCallStatus): string {
@@ -1477,6 +1587,10 @@ export class AcpSessionView {
 
   destroy(notifyMain = true): void {
     this.destroyed = true;
+    if (this.subagentTickHandle !== null) {
+      clearInterval(this.subagentTickHandle);
+      this.subagentTickHandle = null;
+    }
     this.messagesResizeObserver.disconnect();
     if (notifyMain) window.posse.acpDestroy(this.sessionId);
     this.container.remove();

@@ -4278,6 +4278,67 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
 .acp-tool-failed .acp-tool-status-icon { color: #ef4444; }
 .acp-tool-failed .acp-tool-kind-icon { color: #ef4444; }
 
+/* Subagent panel: a delegated Task/sub-agent tool call rendered as a compact mini-session
+   row inside the parent timeline. Richer than a plain tool call — shows elapsed time, a
+   live status label, and a one-line latest-activity preview while collapsed. */
+.acp-tool-subagent {
+  border: 1px solid var(--border-default, #30363d);
+  border-radius: 8px;
+  background: var(--bg-secondary, #161b22);
+  margin: 6px 0;
+  padding: 0;
+}
+.acp-tool-subagent > .acp-tool-header {
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+.acp-subagent-header .acp-tool-kind-icon { color: var(--text-secondary, #8b949e); }
+.acp-subagent-header .acp-tool-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+.acp-subagent-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text-muted, #6e7681);
+}
+.acp-subagent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+}
+.acp-subagent-status-text { color: var(--text-secondary, #8b949e); }
+.acp-subagent-status-pending .acp-subagent-status-text,
+.acp-subagent-status-pending svg { color: #6b7280; }
+.acp-subagent-status-in_progress .acp-subagent-status-text,
+.acp-subagent-status-in_progress svg { color: #f59e0b; }
+.acp-subagent-status-in_progress .acp-tool-kind-icon { color: #f59e0b; }
+.acp-subagent-status-completed .acp-subagent-status-text,
+.acp-subagent-status-completed svg { color: #22c55e; }
+.acp-subagent-status-completed .acp-tool-kind-icon { color: #22c55e; }
+.acp-subagent-status-failed .acp-subagent-status-text,
+.acp-subagent-status-failed svg { color: #ef4444; }
+.acp-subagent-status-failed .acp-tool-kind-icon { color: #ef4444; }
+.acp-subagent-preview {
+  flex: 1 0 100%;
+  min-width: 0;
+  color: var(--text-secondary, #8b949e);
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acp-tool-subagent > .acp-tool-content { margin-left: 10px; }
+
+
 @keyframes acp-spin {
   to { transform: rotate(360deg); }
 }
