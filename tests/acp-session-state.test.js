@@ -303,6 +303,15 @@ test('ACP startup reports measured phases and does not advertise fake rollback',
   assert.match(styles, /\.acp-session-retry:focus-visible/);
 });
 
+test('ACP replay hides internal task-notification envelopes from assistant prose', () => {
+  const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  assert.match(view, /private isInternalTaskNotification\(raw: string\): boolean/);
+  assert.match(view, /text\.startsWith\('\<task-notification\>'\)/);
+  assert.match(view, /dataset\.internalNotification = 'true'/);
+  assert.match(view, /currentMessage\.remove\(\)/);
+  assert.match(view, /!messageId && !currentMessage\?\.dataset\.messageId/);
+});
+
 test('ACP history replay renders user message chunks without duplicating live prompts', () => {
   const view = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
   assert.match(view, /case 'user_message_chunk':\s*this\.handleUserMessageChunk\(update\)/);

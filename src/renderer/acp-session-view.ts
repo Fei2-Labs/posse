@@ -974,9 +974,21 @@ export class AcpSessionView {
 
     const messageId = update.messageId;
     const currentMessage = this.currentMessageEl;
-    if (messageId && currentMessage?.dataset.messageId === messageId) {
+    const sameMessage = Boolean(currentMessage) && (
+      (Boolean(messageId) && currentMessage?.dataset.messageId === messageId)
+      || (!messageId && !currentMessage?.dataset.messageId)
+    );
+    if (sameMessage && currentMessage) {
       const raw = (currentMessage.dataset.raw || '') + text;
       currentMessage.dataset.raw = raw;
+      // Claude Code's adapter may replay its internal subagent completion envelope as an
+      // agent_message_chunk. It is transport metadata, not assistant prose. Keep the detached
+      // element as the chunk accumulator so every later chunk for the same message stays hidden.
+      if (currentMessage.dataset.internalNotification === 'true' || this.isInternalTaskNotification(raw)) {
+        currentMessage.dataset.internalNotification = 'true';
+        currentMessage.remove();
+        return;
+      }
       const bodyEl = this.requiredElement<HTMLElement>('.acp-msg-body', currentMessage);
       bodyEl.innerHTML = this.renderMarkdown(raw);
       this.decorateMessageContent(bodyEl);
@@ -986,8 +998,20 @@ export class AcpSessionView {
       this.currentMessageEl = this.addAgentMessage(text);
       if (messageId) this.currentMessageEl.dataset.messageId = messageId;
       this.currentMessageEl.dataset.raw = text;
+      if (this.isInternalTaskNotification(text)) {
+        this.currentMessageEl.dataset.internalNotification = 'true';
+        this.currentMessageEl.remove();
+        return;
+      }
       this.decorateMessageContent(this.requiredElement('.acp-msg-body', this.currentMessageEl));
     }
+  }
+
+  private isInternalTaskNotification(raw: string): boolean {
+    const text = raw.trimStart();
+    return text.startsWith('<task-notification>')
+      || text.startsWith('&lt;task-notification&gt;')
+      || text.startsWith('[SYSTEM NOTIFICATION - NOT USER INPUT]');
   }
 
   private decorateMessageContent(scope: HTMLElement): void {
