@@ -266,6 +266,63 @@ export function preferredAllowPermission(options: PermissionOption[]): Permissio
     || null;
 }
 
+// ========== ACP authentication (#117) ==========
+// Agents may reject session/new or session/load with the JSON-RPC `auth_required`
+// error (-32000) until the client has called `authenticate` on THIS adapter process.
+// The credentials themselves already live on disk (e.g. ~/.codex/auth.json), so the
+// call is normally non-interactive — but because Posse never made it, every restart
+// spawned a fresh adapter that refused to resume. codex-acp in particular enforces it
+// on session/load while letting session/new through, which is why only resume broke.
+const ACP_AUTH_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+interface AcpAuthMethod { id: string; name?: string; description?: string }
+
+export function isAuthRequiredError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === -32000) return true;
+  const message = (err as { message?: unknown }).message;
+  return typeof message === 'string' && /authentication required/i.test(message);
+}
+
+// Auth methods are tried in the order the agent advertises them in `initialize`.
+// That is the agent's own stated preference and needs no guessing on our part: codex-acp
+// lists `api-key` before `chat-gpt`, so an API-key setup is honoured first and a
+// subscription login is the fallback. Sniffing the environment to reorder was tried and
+// rejected — it silently overrode what the user had actually configured. Failed methods
+// are cheap (a missing key errors immediately and mutates no state), so walking the whole
+// list costs nothing in the common case.
+function describeAuthMethod(m: AcpAuthMethod): string {
+  return m.name ? `${m.id} (${m.name})` : m.id;
+}
+
+// Human-facing recovery hint when every advertised method fails. Credentials live in
+// the agent's own CLI, so the fix is always "log in with that CLI, then retry".
+function authRecoveryHint(agentLabel: string): string {
+  const base = agentLabel.toLowerCase().trim().split(/\s+/)[0];
+  const commands: Record<string, string> = {
+    codex: 'codex login',
+    claude: 'claude login',
+    copilot: 'copilot',
+    'kiro-cli': 'kiro-cli login',
+    opencode: 'opencode auth login',
+  };
+  const cmd = commands[base];
+  return cmd
+    ? `Run \`${cmd}\` in a terminal to sign in, then retry this session.`
+    : 'Sign in with the agent\'s CLI, then retry this session.';
+}
+
 export interface AcpSessionInfo {
   id: string;
   agentLabel: string;
@@ -288,6 +345,7 @@ export type AcpStartupPhase =
   | 'spawning-adapter'
   | 'connecting'
   | 'initializing-protocol'
+  | 'authenticating'
   | 'creating-session'
   | 'loading-session'
   | 'applying-config'
@@ -513,6 +571,61 @@ export class AcpManager {
     }
   }
 
+  // #117: run `request`, and if the agent answers auth_required, authenticate with the
+  // methods it advertised at initialize and run it once more. The credentials are already
+  // on disk, so this is normally a silent round trip; it only becomes visible if every
+  // method fails, in which case the error names the CLI command that fixes it.
+  private async withAcpAuth<T>(
+    id: string,
+    agentLabel: string,
+    acp: AcpSdk,
+    ctx: ClientContext,
+    authMethods: AcpAuthMethod[],
+    startup: StartupTracker,
+    info: AcpSessionInfo,
+    request: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await request();
+    } catch (err) {
+      if (!isAuthRequiredError(err)) throw err;
+
+      const candidates = authMethods;
+      if (candidates.length === 0) {
+        throw new Error(`Authentication required. ${authRecoveryHint(agentLabel)}`);
+      }
+
+      this.advanceStartup(id, startup, 'authenticating', info);
+      const failures: string[] = [];
+      for (const method of candidates) {
+        try {
+          await withTimeout(
+            ctx.request(acp.methods.agent.authenticate, { methodId: method.id }),
+            ACP_AUTH_TIMEOUT_MS,
+            `authenticate(${method.id}) timed out`,
+          );
+          console.info(`[ACP ${id}] authenticated via ${describeAuthMethod(method)}`);
+        } catch (authErr) {
+          const message = authErr instanceof Error ? authErr.message : String(authErr);
+          failures.push(`${method.id}: ${message}`);
+          console.warn(`[ACP ${id}] auth method "${method.id}" failed:`, message);
+          continue;
+        }
+        try {
+          return await request();
+        } catch (retryErr) {
+          // Auth went through but the agent still refuses — try the next method.
+          // Anything else is a genuine failure and must not be masked as an auth problem.
+          if (!isAuthRequiredError(retryErr)) throw retryErr;
+          const message = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          failures.push(`${method.id}: still rejected after authenticate (${message})`);
+        }
+      }
+      console.error(`[ACP ${id}] all auth methods failed:`, failures);
+      throw new Error(`Authentication required. ${authRecoveryHint(agentLabel)}`);
+    }
+  }
+
   async create(id: string, agentLabel: string, cwd: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
     const startup = this.startStartup(id);
     const acp = await loadAcpSdk();
@@ -615,14 +728,18 @@ export class AcpManager {
             },
           });
           info.promptCapabilities = initialized.agentCapabilities?.promptCapabilities || null;
+          const authMethods = (initialized.authMethods || []) as AcpAuthMethod[];
 
           // Create a new session
           this.advanceStartup(id, startup, 'creating-session', info);
           const browserServer = buildBrowserMcpServer(id);
-          const session = await ctx.request(acp.methods.agent.session.new, {
-            cwd,
-            mcpServers: browserServer ? [browserServer] : [],
-          });
+          const session = await this.withAcpAuth(
+            id, agentLabel, acp, ctx, authMethods, startup, info,
+            () => ctx.request(acp.methods.agent.session.new, {
+              cwd,
+              mcpServers: browserServer ? [browserServer] : [],
+            }),
+          );
           const entry = this.sessions.get(id);
           if (!entry) {
             return;
@@ -904,15 +1021,21 @@ export class AcpManager {
             clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
           });
           info.promptCapabilities = initialized.agentCapabilities?.promptCapabilities || null;
+          const authMethods = (initialized.authMethods || []) as AcpAuthMethod[];
 
-          // Load the existing session
+          // Load the existing session. #117: codex-acp enforces authentication here even
+          // though session/new passes, so this MUST go through the auth-retry wrapper —
+          // otherwise every app restart spawns a fresh adapter that refuses to resume.
           this.advanceStartup(id, startup, 'loading-session', info);
           const loadBrowserServer = buildBrowserMcpServer(id);
-          const loadResp = await ctx.request(acp.methods.agent.session.load, {
-            sessionId: acpSessionId,
-            mcpServers: loadBrowserServer ? [loadBrowserServer] : [],
-            cwd,
-          });
+          const loadResp = await this.withAcpAuth(
+            id, agentLabel, acp, ctx, authMethods, startup, info,
+            () => ctx.request(acp.methods.agent.session.load, {
+              sessionId: acpSessionId,
+              mcpServers: loadBrowserServer ? [loadBrowserServer] : [],
+              cwd,
+            }),
+          );
 
           const entry = this.sessions.get(id);
           if (!entry) return;
