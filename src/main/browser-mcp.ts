@@ -27,6 +27,7 @@ import { z } from 'zod';
 
 const BRIDGE_URL = process.env.POSSE_BROWSER_OPS_URL;
 const BRIDGE_TOKEN = process.env.POSSE_BROWSER_OPS_TOKEN;
+const BRIDGE_SESSION = process.env.POSSE_BROWSER_OPS_SESSION || '';
 
 if (!BRIDGE_URL || !BRIDGE_TOKEN) {
   console.error('[browser-mcp] missing POSSE_BROWSER_OPS_URL / POSSE_BROWSER_OPS_TOKEN env');
@@ -49,9 +50,20 @@ async function callBridge(op: string, body: Record<string, unknown> = {}): Promi
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${BRIDGE_TOKEN}`,
+      // Identify the owning ACP session so the server can enforce single-session
+      // ownership of the browser (#109): a second session's call is rejected 423
+      // while another session holds control.
+      'x-posse-session': BRIDGE_SESSION,
     },
     body: JSON.stringify(body),
   });
+  if (res.status === 423) {
+    // Locked by another agent session — surface a clear tool error, not a throw.
+    let detail = '';
+    try { detail = await res.text(); } catch { /* ignore */ }
+    const parsed = detail ? (JSON.parse(detail) as BridgeResponse) : null;
+    throw new Error(parsed && !parsed.ok ? parsed.error : 'Browser is currently controlled by another agent session. Wait for it to finish, or have the user release control.');
+  }
   if (!res.ok) {
     let detail = '';
     try { detail = await res.text(); } catch { /* ignore */ }

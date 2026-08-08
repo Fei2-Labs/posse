@@ -30,10 +30,23 @@ export interface BrowserOpsServer {
   port: number;
   token: string;
   baseUrl: string;
+  /** Release a session's ownership of the browser (called when the ACP session closes). */
+  releaseOwner(sessionId: string): void;
+  /** The session id that currently owns the browser, or null. */
+  currentOwner(): string | null;
+  /** Subscribe to ownership changes (acquire/release). Used by the UI indicator (#109). */
+  onOwnershipChange(handler: (ownerSessionId: string | null) => void): void;
   close(): void;
 }
 
 type OpResult = { ok: boolean; [key: string]: unknown };
+
+// Single-session ownership of the agent-driven browser (#109 acceptance criterion 5:
+// two simultaneous agents cannot unknowingly control the same tab). The first session
+// to call a tool becomes the owner; a different session's calls are rejected with 423
+// until the owner releases (session close) or times out. A idle timeout prevents a
+// dead session from holding the browser forever.
+const OWNER_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
@@ -65,6 +78,25 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
 
 export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserOpsServer | null {
   const token = randomUUID();
+  let ownerSessionId: string | null = null;
+  let ownerTimer: NodeJS.Timeout | null = null;
+  const ownershipHandlers = new Set<(owner: string | null) => void>();
+
+  const notifyOwnership = () => {
+    for (const h of ownershipHandlers) {
+      try { h(ownerSessionId); } catch { /* handler must not crash the request path */ }
+    }
+  };
+  const clearOwnerTimer = () => {
+    if (ownerTimer) { clearTimeout(ownerTimer); ownerTimer = null; }
+  };
+  const releaseOwnerInternal = (sessionId: string) => {
+    if (ownerSessionId !== sessionId) return;
+    clearOwnerTimer();
+    ownerSessionId = null;
+    notifyOwnership();
+  };
+
   let server: http.Server | null = null;
   try {
     server = http.createServer(async (req, res) => {
@@ -74,10 +106,38 @@ export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserO
       if (bearer !== token) { send(res, 401, { ok: false, error: 'Unauthorized' }); return; }
       if (req.method !== 'POST') { send(res, 405, { ok: false, error: 'Method not allowed' }); return; }
 
+      const url = req.url || '';
+      // Read-only state/screenshot are allowed WITHOUT ownership so an agent can
+      // inspect without grabbing control from another. Everything else requires
+      // ownership (acquire on first mutating call).
+      const sessionHeader = req.headers['x-posse-session'];
+      const sessionId = typeof sessionHeader === 'string' ? sessionHeader : '';
+      const isReadonly = url === '/state' || url === '/screenshot' || url === '/dom-snapshot';
+
+      if (!isReadonly) {
+        if (ownerSessionId && sessionId && ownerSessionId !== sessionId) {
+          send(res, 423, { ok: false, error: 'Browser is currently controlled by another agent session.' });
+          return;
+        }
+        if (sessionId && ownerSessionId !== sessionId) {
+          // Acquire ownership for this session.
+          ownerSessionId = sessionId;
+          notifyOwnership();
+        }
+        // Refresh the idle timer on every mutating call from the owner.
+        clearOwnerTimer();
+        ownerTimer = setTimeout(() => {
+          if (ownerSessionId) {
+            ownerSessionId = null;
+            ownerTimer = null;
+            notifyOwnership();
+          }
+        }, OWNER_IDLE_TIMEOUT_MS);
+      }
+
       const controller = manager.agentController();
       if (!controller) { send(res, 503, { ok: false, error: 'No embedded browser is available. Open the browser view first.' }); return; }
 
-      const url = req.url || '';
       const body = await readBody(req);
       if (body === null) { send(res, 400, { ok: false, error: 'Invalid JSON body.' }); return; }
 
@@ -110,7 +170,17 @@ export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserO
     port,
     token,
     baseUrl,
+    releaseOwner(sessionId: string): void {
+      releaseOwnerInternal(sessionId);
+    },
+    currentOwner(): string | null {
+      return ownerSessionId;
+    },
+    onOwnershipChange(handler: (ownerSessionId: string | null) => void): void {
+      ownershipHandlers.add(handler);
+    },
     close(): void {
+      clearOwnerTimer();
       try { handle.close(); } catch { /* ignore */ }
     },
   };

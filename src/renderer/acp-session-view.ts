@@ -124,6 +124,8 @@ export class AcpSessionView {
   private agentLogoMarkup: string;
   private configOptions: SessionConfigOption[] = [];
   private status: AcpSessionInfo['status'] = 'initializing';
+  // #109: true while this session holds browser-control ownership.
+  private browserOwner = false;
   private toolCalls = new Map<string, ToolCallState>();
   // 1s tick that re-renders only in-progress subagent panels so their elapsed timer updates
   // live. Allocated lazily and cleared as soon as no subagent is still running.
@@ -1459,6 +1461,13 @@ export class AcpSessionView {
   }
 
   // ========== Status bar ==========
+  // #109: mark/unmark this session as the current browser owner + refresh the badge.
+  setBrowserOwner(isOwner: boolean): void {
+    if (this.browserOwner === isOwner) return;
+    this.browserOwner = isOwner;
+    this.renderStatusbar();
+  }
+
   private renderStatusbar(): void {
     const configControls = statusConfigOptions(this.configOptions);
     const configHtml = configControls.map(option => {
@@ -1507,6 +1516,7 @@ export class AcpSessionView {
           <span class="acp-sb-agent-dot" style="background:${this.agentColor}"></span>
           <span class="acp-sb-value">${this.escapeHtml(this.agentLabel)}</span>
         </span>
+        ${this.browserOwner ? '<span class="acp-sb-browser" title="This session is controlling the Posse browser" role="status">🖥️ browser</span>' : ''}
         ${configHtml}
       </div>
       <div class="acp-sb-trailing">

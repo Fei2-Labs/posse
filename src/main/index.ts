@@ -41,7 +41,7 @@ import {
 import { startBrowserOpsServer, type BrowserOpsServer } from './browser-ops-server';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir, stopSshTunnel, stopAllSshTunnels } from './remote-bootstrap';
-import { AcpManager, getAcpCommand, isAcpEligible, setBrowserMcpConfig } from './acp-client';
+import { AcpManager, getAcpCommand, isAcpEligible, setBrowserMcpConfig, setBrowserBridgeEnabled } from './acp-client';
 import { autoUpdater } from 'electron-updater';
 import buildStamp from './build-stamp.json';
 import {
@@ -606,6 +606,31 @@ function loadEditorPreference(): string | null {
   } catch { return null; }
 }
 
+// Browser-tool policy persistence (issue #109): global on/off for the agent
+// browser bridge. Defaults to ON so agents get the browser by default.
+function getBrowserPolicyPath(): string {
+  return path.join(app.getPath('userData'), 'browser-policy.json');
+}
+
+let browserPolicyCache: { browserBridgeEnabled: boolean } | null = null;
+function loadBrowserPolicy(): { browserBridgeEnabled: boolean } {
+  if (browserPolicyCache) return browserPolicyCache;
+  try {
+    const data = JSON.parse(fs.readFileSync(getBrowserPolicyPath(), 'utf-8'));
+    browserPolicyCache = { browserBridgeEnabled: data.browserBridgeEnabled !== false };
+  } catch {
+    browserPolicyCache = { browserBridgeEnabled: true };
+  }
+  return browserPolicyCache;
+}
+
+function saveBrowserPolicy(enabled: boolean): void {
+  try {
+    fs.writeFileSync(getBrowserPolicyPath(), JSON.stringify({ browserBridgeEnabled: enabled }));
+    browserPolicyCache = null;
+  } catch { /* ignore */ }
+}
+
 function expandUserPath(filePath: string): string {
   if (filePath === '~') return os.homedir();
   if (filePath.startsWith('~/') || filePath.startsWith('~\\')) {
@@ -873,6 +898,13 @@ const acpManager = new AcpManager(
   },
   (id, toolCallId, toolName, options) => {
     sendToAcpOwner('acp:permission', id, { toolCallId, toolName, options });
+  },
+  // Release the browser ownership lock when an ACP session closes (#109) so another
+  // session can take over. browserOpsServer is created later in startup (it's null
+  // until then), so guard the call.
+  (id) => {
+    browserOpsServer?.releaseOwner(id);
+    sendToAcpOwner('acp:browser-ownership', id, null);
   },
 );
 
@@ -4006,6 +4038,21 @@ function registerIPC(): void {
     return { ok: false, error: 'AI feature has been removed' };
   });
 
+  // ========== Browser-tool policy IPC (issue #109) ==========
+  // Global on/off for the agent browser bridge. Read at launch (above) to seed
+  // setBrowserBridgeEnabled(); this handler lets the settings UI toggle it live
+  // (subsequent ACP sessions pick up the new value, no restart needed).
+  ipcMain.handle('browser-bridge:get-enabled', (): boolean => {
+    return loadBrowserPolicy().browserBridgeEnabled;
+  });
+
+  ipcMain.handle('browser-bridge:set-enabled', (_e, enabled: boolean): boolean => {
+    if (typeof enabled !== 'boolean') return false;
+    saveBrowserPolicy(enabled);
+    setBrowserBridgeEnabled(enabled);
+    return true;
+  });
+
   // Get the model provider actually used by the CLI
   ipcMain.handle('cli:get-provider', (_e, presetCommand: string) => {
     return getCliProvider(presetCommand);
@@ -4192,7 +4239,18 @@ app.whenReady().then(async () => {
   } else {
     console.warn('[BrowserOps] agent bridge unavailable (server failed to start)');
   }
+  // Apply the persisted browser-tool policy (issue #109): gates whether ACP sessions
+  // receive the browser MCP server. Default ON; user can disable globally in settings.
+  const browserPolicy = loadBrowserPolicy();
+  setBrowserBridgeEnabled(browserPolicy.browserBridgeEnabled);
   registerIPC();
+  // Broadcast browser ownership changes to every window so the UI can show which
+  // agent controls the browser (#109). Null = no agent currently controls it.
+  browserOpsServer?.onOwnershipChange((ownerSessionId) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('browser:agent-ownership', ownerSessionId);
+    }
+  });
   cloudflaredManager = new CloudflaredManager(path.join(__dirname, '../..'));
   createWindow(appIcon);
 

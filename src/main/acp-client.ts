@@ -65,12 +65,29 @@ export function setBrowserMcpConfig(config: BrowserMcpConfig | null): void {
   browserMcpConfig = config;
 }
 
+// ===================== Browser-tool policy (issue #109) =====================
+// Global on/off for the agent browser bridge. Defaults to ON (the issue requires
+// "available to agents by default"). The user can turn it off globally via the
+// settings UI; future per-session override can thread a param through create()/load().
+// When OFF, buildBrowserMcpServer() returns null → sessions create with mcpServers: []
+// → no browser tools surfaced to the agent. The bridge HTTP server stays up (cheap,
+// token-authed, loopback-only); only the MCP injection is gated.
+let browserBridgeEnabled = true;
+
+export function setBrowserBridgeEnabled(enabled: boolean): void {
+  browserBridgeEnabled = enabled;
+}
+
+export function isBrowserBridgeEnabled(): boolean {
+  return browserBridgeEnabled;
+}
+
 // Resolve the bundled browser-mcp.js. In dev it lives next to this file in dist/main;
 // packaged, electron-builder ships dist/** under the asar, so __dirname (inside asar)
 // still reaches the sibling file. process.execPath is the Electron binary when running
 // as the app (needs ELECTRON_RUN_AS_NODE=1 to behave as plain node) or plain node in
 // headless mode.
-function resolveBrowserMcpCommand(): { command: string; args: string[]; env: EnvVariable[] } | null {
+function resolveBrowserMcpCommand(sessionId: string): { command: string; args: string[]; env: EnvVariable[] } | null {
   if (!browserMcpConfig) return null;
   const scriptPath = path.join(__dirname, 'browser-mcp.js');
   // ELECTRON_RUN_AS_NODE=1 makes the Electron binary run as plain node (the pty-daemon
@@ -79,6 +96,9 @@ function resolveBrowserMcpCommand(): { command: string; args: string[]; env: Env
   const env: EnvVariable[] = [
     { name: 'POSSE_BROWSER_OPS_URL', value: browserMcpConfig.baseUrl },
     { name: 'POSSE_BROWSER_OPS_TOKEN', value: browserMcpConfig.token },
+    // The owning ACP session id, so the bridge can claim browser ownership on first
+    // call and the server can reject conflicting control by another session (#109).
+    { name: 'POSSE_BROWSER_OPS_SESSION', value: sessionId },
   ];
   if (process.versions.electron && !process.env.ELECTRON_RUN_AS_NODE) {
     env.push({ name: 'ELECTRON_RUN_AS_NODE', value: '1' });
@@ -87,8 +107,9 @@ function resolveBrowserMcpCommand(): { command: string; args: string[]; env: Env
   return { command: process.execPath, args: [scriptPath], env };
 }
 
-function buildBrowserMcpServer(): McpServer | null {
-  const resolved = resolveBrowserMcpCommand();
+function buildBrowserMcpServer(sessionId: string): McpServer | null {
+  if (!browserBridgeEnabled) return null;
+  const resolved = resolveBrowserMcpCommand(sessionId);
   if (!resolved) return null;
   const stdio: McpServerStdio = {
     name: 'posse-browser',
@@ -97,6 +118,27 @@ function buildBrowserMcpServer(): McpServer | null {
     env: resolved.env,
   };
   return stdio;
+}
+
+// Issue #109: the one-time instruction block prepended to a session's first user
+// prompt. Only prepended when the browser bridge is enabled (see prompt()); when
+// disabled, no instruction is added — the agent simply has no browser tools.
+// This only GUIDES the agent (recommends the Posse built-in browser for web app
+// testing + reminds it the user's login is already present). The UI does not claim
+// it can force every third-party agent to invoke the tool.
+function buildBrowserInstructionBlocks(): { type: 'text'; text: string }[] {
+  if (!browserBridgeEnabled) return [];
+  return [{
+    type: 'text',
+    text: [
+      '[Posse environment note]',
+      'A built-in web browser is available to you via the "posse-browser" MCP tools (browser_get_state, browser_navigate, browser_screenshot, browser_dom_snapshot, browser_click, browser_type, browser_keypress, browser_scroll).',
+      'When you need to test or interact with a web application, prefer this built-in browser over launching any external or headless browser.',
+      'The user is already logged into this browser (persist:posse-browser-default); reuse that session rather than asking the user to re-authenticate. Do not request, print, or exfiltrate cookies, passwords, MFA codes, authorization headers, or stored secrets — the tools intentionally do not expose them.',
+      'Screenshots are pixel captures only; DOM snapshots are sanitized.',
+      '',
+    ].join('\n'),
+  }];
 }
 
 function loadAcpSdk(): Promise<AcpSdk> {
@@ -252,6 +294,9 @@ type AcpPermissionRequestHandler = (
   toolName: string,
   options: PermissionOption[],
 ) => void;
+// Called when an ACP session closes (process exit, destroy, or destroyAll). Used to
+// release the browser ownership lock so another session can take over (#109).
+type AcpSessionClosedHandler = (id: string) => void;
 
 type PendingPermission = {
   resolve: (outcome: RequestPermissionOutcome) => void;
@@ -285,10 +330,12 @@ export class AcpManager {
     context: ClientContext | null;
     info: AcpSessionInfo;
     replayBuffer: AcpReplayBuffer | null;
+    browserInstructionsSent: boolean;
   }>();
   private onUpdate: AcpUpdateHandler;
   private onStatus: AcpStatusHandler;
   private onPermissionRequest: AcpPermissionRequestHandler;
+  private readonly onSessionClosed: AcpSessionClosedHandler | undefined;
   private pendingPermissions = new Map<string, PendingPermission>();
   // Remote (mobile/headless) listeners. Each receives the same update/status
   // events as the desktop owner, so a mobile client can render structured
@@ -329,10 +376,12 @@ export class AcpManager {
     onUpdate: AcpUpdateHandler,
     onStatus: AcpStatusHandler,
     onPermissionRequest: AcpPermissionRequestHandler,
+    onSessionClosed?: (id: string) => void,
   ) {
     this.onUpdate = onUpdate;
     this.onStatus = onStatus;
     this.onPermissionRequest = onPermissionRequest;
+    this.onSessionClosed = onSessionClosed;
   }
 
   private startStartup(id: string): StartupTracker {
@@ -477,6 +526,7 @@ export class AcpManager {
       context: null,
       info,
       replayBuffer: null,
+      browserInstructionsSent: false,
     });
     this.advanceStartup(id, startup, 'connecting', info);
 
@@ -530,7 +580,7 @@ export class AcpManager {
 
           // Create a new session
           this.advanceStartup(id, startup, 'creating-session', info);
-          const browserServer = buildBrowserMcpServer();
+          const browserServer = buildBrowserMcpServer(id);
           const session = await ctx.request(acp.methods.agent.session.new, {
             cwd,
             mcpServers: browserServer ? [browserServer] : [],
@@ -577,6 +627,7 @@ export class AcpManager {
               this.cancelPendingPermissions(id);
               this.sessions.delete(id);
               info.status = 'closed';
+              this.releaseSessionResources(id);
               this.fanoutStatus(id, { status: 'closed' });
               resolveExit();
             });
@@ -622,9 +673,21 @@ export class AcpManager {
 
     try {
       const acp = await loadAcpSdk();
+      // Issue #109: once per session, prepend a short system instruction telling the
+      // agent that a Posse built-in browser is available (when the bridge is enabled),
+      // so it prefers that for web testing instead of launching an external browser.
+      // ACP has no dedicated instructions field, so it is prepended to the first user
+      // prompt as a leading text block. This only GUIDES the agent — availability is
+      // determined by whether the browser MCP tool is actually registered.
+      const blocks = typeof content === 'string'
+        ? [{ type: 'text' as const, text: content }]
+        : content;
+      const promptBlocks = session.browserInstructionsSent ? blocks
+        : [...buildBrowserInstructionBlocks(), ...blocks];
+      session.browserInstructionsSent = true;
       await session.context.request(acp.methods.agent.session.prompt, {
         sessionId: session.info.sessionId,
-        prompt: typeof content === 'string' ? [{ type: 'text', text: content }] : content,
+        prompt: promptBlocks,
       });
       session.info.status = 'idle';
       this.fanoutStatus(id, { status: 'idle' });
@@ -732,6 +795,7 @@ export class AcpManager {
       context: null,
       info,
       replayBuffer,
+      browserInstructionsSent: false,
     });
     this.advanceStartup(id, startup, 'connecting', info);
 
@@ -778,7 +842,7 @@ export class AcpManager {
 
           // Load the existing session
           this.advanceStartup(id, startup, 'loading-session', info);
-          const loadBrowserServer = buildBrowserMcpServer();
+          const loadBrowserServer = buildBrowserMcpServer(id);
           const loadResp = await ctx.request(acp.methods.agent.session.load, {
             sessionId: acpSessionId,
             mcpServers: loadBrowserServer ? [loadBrowserServer] : [],
@@ -811,6 +875,7 @@ export class AcpManager {
               this.cancelPendingPermissions(id);
               this.sessions.delete(id);
               info.status = 'closed';
+              this.releaseSessionResources(id);
               this.fanoutStatus(id, { status: 'closed' });
               resolveExit();
             });
@@ -852,7 +917,15 @@ export class AcpManager {
     this.sessions.delete(id);
     try { session.process.kill(); } catch { /* already exited */ }
     session.info.status = 'closed';
+    this.releaseSessionResources(id);
     if (notify) this.onStatus(id, { status: 'closed' });
+  }
+
+  // Central hook for resources bound to a session by id — currently the browser
+  // ownership lock (#109). Safe to call multiple times; a session can only own the
+  // browser once, so releaseOwner is a no-op when this session wasn't the owner.
+  private releaseSessionResources(id: string): void {
+    try { this.onSessionClosed?.(id); } catch { /* handler must not throw the close path */ }
   }
 
   destroyAll(notify = true): void {
