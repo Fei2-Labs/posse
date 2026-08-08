@@ -283,6 +283,9 @@ const acpViews: Map<string, AcpSessionView> = new Map();
 const acpSessionIds: Set<string> = new Set(); // sessions that are ACP (not PTY)
 const durableAcpSessionIds: Set<string> = new Set();
 const acpPresetCommands: Map<string, string> = new Map();
+// PTY session → original preset command, captured at create/restore time so a restart
+// (#112) can relaunch the same agent in the same cwd. ACP sessions use acpPresetCommands.
+const ptyPresetCommands: Map<string, string> = new Map();
 let activeAcpId: string | null = null;
 const LAST_FOREGROUND_SESSION_KEY = 'posse_last_foreground_session';
 const ACTIVE_ACP_SESSIONS_KEY = 'posse_active_acp_sessions_v1';
@@ -3872,6 +3875,12 @@ function showSessionContextMenu(e: MouseEvent, targetId: string): void {
 
   const items: Array<{ label: string; action: () => void }> = [
     {
+      label: 'Restart session',
+      action: () => {
+        void handleRestartClick(targetId);
+      },
+    },
+    {
       label: 'Regenerate title',
       action: () => {
         void window.posse.regenerateTitle(targetId);
@@ -4021,6 +4030,10 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
     startTitleEdit(id, titleSpan);
   });
 
+  // #112: restart this session in place — graceful stop + relaunch, same cwd/agent.
+  const restartBtn = makeSessionActionButton(ICON.refresh, 'Restart session');
+  restartBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleRestartClick(id); });
+
   const closeBtn = makeSessionActionButton(ICON.x, 'Close');
   closeBtn.addEventListener('click', (e) => { e.stopPropagation(); void handleCloseClick(id); });
 
@@ -4045,6 +4058,7 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
   }
   item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(editBtn);
+  item.appendChild(restartBtn);
   item.appendChild(closeBtn);
   item.appendChild(deleteBtn);
 
@@ -5312,6 +5326,7 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
   // PTY fallback (existing path)
   const themeId = resolveThemeId(currentThemeId, cwd);
   const result = await window.posse.createPty(cwd, presetCommand, themeId, undefined, useSubscriptionFlag());
+  ptyPresetCommands.set(result.id, presetCommand);
   const now = Date.now();
   attachPtySession(result, now);
 
@@ -5629,6 +5644,7 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   }
 
   const result = await window.posse.createPty(cwd, command, themeId, undefined, useSubscriptionFlag());
+  ptyPresetCommands.set(result.id, command);
   const now = Date.now();
   // Pick a displayName that always carries the agent name so the rail shows the agent immediately,
   // before runtime provider detection: prefer the captured displayName, else the spawned command's
@@ -5711,6 +5727,7 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
 
   const themeId = resolveThemeId(currentThemeId, s.cwd);
   const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId, undefined, useSubscriptionFlag());
+  ptyPresetCommands.set(result.id, presetFromResume || s.resumeCommand);
   const now = Date.now();
   // Ensure the rail shows the agent immediately: fall back to the resume command (contains the agent
   // name) / s.agent if the spawned displayName is missing, before runtime provider detection.
@@ -5858,6 +5875,163 @@ async function handleDeleteClick(id: string): Promise<void> {
   }
 }
 
+// #112: restart a session in place — same row id, same cwd/project, same agent.
+// ACP: terminate then session/load the SAME sessionId (preserves the conversation where
+// supported), or session/new (fresh) when no durable sessionId exists. PTY: kill + create
+// a fresh shell in the same cwd/theme. The row stays selected; metadata (title, pin,
+// project grouping) is preserved because the id never changes. Never touches the shared
+// daemon or any other session.
+async function handleRestartClick(id: string): Promise<void> {
+  const isAcp = acpSessionIds.has(id);
+  const cwd = sessionCwds.get(id);
+  const presetCommand = isAcp ? acpPresetCommands.get(id) : (ptyPresetCommands.get(id) || '');
+  const themeId = sessionThemes.get(id) || currentThemeId;
+  const agentLabel = sessionDisplayNames.get(id) || 'Session';
+  const resumeId = sessionResumeId.get(id) || sessionAgentId.get(id) || '';
+  const title = sessionTitles.get(id) || agentLabel;
+  if (!cwd || (isAcp && !presetCommand)) {
+    showToast('Restart failed: missing session configuration.', 4000);
+    return;
+  }
+
+  // Issue #112 safety: if the agent is actively generating, require explicit confirmation
+  // that this session will be interrupted. PTY sessions always prompt (a running command
+  // would be killed); idle PTY sessions restart without a prompt to match close behavior.
+  const busy = sessionBusy.has(id) || sessionWaiting.has(id);
+  if (isAcp) {
+    const view = acpViews.get(id);
+    const prompting = view?.getStatus?.() === 'prompting';
+    if (busy || prompting) {
+      const confirmed = await confirmDangerDialog(
+        'Restart session?',
+        `"${title}" is still running. Restarting will interrupt it. This session only.`,
+        'Restart',
+      );
+      if (!confirmed) return;
+    }
+  } else if (busy) {
+    const confirmed = await confirmDangerDialog(
+      'Restart session?',
+      `"${title}" is still busy. Restarting will interrupt it and start a fresh shell. This session only.`,
+      'Restart',
+    );
+    if (!confirmed) return;
+  }
+
+  // Capture the metadata needed to recreate BEFORE destroy clears it. ACP destroy with
+  // a closed-session record preserves the conversation for resume; PTY destroy captures
+  // its resumeId from the buffer in main.
+  const closedMeta = isAcp ? acpClosedSessionMetadata(id) : undefined;
+
+  // --- Terminate gracefully (main waits for the normal timeout before SIGKILL). ---
+  if (isAcp) {
+    window.posse.acpDestroy(id, closedMeta);
+  } else {
+    // PTY: destroy is a fire-and-forget send; main saves the closed-session record
+    // asynchronously. Remove the renderer row/term now so restoreClosedSession (which
+    // adds a fresh row) leaves no duplicate (#112 AC6). Pin survives — it is keyed by
+    // resumeId, not the ephemeral id.
+    window.posse.destroyPty(id);
+    removeLiveSessionFromRenderer(id);
+  }
+
+  // --- Recreate in place, reusing the SAME id. ---
+  try {
+    if (isAcp && presetCommand) {
+      // Reuse the existing view slot (mountLoadedAcpSessionView replaces the previous
+      // view element in place). Resume the SAME conversation when a durable sessionId
+      // exists (#112 AC2); otherwise start a fresh session.new.
+      if (resumeId) {
+        mountLoadedAcpSessionView(id, agentLabel, cwd, presetCommand, resumeId);
+      } else {
+        // Fresh ACP session: a new view + acp:create, same id.
+        const view = new AcpSessionView(id, agentLabel, cwd, conversationPreferences, openSessionLink);
+        const previous = acpViews.get(id);
+        if (previous) {
+          const previousElement = previous.getElement();
+          view.getElement().style.display = previousElement.style.display;
+          previous.destroy();
+          previousElement.replaceWith(view.getElement());
+        } else {
+          acpContent.appendChild(view.getElement());
+        }
+        acpViews.set(id, view);
+        view.handleStatus({ status: 'initializing', startupPhase: 'creating-session' });
+        window.posse.acpCreate(id, presetCommand, cwd, undefined).then((info) => {
+          if (info.sessionId) {
+            sessionResumeId.set(id, info.sessionId);
+            sessionAgentId.set(id, info.sessionId);
+            durableAcpSessionIds.add(id);
+            persistActiveAcpSession(id);
+          }
+          if (acpViews.get(id) === view) view.handleStatus(info);
+        }).catch((err) => {
+          if (acpViews.get(id) === view) {
+            view.handleStatus({ status: 'error', errorMessage: err instanceof Error ? err.message : String(err) });
+          }
+        });
+      }
+      sessionCreateTimes.set(id, Date.now());
+      sessionUpdateTimes.set(id, Date.now());
+      if (!acpSessionIds.has(id)) acpSessionIds.add(id);
+    } else {
+      // PTY: pty:destroy captures the resumeId from the buffer + saves a closed-session
+      // record (with resumeCommand) in main. Wait for that record, then resume via the
+      // existing restoreClosedSession path — it rebuilds the --resume command from the
+      // agent's own pattern, migrates the pin (keyed by resumeId), and restores the title.
+      // For a plain shell with no resumeId, fall back to a fresh shell on the same cwd.
+      const wasActive = getActiveSessionId() === id;
+      const match = await waitForClosedSession(id, resumeId);
+      if (match) {
+        await restoreClosedSession(match);
+        // Keep the restarted session selected if it was active before.
+        if (wasActive) {
+          const newId = sessionTitles.keys().find(k =>
+            (sessionResumeId.get(k) || sessionAgentId.get(k)) === resumeId);
+          if (newId) switchSession(newId);
+        }
+      } else {
+        // No durable resumeId (plain shell, or capture raced): create a fresh shell in
+        // the same cwd + preset. The backend assigns a new id; the old row was already
+        // removed by destroy, so no duplicate (#112 AC6).
+        const resolvedTheme = resolveThemeId(themeId, cwd);
+        const result = await window.posse.createPty(cwd, presetCommand, resolvedTheme, undefined, useSubscriptionFlag());
+        ptyPresetCommands.set(result.id, presetCommand);
+        attachPtySession(result, Date.now(), false);
+        if (cwd) { selectedProjectPath = cwd; setProjectExpanded(canonicalProjectKey(cwd), true); }
+        switchSession(result.id);
+      }
+    }
+    renderSessionList();
+  } catch (error) {
+    showToast(`Restart failed: ${error instanceof Error ? error.message : String(error)}`, 4000);
+  }
+}
+
+// #112: poll the closed-sessions list until a record matching this live session's id
+// (by resumeId, falling back to the ephemeral id) appears after pty:destroy. pty:destroy
+// is a fire-and-forget send; main writes the closed record asynchronously + notifies via
+// onClosedSessionsUpdate. Resolves the ClosedSessionInfo, or null after a short timeout
+// (e.g. a plain shell with no resumeId leaves no resumable record).
+async function waitForClosedSession(oldId: string, resumeId: string): Promise<ClosedSessionInfo | null> {
+  const matchBy = (list: ClosedSessionInfo[]): ClosedSessionInfo | undefined => {
+    if (resumeId) return list.find(cs => cs.resumeId === resumeId);
+    // No resumeId: match by the ephemeral id main recorded (best effort).
+    return list.find(cs => cs.id === oldId || cs.cwd === (sessionCwds.get(oldId) || ''));
+  };
+  const existing = matchBy(closedSessions);
+  if (existing) return existing;
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const list = await window.posse.closedSessionsList();
+    closedSessions = list;
+    const found = matchBy(list);
+    if (found) return found;
+    await new Promise(r => setTimeout(r, 80));
+  }
+  return null;
+}
+
 async function handleChatCloseClick(id: string): Promise<void> {
   const title = chatSessionTitles.get(id) || 'New Chat';
   const action = await showConfirmDialog(title, 'Chat');
@@ -5914,6 +6088,7 @@ function clearSessionState(id: string): void {
   sessionResumeId.delete(id);
   sessionClaudeProviderIds.delete(id);
   acpPresetCommands.delete(id);
+  ptyPresetCommands.delete(id);
   durableAcpSessionIds.delete(id);
 }
 
