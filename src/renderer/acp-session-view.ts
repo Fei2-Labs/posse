@@ -851,6 +851,12 @@ export class AcpSessionView {
     }
   }
 
+  // #112: read the current session status (e.g. 'prompting') so a restart can decide
+  // whether to confirm interruption. Returns the last status set via handleStatus.
+  getStatus(): AcpSessionInfo['status'] {
+    return this.status;
+  }
+
   handleStatus(info: Partial<AcpSessionInfo>): void {
     if (info.sessionId) {
       const stableHistoryKey = this.historyStorageKey(info.sessionId);
