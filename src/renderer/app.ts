@@ -18,13 +18,18 @@ import {
   saveConversationPreferences,
   type ConversationPreferences,
 } from './conversation-preferences';
+import QRCode from 'qrcode';
+import { APP_THEMES } from '../shared/app-themes';
+import {
+  agentFamilyMatchesTab,
+  projectVisibleForAgent,
+  visibleAgentFamilies,
+} from './sidebar-agent-filter';
 
 // Image extensions handled by the inline preview.
 function isImageExt(ext: string): boolean {
   return ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico'].includes(ext.toLowerCase());
 }
-import QRCode from 'qrcode';
-import { APP_THEMES } from '../shared/app-themes';
 
 let remoteServerInfo: { lanUrl: string; token: string; port: number; publicUrl?: string; tunnel?: { running: boolean; url: string; message?: string }; tailscaleUrl?: string | null; tailscaleHttpUrl?: string | null } | null = null;
 
@@ -678,15 +683,7 @@ function getProjectSessions(projPath: string): Map<string, ProjectAgentGroup> {
 
 // True if the project has at least one session for the active agent tab.
 function projectVisibleUnderTab(p: ProjectEntry): boolean {
-  if (activeAgentTab === 'all') return true;
-  const sessions = getProjectSessions(p.path);
-  // A freshly-added project with no sessions has no agent family — keep it visible
-  // under every tab, else the just-added folder vanishes (only search finds it). (#77)
-  let total = 0;
-  for (const g of sessions.values()) total += g.lives.length + g.closed.length + g.history.length;
-  if (total === 0) return true;
-  const g = sessions.get(activeAgentTab);
-  return !!g && (g.lives.length + g.closed.length + g.history.length) > 0;
+  return projectVisibleForAgent(getProjectSessions(p.path), activeAgentTab);
 }
 
 // Posse mini logo (simplified from build/icon.svg: terminal chevron + 3 agent dots).
@@ -1148,7 +1145,8 @@ function projectMatchesSearch(p: ProjectEntry): boolean {
   if (!q) return true;
   if (projectDisplayName(p).toLowerCase().includes(q)) return true;
   const groups = collectProjectSessions(p.path);
-  for (const g of groups.values()) {
+  for (const [family, g] of groups) {
+    if (!agentFamilyMatchesTab(family, activeAgentTab)) continue;
     for (const id of g.lives) {
       if ((sessionTitles.get(id) || '').toLowerCase().includes(q)) return true;
     }
@@ -1179,7 +1177,8 @@ function agentGroupMatchesSearch(g: ProjectAgentGroup): boolean {
 function projectHasMatchingChild(p: ProjectEntry): boolean {
   const q = projectSearchQuery;
   if (!q) return false;
-  for (const g of collectProjectSessions(p.path).values()) {
+  for (const [family, g] of collectProjectSessions(p.path)) {
+    if (!agentFamilyMatchesTab(family, activeAgentTab)) continue;
     if (agentGroupMatchesSearch(g)) return true;
   }
   return false;
@@ -4375,9 +4374,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // The active agent tab scopes which families are shown; in "All", every family
   // is shown and each row carries a small agent tag.
   const groups = getProjectSessions(p.path);
-  const families = (activeAgentTab === 'all' || projectSearchQuery.length > 0)
-    ? Array.from(groups.keys())
-    : (groups.has(activeAgentTab) ? [activeAgentTab] : []);
+  const families = visibleAgentFamilies(groups.keys(), activeAgentTab);
 
   // Flatten the selected families into one list. SORT STABILITY (#45): live sessions
   // are ordered by their CREATE time (fixed), NOT their update time — otherwise every
@@ -4385,7 +4382,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   // session is floated to the very top of its project. Closed/history use their fixed
   // closedAt/mtime (those don't change during activity).
   const rows: Array<{ time: number; active: boolean; el: HTMLElement }> = [];
-  const tagged = activeAgentTab === 'all' || projectSearchQuery.length > 0;
+  const tagged = activeAgentTab === 'all';
   for (const family of families) {
     const g = groups.get(family)!;
     // Pinned sessions are extracted into the top "Pinned" section, so skip them here.
@@ -4430,7 +4427,7 @@ function collectPinnedSessionRows(activeId: string | null): Array<{ time: number
   for (const p of projects) {
     const groups = getProjectSessions(p.path);
     for (const [family, g] of groups) {
-      if (activeAgentTab !== 'all' && family !== activeAgentTab) continue;
+      if (!agentFamilyMatchesTab(family, activeAgentTab)) continue;
       for (const id of g.lives) {
         const k = liveSessionPinKey(id);
         if (!isSessionPinned(k) || seen.has(k)) continue;
@@ -4469,7 +4466,7 @@ function collectActiveSessionRows(activeId: string | null): Array<{ time: number
   for (const p of projects) {
     const groups = getProjectSessions(p.path);
     for (const [family, g] of groups) {
-      if (activeAgentTab !== 'all' && family !== activeAgentTab) continue;
+      if (!agentFamilyMatchesTab(family, activeAgentTab)) continue;
       for (const id of g.lives) {
         const k = liveSessionPinKey(id);
         if (seen.has(k)) continue;
@@ -4621,7 +4618,7 @@ function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
 
   for (const id of sessionTitles.keys()) {
     const family = agentFamilyFromDisplayName(sessionDisplayNames.get(id) || '');
-    if (activeAgentTab !== 'all' && family !== activeAgentTab) continue;
+    if (!agentFamilyMatchesTab(family, activeAgentTab)) continue;
     const resumeId = sessionResumeId.get(id) || sessionAgentId.get(id);
     const k = resumeId ? `resume:${conversationKey(resumeId)}` : `live:${id}`;
     if (seen.has(k)) continue;
@@ -4635,7 +4632,7 @@ function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
   const sorted = [...closedSessions].sort((a, b) => b.closedAt - a.closedAt);
   for (const cs of sorted) {
     if (cs.resumeId && removedHistoryKeys.has(conversationKey(cs.resumeId))) continue;
-    if (activeAgentTab !== 'all' && agentFamilyFromDisplayName(cs.displayName || '') !== activeAgentTab) continue;
+    if (!agentFamilyMatchesTab(agentFamilyFromDisplayName(cs.displayName || ''), activeAgentTab)) continue;
     const k = closedSessionRecentKey(cs);
     if (seen.has(k)) continue;
     seen.add(k);
@@ -4680,10 +4677,8 @@ function renderSessionList(): void {
   projectSessionsCache = new Map();
   renderAgentTabs();
 
-  // Tab filter: while searching, ignore the tab so any match surfaces; otherwise
-  // hide projects that have no session for the active agent.
-  const tabFilter = (p: ProjectEntry) =>
-    projectSearchQuery.length > 0 || projectVisibleUnderTab(p);
+  // Search and agent filters compose: a project must satisfy both when both are active.
+  const tabFilter = (p: ProjectEntry) => projectVisibleUnderTab(p);
 
   // Order by a FROZEN recency rank so live activity doesn't reshuffle the list each render.
   const rank = projectRank();
