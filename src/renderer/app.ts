@@ -52,6 +52,8 @@ const ICON: Record<string, string> = {
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   sort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 17l3 3 3-3M6 18V4"/></svg>',
   activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  checkSquare: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
 };
 
 type OpenEditorResult = { ok: true } | { ok: false; error: string };
@@ -440,6 +442,25 @@ function removePinnedSession(key: string): void {
   savePinnedSessions();
 }
 
+// Confirm-free delete of a closed (resumable) session. Shared by the per-row delete
+// button and the sidebar's batch delete (#115) so both apply identical semantics:
+// remove from the agent's own store, drop the pin, forget the Posse-side row.
+async function deleteClosedSessionNow(cs: ClosedSessionInfo): Promise<{ ok: boolean; error?: string }> {
+  const agent = storeAgentFromCommand(cs.presetCommand);
+  if (cs.resumeId && agent) {
+    try {
+      const result = await window.posse.sessionDelete({ id: cs.resumeId, agent });
+      if (!result.ok) return { ok: false, error: result.error || 'unknown error' };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    removedHistoryKeys.add(conversationKey(cs.resumeId));
+  }
+  removePinnedSession(closedSessionPinKey(cs));
+  closedSessions = await window.posse.closedSessionsRemove(cs.id);
+  return { ok: true };
+}
+
 async function deleteClosedSession(cs: ClosedSessionInfo): Promise<void> {
   const agent = storeAgentFromCommand(cs.presetCommand);
   const ok = await confirmDangerDialog(
@@ -448,18 +469,34 @@ async function deleteClosedSession(cs: ClosedSessionInfo): Promise<void> {
     'Delete',
   );
   if (!ok) return;
-  if (cs.resumeId && agent) {
-    const result = await window.posse.sessionDelete({ id: cs.resumeId, agent });
-    if (!result.ok) {
-      showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
-      return;
-    }
-    removedHistoryKeys.add(conversationKey(cs.resumeId));
+  const result = await deleteClosedSessionNow(cs);
+  if (!result.ok) {
+    showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
+    return;
   }
-  removePinnedSession(closedSessionPinKey(cs));
-  closedSessions = await window.posse.closedSessionsRemove(cs.id);
   renderSessionList();
   await refreshProjectsData();
+}
+
+// Confirm-free delete of a native agent history session (see deleteClosedSessionNow).
+async function deleteHistorySessionNow(s: ClaudeHistorySession): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await window.posse.sessionDelete({
+      id: s.id,
+      agent: s.storeAgent || s.agent,
+      sourcePath: s.sourcePath,
+    });
+    if (!res || !res.ok) {
+      console.error('session delete failed', res?.error);
+      return { ok: false, error: res?.error || 'unknown error' };
+    }
+  } catch (err) {
+    console.error('session delete failed', err);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  removePinnedSession(historySessionPinKey(s));
+  removedHistoryKeys.add(conversationKey(s.id));
+  return { ok: true };
 }
 
 // PERMANENT delete: confirm dialog gate (mandatory) → route to the agent's own store.
@@ -470,25 +507,12 @@ async function deleteHistorySession(s: ClaudeHistorySession): Promise<void> {
     'Delete'
   );
   if (!ok) return;
-  try {
-    const res = await window.posse.sessionDelete({
-      id: s.id,
-      agent: s.storeAgent || s.agent,
-      sourcePath: s.sourcePath,
-    });
-    if (!res || !res.ok) {
-      console.error('session delete failed', res?.error);
-      showToast(`Delete failed: ${res?.error || 'unknown error'}`, 4000);
-      return;
-    }
-  } catch (err) {
-    console.error('session delete failed', err);
-    showToast('Delete failed.', 4000);
+  const result = await deleteHistorySessionNow(s);
+  if (!result.ok) {
+    showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
     return;
   }
   // Drop the dead row locally, then re-pull backend.
-  removePinnedSession(historySessionPinKey(s));
-  removedHistoryKeys.add(conversationKey(s.id));
   await refreshProjectsData();
 }
 
@@ -2755,6 +2779,21 @@ const sidebarResizer = document.getElementById('sidebar-resizer')!;
       renderSessionList();
     });
   }
+
+  // #115: batch selection entry point. Escape leaves the mode so the user is never trapped
+  // in a state where row clicks no longer open sessions. It deliberately ignores Escape that
+  // belongs to someone else — a terminal (vim!), a text field, or an open modal — so enabling
+  // select mode never steals a keystroke from the pane the user is actually typing in.
+  const selectToggle = document.getElementById('session-select-toggle') as HTMLButtonElement | null;
+  selectToggle?.addEventListener('click', () => setSessionSelectionMode(!sessionSelectionMode));
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !sessionSelectionMode) return;
+    if (document.querySelector('.confirm-overlay, .new-session-overlay.active')) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('.xterm, input, textarea, select, .cm-editor, [contenteditable="true"]')) return;
+    e.stopPropagation();
+    setSessionSelectionMode(false);
+  }, true);
 })();
 
 // File statusbar DOM
@@ -2892,6 +2931,188 @@ function closedSessionPinKey(cs: ClosedSessionInfo): string {
 }
 function historySessionPinKey(s: ClaudeHistorySession): string {
   return conversationKey(s.id);
+}
+
+// ========== Sidebar batch selection (#115) ==========
+// A sidebar-wide "select mode": every session row grows a checkbox, row clicks toggle
+// selection instead of opening the session, and a bar offers select-all / clear / delete.
+//
+// Scope rule (safety): selectableTargets is rebuilt from the rows actually rendered in the
+// current pass, so it already reflects the live agent tab, the search query, collapsed
+// sections and archive filtering. Selection is pruned to that set on every render, which
+// makes "delete selected" structurally incapable of touching a session the user cannot see.
+type SessionSelectionTarget =
+  | { kind: 'live'; id: string; title: string }
+  | { kind: 'closed'; cs: ClosedSessionInfo; title: string }
+  | { kind: 'history'; s: ClaudeHistorySession; title: string };
+
+let sessionSelectionMode = false;
+const selectedSessionKeys = new Set<string>();
+let selectableTargets = new Map<string, SessionSelectionTarget>();
+
+function setSessionSelectionMode(on: boolean): void {
+  if (sessionSelectionMode === on) return;
+  sessionSelectionMode = on;
+  if (!on) selectedSessionKeys.clear();
+  renderSessionList();
+}
+
+// Register a rendered row as selectable. The same conversation can legitimately render in
+// several sections (Active + Pinned + its project), so keep the strongest target for a key:
+// a live session outranks its closed/history mirrors because terminating it also clears the
+// stored conversation, which the weaker targets cannot do.
+function registerSelectableRow(key: string, target: SessionSelectionTarget): void {
+  if (!key) return;
+  const existing = selectableTargets.get(key);
+  if (existing && existing.kind === 'live' && target.kind !== 'live') return;
+  selectableTargets.set(key, target);
+}
+
+function toggleSessionSelected(key: string): void {
+  if (selectedSessionKeys.has(key)) selectedSessionKeys.delete(key);
+  else selectedSessionKeys.add(key);
+  renderSessionList();
+}
+
+// Turn a freshly built row into a selectable one. Must be called AFTER the builder attached
+// its own click/contextmenu handlers: the capture-phase listener + stopImmediatePropagation
+// is what suppresses "open/resume this session" while select mode is on.
+function decorateSelectableRow(item: HTMLElement, key: string, target: SessionSelectionTarget): void {
+  if (!key) return;
+  registerSelectableRow(key, target);
+  if (!sessionSelectionMode) return;
+  const selected = selectedSessionKeys.has(key);
+  item.classList.add('nav-session-selectable');
+  if (selected) item.classList.add('nav-session-selected');
+  item.dataset.selectKey = key;
+
+  const box = document.createElement('span');
+  box.className = 'nav-session-checkbox' + (selected ? ' checked' : '');
+  box.setAttribute('role', 'checkbox');
+  box.setAttribute('aria-checked', selected ? 'true' : 'false');
+  box.setAttribute('aria-label', `Select ${target.title || 'session'}`);
+  if (selected) box.innerHTML = ICON.check;
+  item.insertBefore(box, item.firstChild);
+
+  const intercept = (e: Event): void => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    toggleSessionSelected(key);
+  };
+  item.addEventListener('click', intercept, true);
+  item.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopImmediatePropagation(); }, true);
+}
+
+function selectedSessionTargets(): SessionSelectionTarget[] {
+  const out: SessionSelectionTarget[] = [];
+  for (const key of selectedSessionKeys) {
+    const target = selectableTargets.get(key);
+    if (target) out.push(target);
+  }
+  return out;
+}
+
+// Rebuild the toolbar toggle + selection bar from the registry produced by the render pass
+// that just finished. Called at the end of renderSessionList, never on its own.
+function renderSessionSelectionUI(): void {
+  const toggle = document.getElementById('session-select-toggle') as HTMLButtonElement | null;
+  const bar = document.getElementById('session-select-bar');
+  if (toggle) {
+    // Icon-only when idle so the toolbar stays roomy for search; the "Done" label only
+    // appears while select mode is on, where the exit affordance has to be obvious.
+    toggle.innerHTML = `<span class="session-select-glyph">${ICON.checkSquare}</span>`
+      + (sessionSelectionMode ? '<span class="session-select-label">Done</span>' : '');
+    toggle.classList.toggle('active', sessionSelectionMode);
+    toggle.setAttribute('aria-pressed', sessionSelectionMode ? 'true' : 'false');
+    toggle.title = sessionSelectionMode
+      ? 'Leave selection mode'
+      : 'Select multiple sessions to delete them in one go';
+  }
+  if (!bar) return;
+  if (!sessionSelectionMode) {
+    bar.setAttribute('hidden', '');
+    bar.innerHTML = '';
+    return;
+  }
+  bar.removeAttribute('hidden');
+  bar.innerHTML = '';
+
+  const visibleCount = selectableTargets.size;
+  const count = selectedSessionKeys.size;
+
+  const info = document.createElement('span');
+  info.className = 'session-select-count';
+  info.textContent = count > 0 ? `${count} selected` : `Select sessions (${visibleCount} shown)`;
+  bar.appendChild(info);
+
+  const allSelected = visibleCount > 0 && count === visibleCount;
+  const allBtn = document.createElement('button');
+  allBtn.type = 'button';
+  allBtn.className = 'session-select-action';
+  allBtn.textContent = allSelected ? 'Clear' : 'Select all';
+  allBtn.title = allSelected
+    ? 'Deselect everything'
+    : 'Select every session currently visible under the active filters';
+  allBtn.disabled = visibleCount === 0;
+  allBtn.addEventListener('click', () => {
+    if (allSelected) selectedSessionKeys.clear();
+    else for (const key of selectableTargets.keys()) selectedSessionKeys.add(key);
+    renderSessionList();
+  });
+  bar.appendChild(allBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'session-select-action session-select-delete';
+  delBtn.innerHTML = `<span class="session-select-glyph">${ICON.trash}</span><span>Delete${count > 0 ? ` (${count})` : ''}</span>`;
+  delBtn.disabled = count === 0;
+  delBtn.title = count === 0 ? 'Select sessions first' : `Permanently delete ${count} selected session(s)`;
+  delBtn.addEventListener('click', () => { void deleteSelectedSessions(); });
+  bar.appendChild(delBtn);
+}
+
+// Permanently delete every selected session, after a summary confirmation that spells out
+// exactly what goes and that nothing is recoverable. Live sessions are terminated through
+// the normal backend delete path (safe stop first), so they never need a separate step.
+async function deleteSelectedSessions(): Promise<void> {
+  const targets = selectedSessionTargets();
+  if (targets.length === 0) return;
+
+  const live = targets.filter(t => t.kind === 'live').length;
+  const stored = targets.length - live;
+  const parts: string[] = [];
+  if (live > 0) parts.push(`${live} running session${live === 1 ? '' : 's'} (stopped first, then deleted)`);
+  if (stored > 0) parts.push(`${stored} saved session${stored === 1 ? '' : 's'}`);
+  const preview = targets.slice(0, 5).map(t => `• ${t.title || 'Session'}`).join('\n');
+  const more = targets.length > 5 ? `\n• …and ${targets.length - 5} more` : '';
+
+  const confirmed = await confirmDangerDialog(
+    `Delete ${targets.length} session${targets.length === 1 ? '' : 's'} permanently?`,
+    `This deletes ${parts.join(' and ')} from the agents' own session stores. This cannot be undone.\n\n${preview}${more}`,
+    `Delete ${targets.length}`,
+  );
+  if (!confirmed) return;
+
+  let okCount = 0;
+  const failures: string[] = [];
+  for (const target of targets) {
+    const result = target.kind === 'live' ? await deleteLiveSessionNow(target.id)
+      : target.kind === 'closed' ? await deleteClosedSessionNow(target.cs)
+        : await deleteHistorySessionNow(target.s);
+    if (result.ok) okCount += 1;
+    else failures.push(`${target.title || 'Session'}: ${result.error || 'unknown error'}`);
+  }
+
+  selectedSessionKeys.clear();
+  if (failures.length === 0) {
+    showToast(`Deleted ${okCount} session${okCount === 1 ? '' : 's'}.`, 2500);
+    setSessionSelectionMode(false);
+  } else {
+    console.error('[batch delete] failures', failures);
+    showToast(`Deleted ${okCount}, ${failures.length} failed — ${failures[0]}`, 5000);
+    renderSessionList();
+  }
+  await refreshProjectsData();
 }
 
 // Sync session status to the main process (read by the mobile remote-server)
@@ -4068,6 +4289,7 @@ function buildLiveSessionRow(id: string, activeId: string | null): HTMLElement {
     e.stopPropagation();
     showSessionContextMenu(e, id);
   });
+  decorateSelectableRow(item, pinKey, { kind: 'live', id, title: title || 'Terminal' });
   return item;
 }
 
@@ -4118,6 +4340,7 @@ function buildClosedSessionRow(cs: ClosedSessionInfo): HTMLElement {
   item.appendChild(resumeBtn);
   item.appendChild(delBtn);
   item.addEventListener('click', () => { void restoreClosedSession(cs); });
+  decorateSelectableRow(item, pinKey, { kind: 'closed', cs, title: cs.title || 'Session' });
   return item;
 }
 
@@ -4181,6 +4404,7 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   item.appendChild(archiveBtn);
   item.appendChild(deleteBtn);
   item.addEventListener('click', () => { void resumeAgentSession(s); });
+  decorateSelectableRow(item, pinKey, { kind: 'history', s, title: s.title || s.id });
   return item;
 }
 
@@ -4709,6 +4933,9 @@ function renderSessionList(): void {
 
   // Fresh per-render session memo, then (re)build the agent tab strip.
   projectSessionsCache = new Map();
+  // #115: the selectable registry is scoped to THIS render pass, so it always mirrors the
+  // rows the user can actually see (agent tab + search + collapsed sections + archive).
+  selectableTargets = new Map();
   renderAgentTabs();
 
   // Search and agent filters compose: a project must satisfy both when both are active.
@@ -4985,6 +5212,14 @@ function renderSessionList(): void {
       sessionList.appendChild(item);
     }
   }
+
+  // #115: prune the selection to what this pass actually rendered, then repaint the
+  // selection bar. Anything filtered out of view is dropped from the selection, so a
+  // batch delete can only ever act on sessions the user can see right now.
+  for (const key of Array.from(selectedSessionKeys)) {
+    if (!selectableTargets.has(key)) selectedSessionKeys.delete(key);
+  }
+  renderSessionSelectionUI();
 
   // Restore the pre-render scroll position (#45). Clamp happens automatically.
   sessionList.scrollTop = prevScroll;
@@ -5855,14 +6090,10 @@ async function handleCloseClick(id: string): Promise<void> {
   destroySession(id);
 }
 
-async function handleDeleteClick(id: string): Promise<void> {
-  const title = sessionTitles.get(id) || sessionDisplayNames.get(id) || 'Session';
-  const confirmed = await confirmDangerDialog(
-    'Delete session permanently?',
-    `This terminates "${title}" and deletes its stored conversation when available. This cannot be undone.`,
-    'Delete',
-  );
-  if (!confirmed) return;
+// Confirm-free terminate + permanent delete of a LIVE session (PTY or ACP).
+// Shared by the row's delete button and the sidebar batch delete (#115): a running
+// session is always stopped safely through the backend before its store entry goes.
+async function deleteLiveSessionNow(id: string): Promise<{ ok: boolean; error?: string }> {
   const pinKey = liveSessionPinKey(id);
   const nativeSessionId = sessionResumeId.get(id) || sessionAgentId.get(id) || '';
   try {
@@ -5874,10 +6105,23 @@ async function handleDeleteClick(id: string): Promise<void> {
       if (nativeSessionId) removedHistoryKeys.add(conversationKey(nativeSessionId));
       removeLiveSessionFromRenderer(id);
     }
-    if (!result.ok) showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
+    if (!result.ok) return { ok: false, error: result.error || 'unknown error' };
+    return { ok: true };
   } catch (error) {
-    showToast(`Delete failed: ${error instanceof Error ? error.message : String(error)}`, 4000);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+async function handleDeleteClick(id: string): Promise<void> {
+  const title = sessionTitles.get(id) || sessionDisplayNames.get(id) || 'Session';
+  const confirmed = await confirmDangerDialog(
+    'Delete session permanently?',
+    `This terminates "${title}" and deletes its stored conversation when available. This cannot be undone.`,
+    'Delete',
+  );
+  if (!confirmed) return;
+  const result = await deleteLiveSessionNow(id);
+  if (!result.ok) showToast(`Delete failed: ${result.error || 'unknown error'}`, 4000);
 }
 
 // #112: restart a session in place — same row id, same cwd/project, same agent.
