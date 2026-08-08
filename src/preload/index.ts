@@ -143,6 +143,9 @@ contextBridge.exposeInMainWorld('posse', {
     url: string; title: string; isLoading: boolean; canGoBack: boolean; canGoForward: boolean;
     security: 'secure' | 'local' | 'insecure' | 'neutral'; error?: string;
   }) => void) => ipcRenderer.on('browser:state', (_event, state) => cb(state)),
+  // #109: which ACP session currently owns browser control (null = none).
+  onBrowserAgentOwnership: (cb: (ownerSessionId: string | null) => void) =>
+    ipcRenderer.on('browser:agent-ownership', (_event, ownerSessionId) => cb(ownerSessionId)),
   onBrowserPermission: (cb: (request: { id: string; permission: string; origin: string }) => void) =>
     ipcRenderer.on('browser:permission', (_event, request) => cb(request)),
   // Desktop -> remote upload: native multi-select dialog, then write the picked file(s)
@@ -266,6 +269,9 @@ contextBridge.exposeInMainWorld('posse', {
   aiApplyConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('ai:apply-config', config),
   aiTestConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke('ai:test-config', config),
   aiGetCurrentConfig: () => ipcRenderer.invoke('ai:get-current-config'),
+  // Browser-tool policy (issue #109): global on/off for the agent browser bridge.
+  browserBridgeGetEnabled: () => ipcRenderer.invoke('browser-bridge:get-enabled') as Promise<boolean>,
+  browserBridgeSetEnabled: (enabled: boolean) => ipcRenderer.invoke('browser-bridge:set-enabled', enabled) as Promise<boolean>,
   // Get the model provider actually used by the CLI
   getCliProvider: (presetCommand: string) => ipcRenderer.invoke('cli:get-provider', presetCommand),
 

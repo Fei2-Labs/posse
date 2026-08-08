@@ -2247,6 +2247,7 @@ const browserClearBtn = requiredBrowserElement<HTMLButtonElement>('browser-clear
 const browserCloseBtn = requiredBrowserElement<HTMLButtonElement>('browser-close');
 const browserSecurity = requiredBrowserElement<HTMLElement>('browser-security');
 const browserOriginLabel = requiredBrowserElement<HTMLElement>('browser-origin-label');
+const browserAgentOwner = requiredBrowserElement<HTMLElement>('browser-agent-owner');
 const browserEmpty = requiredBrowserElement<HTMLElement>('browser-empty');
 const browserError = requiredBrowserElement<HTMLElement>('browser-error');
 const browserErrorMessage = requiredBrowserElement<HTMLElement>('browser-error-message');
@@ -2633,6 +2634,25 @@ window.posse.onBrowserState((state) => {
   browserCredentialsRemembered.replaceChildren();
   if (state.url) browserHasPage = true;
   renderBrowserState();
+});
+
+// #109: show which agent session controls the browser. The badge only renders when
+// an agent holds ownership; reads the agent display name from sessionDisplayNames.
+window.posse.onBrowserAgentOwnership((ownerSessionId) => {
+  // Browser toolbar badge.
+  if (!ownerSessionId) {
+    browserAgentOwner.classList.add('hidden');
+    browserAgentOwner.textContent = '';
+  } else {
+    const label = sessionDisplayNames.get(ownerSessionId) || 'Agent';
+    browserAgentOwner.textContent = `Controlled by ${label}`;
+    browserAgentOwner.title = `Agent session "${label}" is driving this browser`;
+    browserAgentOwner.classList.remove('hidden');
+  }
+  // Per-session statusbar badge: only the owning session shows it.
+  for (const [id, view] of acpViews) {
+    view.setBrowserOwner(id === ownerSessionId);
+  }
 });
 window.posse.onBrowserPermission((request) => {
   if (browserPermissionRequest) void window.posse.browserResolvePermission(browserPermissionRequest.id, false);

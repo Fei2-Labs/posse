@@ -10,13 +10,15 @@
     "build:terminal-client": "esbuild src/terminal-client/app.ts --bundle --outfile=dist/terminal-client/app.js --platform=browser && node -e \"const fs=require('fs'),p=require('path');const d=p.join('dist','terminal-client');fs.mkdirSync(d,{recursive:true});for(const f of ['index.html','styles.css']) fs.copyFileSync(p.join('src','terminal-client',f),p.join(d,f));fs.copyFileSync(p.join('node_modules','@xterm','xterm','css','xterm.css'),p.join(d,'xterm.css'));\"",
     "build:stamp": "node scripts/build-stamp.js",
     "build:headless": "npm run build:stamp && npm run build:main && esbuild src/main/headless.ts --bundle --outfile=dist/main/headless.js --platform=node --target=node20 --external:electron --external:node-pty --external:sharp --external:ws",
-    "build:remote-bundle": "npm run build:headless && node scripts/build-remote-bundle.js",
-    "build:ts": "npm run build:stamp && npm run build:main && npm run build:preload && npm run build:renderer && npm run build:terminal-client",
+    "build:browser-mcp": "esbuild src/main/browser-mcp.ts --bundle --outfile=dist/main/browser-mcp.js --platform=node --target=node20",
+    "build:remote-bundle": "npm run build:headless && npm run build:browser-mcp && node scripts/build-remote-bundle.js",
+    "build:ts": "npm run build:stamp && npm run build:main && npm run build:browser-mcp && npm run build:preload && npm run build:renderer && npm run build:terminal-client",
     "watch:main": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
     "watch:preload": "tsc -p tsconfig.preload.json --watch --preserveWatchOutput",
     "watch:renderer": "esbuild src/renderer/app.ts --bundle --outdir=dist/renderer --entry-names=app --splitting --format=esm --platform=browser --external:electron --watch",
     "watch:terminal-client": "esbuild src/terminal-client/app.ts --bundle --outfile=dist/terminal-client/app.js --platform=browser --watch",
-    "dev": "npm run build:ts && npm run copy:html && concurrently -k -n main,preload,rend,term,electron \"npm:watch:main\" \"npm:watch:preload\" \"npm:watch:renderer\" \"npm:watch:terminal-client\" \"electron .\"",
+    "watch:browser-mcp": "esbuild src/main/browser-mcp.ts --bundle --outfile=dist/main/browser-mcp.js --platform=node --target=node20 --watch",
+    "dev": "npm run build:ts && npm run copy:html && concurrently -k -n main,preload,rend,term,mcp,electron \"npm:watch:main\" \"npm:watch:preload\" \"npm:watch:renderer\" \"npm:watch:terminal-client\" \"npm:watch:browser-mcp\" \"electron .\"",
     "copy:html": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('dist','renderer');fs.mkdirSync(d,{recursive:true});for(const f of ['index.html','styles.css','qrcode.jpg'])fs.copyFileSync(p.join('src','renderer',f),p.join(d,f));fs.copyFileSync(p.join('node_modules','pdfjs-dist','build','pdf.worker.mjs'),p.join(d,'pdf.worker.mjs'));\"",
     "start": "npm run build:ts && npm run copy:html && electron .",
     "make-launcher": "bash scripts/make-launcher.sh",
@@ -51,6 +53,7 @@
   "author": "Posse",
   "license": "MIT",
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/express": "^5.0.6",
     "@types/node": "^20.11.0",
     "@types/papaparse": "^5.3.16",
@@ -63,7 +66,8 @@
     "electron-rebuild": "^3.2.9",
     "esbuild": "^0.27.3",
     "png-to-ico": "^3.0.1",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "zod": "^3.25.76"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.3.0",
@@ -94,8 +98,7 @@
     "qrcode": "^1.5.4",
     "sharp": "^0.34.5",
     "web-push": "^3.6.7",
-    "ws": "^8.19.0",
-    "zod": "^4.4.3"
+    "ws": "^8.19.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

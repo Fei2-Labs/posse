@@ -64,6 +64,48 @@ export type EmbeddedBrowserCredentialMappings =
   | { ok: true; mappings: CredentialOriginMapping[] }
   | { ok: false; code: string };
 
+// Agent-facing browser operations. The agent drives the user's visible embedded
+// browser through a local MCP bridge (see browser-mcp.ts + browser-ops-server.ts).
+// Tools are scoped: navigation/scroll/DOM snapshot are read-only; click/type/keypress
+// synthesize input. Screenshots come from the WebContents backing store via capturePage()
+// and do NOT require macOS Screen Recording permission. Secrets (cookies, passwords,
+// auth headers, storage) are never surfaced to the agent — only sanitized DOM + pixels.
+export type BrowserAgentState = {
+  url: string;
+  title: string;
+  isLoading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  security: 'secure' | 'local' | 'insecure' | 'neutral';
+};
+
+export type BrowserAgentClick = {
+  x: number;
+  y: number;
+  button?: 'left' | 'right' | 'middle';
+};
+
+export type BrowserAgentTypeOptions = {
+  text: string;
+  element?: BrowserAgentElementSelector;
+  submit?: boolean;
+};
+
+// Stable DOM selector passed by the agent. Resolved in an isolated world; if it
+// matches multiple elements the first visible one wins. {css,role,xpath} mirrors
+// common accessibility-tree selector idioms.
+export type BrowserAgentElementSelector =
+  | { css: string }
+  | { role: string; name?: string }
+  | { xpath: string }
+  | { text: string };
+
+export type BrowserAgentDomSnapshotOptions = {
+  selector?: BrowserAgentElementSelector;
+  // Max serialized node depth / attribute allowlist keep payloads bounded.
+  maxDepth?: number;
+};
+
 type PendingPermission = {
   ownerId: number;
   contentId: number;
@@ -175,6 +217,110 @@ function buildCredentialFillScript(username: string | undefined, password: strin
   })()`;
 }
 
+// Resolve a BrowserAgentElementSelector to a live DOM node in an isolated world.
+// First visible match wins. Returns the node or null. Run inside executeJavaScriptInIsolatedWorld.
+function resolveSelectorScript(): string {
+  return `
+    const visible = (node) => {
+      if (!node || !(node instanceof Element)) return false;
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      return rect.width > 0 && rect.height > 0;
+    };
+    const resolve = (sel) => {
+      if (!sel) return null;
+      let nodes = [];
+      if (sel.css) {
+        try { nodes = Array.from(document.querySelectorAll(sel.css)); } catch { return null; }
+      } else if (sel.xpath) {
+        try {
+          const r = document.evaluate(sel.xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+          for (let i = 0; i < r.snapshotLength; i++) nodes.push(r.snapshotItem(i));
+        } catch { return null; }
+      } else if (sel.role) {
+        nodes = Array.from(document.querySelectorAll('[role="' + CSS.escape(sel.role) + '"]'));
+      } else if (sel.text) {
+        const lower = sel.text.toLowerCase();
+        nodes = Array.from(document.querySelectorAll('button,a,input,select,textarea,[onclick],div,span'))
+          .filter((n) => (n.textContent || '').trim().toLowerCase().includes(lower));
+      }
+      return nodes.find(visible) || nodes[0] || null;
+    };
+  `;
+}
+
+// DOM snapshot: sanitized. Tag + role + name + bounding rect + text (truncated).
+// Never includes value of password/hidden inputs, innerHTML of <script>/<style>, or attrs
+// containing secrets (autocomplete=off fields, data-* secrets). maxDepth bounds payload.
+function buildDomSnapshotScript(options: BrowserAgentDomSnapshotOptions): string {
+  const maxDepth = Math.min(Math.max(options.maxDepth ?? 4, 1), 8);
+  return `(async () => {
+    ${resolveSelectorScript()}
+    const SENSITIVE = /^(password|hidden)$/i;
+    const SECRET_ATTR = /secret|token|csrf|nonce/i;
+    const TRUNCATE = 200;
+    const serialize = (node, depth) => {
+      if (depth > ${maxDepth}) return null;
+      if (!node || node.nodeType !== 1) return null;
+      const tag = node.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'link') return null;
+      const rect = node.getBoundingClientRect();
+      const attrs = {};
+      for (const attr of Array.from(node.attributes || [])) {
+        if (SECRET_ATTR.test(attr.name)) continue;
+        if (SENSITIVE.test(node.type || '') && (attr.name === 'value' || attr.name === 'placeholder')) continue;
+        attrs[attr.name] = attr.value;
+      }
+      const role = node.getAttribute('role') || undefined;
+      const ariaLabel = node.getAttribute('aria-label') || undefined;
+      const type = node.getAttribute('type') || undefined;
+      let text = '';
+      if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') {
+        text = (node.textContent || '').trim().slice(0, TRUNCATE);
+      }
+      const children = [];
+      if (depth < ${maxDepth}) {
+        for (const child of Array.from(node.children || [])) {
+          const serialized = serialize(child, depth + 1);
+          if (serialized) children.push(serialized);
+        }
+      }
+      const result = { tag, role, name: ariaLabel, type, text: text || undefined, attrs: Object.keys(attrs).length ? attrs : undefined, rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }, children: children.length ? children : undefined };
+      return result;
+    };
+    const root = resolve(${JSON.stringify(options.selector ?? null)}) || document.body;
+    const snapshot = serialize(root, 0);
+    return { snapshot };
+  })()`;
+}
+
+function buildFocusScript(selector: BrowserAgentElementSelector): string {
+  return `(async () => {
+    ${resolveSelectorScript()}
+    const node = resolve(${JSON.stringify(selector)});
+    if (!node) return { ok: false, error: 'Element not found for selector.' };
+    if (node.focus) {
+      node.focus();
+      node.scrollIntoView({ block: 'center' });
+    }
+    return { ok: true };
+  })()`;
+}
+
+function buildScrollScript(options: { selector?: BrowserAgentElementSelector; x?: number; y?: number }): string {
+  const dx = Number.isFinite(options.x) ? options.x : 0;
+  const dy = Number.isFinite(options.y) ? options.y : 0;
+  return `(async () => {
+    ${resolveSelectorScript()}
+    const target = resolve(${JSON.stringify(options.selector ?? null)}) || document.scrollingElement || document.body;
+    if (!target) return { ok: false, error: 'No scroll target.' };
+    if (target.scrollBy) target.scrollBy(${dx}, ${dy});
+    else { target.scrollLeft += ${dx}; target.scrollTop += ${dy}; }
+    return { ok: true };
+  })()`;
+}
+
 function browserWebPreferences() {
   return {
     partition: BROWSER_PARTITION,
@@ -230,6 +376,10 @@ export class EmbeddedBrowserController {
 
   ownerId(): number { return this.ownerContentsId; }
   contentsId(): number { return this.view.webContents.id; }
+  // For the agent backend to pick a live, visible browser to drive.
+  isOwnerVisible(): boolean {
+    return !this.owner.isDestroyed() && this.owner.isVisible();
+  }
 
   currentState(): EmbeddedBrowserState { return { ...this.state }; }
 
@@ -541,6 +691,128 @@ export class EmbeddedBrowserController {
     }
   }
 
+  // ===================== Agent browser operations =====================
+  // Driven via the local MCP bridge. All run against the user's visible browser
+  // session (persist:posse-browser-default). No cookies/storage/secrets leak:
+  // DOM snapshots are sanitized, input is synthesized via sendInputEvent.
+
+  agentState(): BrowserAgentState {
+    return {
+      url: this.state.url,
+      title: this.state.title,
+      isLoading: this.state.isLoading,
+      canGoBack: this.state.canGoBack,
+      canGoForward: this.state.canGoForward,
+      security: this.state.security,
+    };
+  }
+
+  async agentNavigate(input: string): Promise<{ ok: boolean; error?: string }> {
+    return this.navigate(input);
+  }
+
+  async agentScreenshot(): Promise<{ ok: boolean; data?: string; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    try {
+      const image = await contents.capturePage();
+      const png = image.toDataURL();
+      // data:image/png;base64,... — pixels only, no DOM/secret content embedded.
+      return { ok: true, data: png };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Screenshot failed.' };
+    }
+  }
+
+  async agentDomSnapshot(options: BrowserAgentDomSnapshotOptions): Promise<{ ok: boolean; snapshot?: unknown; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    try {
+      const result = await contents.executeJavaScriptInIsolatedWorld(CREDENTIAL_WORLD_ID, [{
+        code: buildDomSnapshotScript(options),
+        url: 'posse://browser-dom',
+      }], true) as { snapshot?: unknown; error?: string } | undefined;
+      if (!result) return { ok: false, error: 'DOM snapshot returned no result.' };
+      if (result.error) return { ok: false, error: result.error };
+      return { ok: true, snapshot: result.snapshot };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'DOM snapshot failed.' };
+    }
+  }
+
+  async agentClick(click: BrowserAgentClick): Promise<{ ok: boolean; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    if (!Number.isFinite(click.x) || !Number.isFinite(click.y)) {
+      return { ok: false, error: 'Click coordinates must be finite numbers.' };
+    }
+    const button = click.button ?? 'left';
+    const buttonConstant = button === 'right' ? 'right' : button === 'middle' ? 'middle' : 'left';
+    try {
+      contents.sendInputEvent({ type: 'mouseMove', x: click.x, y: click.y });
+      contents.sendInputEvent({ type: 'mouseDown', x: click.x, y: click.y, button: buttonConstant, clickCount: 1 });
+      contents.sendInputEvent({ type: 'mouseUp', x: click.x, y: click.y, button: buttonConstant, clickCount: 1 });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Click failed.' };
+    }
+  }
+
+  async agentType(options: BrowserAgentTypeOptions): Promise<{ ok: boolean; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    if (typeof options.text !== 'string') return { ok: false, error: 'text is required.' };
+    try {
+      // If an element selector is given, focus it first so input lands in the right field.
+      if (options.element) {
+        const focusResult = await contents.executeJavaScriptInIsolatedWorld(CREDENTIAL_WORLD_ID, [{
+          code: buildFocusScript(options.element),
+          url: 'posse://browser-focus',
+        }], true) as { ok?: boolean; error?: string } | undefined;
+        if (focusResult?.error) return { ok: false, error: focusResult.error };
+      }
+      // Synthesize character + keydown/keyup events. For non-char keys, the caller
+      // should use agentKeypress; here we only handle printable text.
+      for (const char of options.text) {
+        contents.sendInputEvent({ type: 'char', keyCode: char });
+      }
+      if (options.submit) {
+        contents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+        contents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+      }
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Type failed.' };
+    }
+  }
+
+  async agentKeypress(key: string): Promise<{ ok: boolean; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    if (typeof key !== 'string' || !key) return { ok: false, error: 'key is required.' };
+    try {
+      contents.sendInputEvent({ type: 'keyDown', keyCode: key });
+      contents.sendInputEvent({ type: 'keyUp', keyCode: key });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Keypress failed.' };
+    }
+  }
+
+  async agentScroll(options: { selector?: BrowserAgentElementSelector; x?: number; y?: number }): Promise<{ ok: boolean; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    try {
+      const result = await contents.executeJavaScriptInIsolatedWorld(CREDENTIAL_WORLD_ID, [{
+        code: buildScrollScript(options),
+        url: 'posse://browser-scroll',
+      }], true) as { ok?: boolean; error?: string } | undefined;
+      return result?.error ? { ok: false, error: result.error } : { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Scroll failed.' };
+    }
+  }
+
   private invalidateCredentialTokens(): void {
     this.credentialTokens.clear();
   }
@@ -589,6 +861,18 @@ export class EmbeddedBrowserManager {
   anyController(): EmbeddedBrowserController | null {
     for (const controller of this.controllers.values()) return controller;
     return null;
+  }
+
+  // Pick the controller the agent should drive. Prefers an owner window that is
+  // still alive and visible; falls back to the first live controller. Returns null
+  // when no embedded browser is currently mounted (e.g. app just launched).
+  agentController(): EmbeddedBrowserController | null {
+    let fallback: EmbeddedBrowserController | null = null;
+    for (const controller of this.controllers.values()) {
+      if (controller.isOwnerVisible()) return controller;
+      if (!fallback) fallback = controller;
+    }
+    return fallback;
   }
 
   resolvePermission(owner: BrowserWindow, requestId: string, allow: boolean): boolean {
