@@ -2806,6 +2806,8 @@ html, body {
   margin-bottom: 16px;
   font-size: 13px;
   color: var(--text-secondary);
+  /* Batch-delete (#115) lists the affected sessions on their own lines */
+  white-space: pre-line;
 }
 
 .confirm-buttons {
@@ -5036,3 +5038,121 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   .acp-slash-command { grid-template-columns: 1fr; }
   .acp-slash-command__hint { grid-column: 1; }
 }
+
+/* ========== Sidebar batch selection (#115) ========== */
+/* Toolbar toggle sits next to #project-sort and mirrors its chrome so the two read
+   as one control group. */
+#session-select-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+#session-select-toggle .session-select-glyph { display: inline-flex; align-items: center; justify-content: center; }
+#session-select-toggle .session-select-glyph svg { width: 13px; height: 13px; display: block; }
+#session-select-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-green);
+}
+#session-select-toggle.active {
+  color: var(--text-primary);
+  border-color: var(--accent-green);
+  background: var(--hover-bg);
+}
+
+#session-select-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--hover-bg);
+}
+#session-select-bar[hidden] { display: none; }
+
+.session-select-count {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-select-action {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.session-select-action:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent-green);
+}
+.session-select-action:disabled { opacity: 0.45; cursor: default; }
+.session-select-action .session-select-glyph { display: inline-flex; align-items: center; }
+.session-select-action .session-select-glyph svg { width: 12px; height: 12px; display: block; }
+
+.session-select-delete:hover:not(:disabled) {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Row checkbox. In select mode the per-row action buttons are suppressed so a stray
+   hover-click cannot delete a single session while a batch is being assembled. */
+.nav-session-checkbox {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-sizing: border-box;
+}
+.nav-session-checkbox svg { width: 10px; height: 10px; display: block; }
+.nav-session-checkbox.checked {
+  background: var(--accent-green);
+  border-color: var(--accent-green);
+}
+
+/* Project header select-all. "partial" = some but not all of the project's rows are
+   selected, drawn as a filled core rather than a tick. */
+.nav-project-checkbox { cursor: pointer; }
+.nav-project-checkbox.partial { border-color: var(--accent-green); }
+.nav-project-checkbox.partial::after {
+  content: '';
+  width: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent-green);
+}
+
+.nav-session-selectable:hover .nav-session-action,
+.nav-session-selectable .nav-session-action { display: none; }
+.nav-session.nav-session-selected { background: var(--hover-bg); }
