@@ -5141,6 +5141,18 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
   border-color: var(--accent-green);
 }
 
+/* Project header select-all. "partial" = some but not all of the project's rows are
+   selected, drawn as a filled core rather than a tick. */
+.nav-project-checkbox { cursor: pointer; }
+.nav-project-checkbox.partial { border-color: var(--accent-green); }
+.nav-project-checkbox.partial::after {
+  content: '';
+  width: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent-green);
+}
+
 .nav-session-selectable:hover .nav-session-action,
 .nav-session-selectable .nav-session-action { display: none; }
 .nav-session.nav-session-selected { background: var(--hover-bg); }

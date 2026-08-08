@@ -2980,11 +2980,12 @@ function toggleSessionSelected(key: string): void {
 function decorateSelectableRow(item: HTMLElement, key: string, target: SessionSelectionTarget): void {
   if (!key) return;
   registerSelectableRow(key, target);
+  // Recorded even outside select mode so the project header can gather its own rows' keys.
+  item.dataset.selectKey = key;
   if (!sessionSelectionMode) return;
   const selected = selectedSessionKeys.has(key);
   item.classList.add('nav-session-selectable');
   if (selected) item.classList.add('nav-session-selected');
-  item.dataset.selectKey = key;
 
   const box = document.createElement('span');
   box.className = 'nav-session-checkbox' + (selected ? ' checked' : '');
@@ -3001,6 +3002,29 @@ function decorateSelectableRow(item: HTMLElement, key: string, target: SessionSe
   };
   item.addEventListener('click', intercept, true);
   item.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopImmediatePropagation(); }, true);
+}
+
+// Project-header select-all (#115). The primary workflow is cleaning out ONE project, so the
+// project row gets its own tri-state box that selects exactly that project's visible rows.
+// Keys are read off the rows the project just rendered, so it inherits the same scope rules.
+function decorateProjectSelectAll(box: HTMLElement, keys: string[]): void {
+  const total = keys.length;
+  const chosen = keys.filter(k => selectedSessionKeys.has(k)).length;
+  const all = total > 0 && chosen === total;
+  const partial = chosen > 0 && !all;
+  box.className = 'nav-session-checkbox nav-project-checkbox'
+    + (all ? ' checked' : '') + (partial ? ' partial' : '');
+  box.innerHTML = all ? ICON.check : '';
+  box.setAttribute('role', 'checkbox');
+  box.setAttribute('aria-checked', all ? 'true' : partial ? 'mixed' : 'false');
+  box.title = all ? 'Deselect this project' : `Select all ${total} session${total === 1 ? '' : 's'} in this project`;
+  box.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (all) for (const k of keys) selectedSessionKeys.delete(k);
+    else for (const k of keys) selectedSessionKeys.add(k);
+    renderSessionList();
+  }, true);
 }
 
 function selectedSessionTargets(): SessionSelectionTarget[] {
@@ -4603,6 +4627,15 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   if (dirtyBadge) row.appendChild(dirtyBadge);
   row.appendChild(actions);
 
+  // #115: placeholder for the project's select-all box. It is populated after the child rows
+  // are built below (their keys are what it toggles) and removed again if nothing is visible.
+  let projectBox: HTMLElement | null = null;
+  if (sessionSelectionMode && isExpanded) {
+    projectBox = document.createElement('span');
+    projectBox.className = 'nav-session-checkbox nav-project-checkbox';
+    row.insertBefore(projectBox, icon);
+  }
+
   // Clicking the row (name / non-button area) both SELECTS the project (drives the RIGHT file panel)
   // and toggles its expand/collapse state. Action buttons stopPropagation so they don't toggle.
   row.addEventListener('click', () => {
@@ -4665,6 +4698,7 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   }
 
   if (rows.length === 0) {
+    projectBox?.remove();
     const empty = document.createElement('div');
     empty.className = 'nav-project-empty';
     empty.textContent = 'No conversations yet';
@@ -4674,6 +4708,12 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
 
   rows.sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0) || b.time - a.time);
   for (const r of rows) sessionList.appendChild(r.el);
+
+  if (projectBox) {
+    const keys = rows.map(r => r.el.dataset.selectKey).filter((k): k is string => !!k);
+    if (keys.length === 0) projectBox.remove();
+    else decorateProjectSelectAll(projectBox, Array.from(new Set(keys)));
+  }
 }
 
 // Gather every pinned session across all projects into time-desc rows for the top
