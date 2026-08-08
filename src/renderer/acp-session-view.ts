@@ -49,7 +49,7 @@ export interface AcpSessionInfo {
   promptCapabilities?: PromptCapabilities | null;
   status: 'initializing' | 'ready' | 'prompting' | 'idle' | 'error' | 'closed';
   errorMessage?: string;
-  startupPhase?: 'loading-adapter' | 'spawning-adapter' | 'connecting' | 'initializing-protocol' | 'creating-session' | 'loading-session' | 'applying-config' | 'ready';
+  startupPhase?: 'loading-adapter' | 'spawning-adapter' | 'connecting' | 'initializing-protocol' | 'authenticating' | 'creating-session' | 'loading-session' | 'applying-config' | 'ready';
   startupTimingsMs?: Partial<Record<string, number>>;
   supportsPromptRollback?: boolean;
   replayUpdates?: SessionUpdate[];
@@ -1554,6 +1554,7 @@ export class AcpSessionView {
       'spawning-adapter': 'Starting adapter',
       connecting: 'Connecting',
       'initializing-protocol': 'Initializing',
+      authenticating: 'Signing in',
       'creating-session': 'Creating session',
       'loading-session': 'Loading history',
       'applying-config': 'Applying access',
