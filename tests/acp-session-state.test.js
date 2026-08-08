@@ -254,7 +254,10 @@ test('renderer starts on All and restores every persisted active ACP session', (
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
   assert.match(source, /let activeAgentTab = 'all';/);
   assert.match(source, /async function restoreActiveAcpSessions\(\)/);
-  assert.match(source, /for \(const saved of sessions\)/);
+  // #82: the foreground session is restored first so it isn't queued behind background
+  // restores, but the order still covers every persisted session exactly once.
+  assert.match(source, /const restoreOrder = \[target, \.\.\.sessions\.filter\(saved => saved !== target\)\];/);
+  assert.match(source, /for \(const saved of restoreOrder\)/);
   assert.match(source, /await restoreDaemonSessions\(\);[\s\S]*await restoreActiveAcpSessions\(\);/);
   assert.match(source, /await restoreActiveAcpSessions\(\);[\s\S]*await refreshProjectsData\(\);/);
 });

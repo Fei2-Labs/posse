@@ -7466,7 +7466,11 @@ async function restoreActiveAcpSessions(): Promise<void> {
     && item.presetCommand === foreground.presetCommand
     && item.cwd === foreground.cwd) || sessions[sessions.length - 1];
   const survivors: PersistedActiveAcpSession[] = [];
-  for (const saved of sessions) {
+  // #82: restore the session the user will actually be looking at first. Loads are gated to
+  // a few at a time, so leaving the foreground session in updatedAt order could park it
+  // behind a dozen background restores before it becomes interactive.
+  const restoreOrder = [target, ...sessions.filter(saved => saved !== target)];
+  for (const saved of restoreOrder) {
     try {
       const restored = await tryResumeViaAcp(
         saved.cwd,

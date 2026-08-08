@@ -3,6 +3,7 @@ import type { ChildProcess } from 'child_process';
 import { Writable, Readable } from 'node:stream';
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
 import { performance } from 'node:perf_hooks';
 import type {
   ClientContext,
@@ -40,6 +41,152 @@ function augmentedPath(basePath: string | undefined): string {
     if (!parts.includes(p)) parts.push(p);
   }
   return parts.join(':');
+}
+
+// ========== Adapter spawning (#82) ==========
+// npx-backed adapters were spawned as `npx -y <pkg>`, which re-resolves the package on
+// every launch even when it is fully cached and NPM_CONFIG_PREFER_OFFLINE is set. spawn()
+// returns in ~2ms because npx is a shell script, so all of that cost landed inside the
+// 'initializing-protocol' phase, making it look like protocol work. Measured here: ~3.1s
+// for npx vs ~0.3-0.6s spawning the cached entry point directly — and restoring a dozen
+// sessions in parallel made those npx processes contend on the npm cache, inflating the
+// phase to ~15s each.
+//
+// So: resolve the package npx already downloaded and run it directly, falling back to npx
+// when nothing is cached (first run, where npx has to install it anyway).
+
+// Highest cached version wins; `null` means "not cached, let npx install it".
+function resolveCachedNpxBin(pkg: string): string | null {
+  const root = path.join(os.homedir(), '.npm', '_npx');
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(root);
+  } catch {
+    return null;
+  }
+
+  let best: { version: string; bin: string } | null = null;
+  for (const entry of entries) {
+    const pkgDir = path.join(root, entry, 'node_modules', pkg);
+    let manifest: { version?: string; bin?: string | Record<string, string> };
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+    } catch {
+      continue;
+    }
+    const binField = manifest.bin;
+    const relBin = typeof binField === 'string' ? binField : Object.values(binField || {})[0];
+    if (!relBin) continue;
+    const bin = path.join(pkgDir, relBin);
+    if (!fs.existsSync(bin)) continue;
+    const version = manifest.version || '0.0.0';
+    if (!best || compareSemver(version, best.version) > 0) best = { version, bin };
+  }
+  return best?.bin ?? null;
+}
+
+function compareSemver(a: string, b: string): number {
+  const parse = (v: string) => v.split('-')[0].split('.').map(n => parseInt(n, 10) || 0);
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < 3; i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+  }
+  return 0;
+}
+
+// Resolution is memoized: a cold start restores many sessions at once and they would
+// otherwise each walk the npx cache directory.
+const npxBinCache = new Map<string, string | null>();
+function cachedNpxBin(pkg: string): string | null {
+  if (!npxBinCache.has(pkg)) {
+    const bin = resolveCachedNpxBin(pkg);
+    npxBinCache.set(pkg, bin);
+    console.info(`[ACP] ${pkg}: ${bin ? `using cached adapter ${bin}` : 'not cached, falling back to npx'}`);
+  }
+  return npxBinCache.get(pkg) ?? null;
+}
+
+// Running from cache means we no longer pick up new adapter releases on launch, so refresh
+// the cache once per app run — off the critical path, for the *next* launch to pick up.
+const npxRefreshed = new Set<string>();
+function refreshNpxPackageInBackground(pkg: string, env: NodeJS.ProcessEnv): void {
+  if (npxRefreshed.has(pkg)) return;
+  npxRefreshed.add(pkg);
+  setTimeout(() => {
+    try {
+      const child = spawn('npx', ['-y', pkg, '--version'], {
+        stdio: 'ignore',
+        shell: true,
+        detached: true,
+        env: { ...env, NPM_CONFIG_PREFER_OFFLINE: 'false' },
+      });
+      child.on('error', () => {});
+      child.unref();
+    } catch {
+      // Best-effort only: a failed refresh just means we keep using the cached copy.
+    }
+  }, 30_000).unref?.();
+}
+
+// Spawn an adapter, preferring the cached entry point over npx. Electron's own binary
+// doubles as node via ELECTRON_RUN_AS_NODE, so this needs no system node install.
+function spawnAcpAdapter(
+  acpCmd: { cmd: string; args: string[] },
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): ReturnType<typeof spawn> {
+  if (acpCmd.cmd === 'npx') {
+    const pkg = acpCmd.args[acpCmd.args.length - 1];
+    const bin = cachedNpxBin(pkg);
+    if (bin) {
+      refreshNpxPackageInBackground(pkg, env);
+      return spawn(process.execPath, [bin], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd,
+        env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+        shell: false,
+      });
+    }
+  }
+  // npx is a shell script, not a binary — needs shell:true to resolve on macOS.
+  // System-installed agents (copilot, kiro-cli, opencode) are real binaries but
+  // shell:true is harmless for them too and ensures PATH resolution.
+  return spawn(acpCmd.cmd, acpCmd.args, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    cwd,
+    env,
+    shell: acpCmd.cmd === 'npx',
+  });
+}
+
+// ========== Session-load concurrency (#82) ==========
+// Restoring sessions fires acp:load for every persisted session at once. That was masked
+// by npx, whose ~3s resolution accidentally staggered the spawns; running adapters directly
+// removed the stagger and all of them hit the agent's rollout parsing simultaneously,
+// pushing 'loading-session' from ~12s to ~27s on the later sessions. A small permit pool
+// keeps the machine busy without letting a dozen adapters thrash it.
+//
+// Only restores are gated. Creating a new session is a direct user action and must never
+// queue behind a background restore.
+const ACP_LOAD_CONCURRENCY = 3;
+let loadPermits = ACP_LOAD_CONCURRENCY;
+const loadWaiters: (() => void)[] = [];
+
+async function acquireLoadSlot(): Promise<() => void> {
+  if (loadPermits > 0) {
+    loadPermits--;
+  } else {
+    // Resolving a waiter hands the permit straight over, so the count can never drift.
+    await new Promise<void>(resolve => loadWaiters.push(resolve));
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = loadWaiters.shift();
+    if (next) next();
+    else loadPermits++;
+  };
 }
 
 type AcpSdk = typeof import('@agentclientprotocol/sdk');
@@ -643,15 +790,7 @@ export class AcpManager {
       // only contact the registry when the package is absent.
       NPM_CONFIG_PREFER_OFFLINE: 'true',
     };
-    // npx is a shell script, not a binary — needs shell:true to resolve on macOS.
-    // System-installed agents (copilot, kiro-cli, opencode) are real binaries but
-    // shell:true is harmless for them too and ensures PATH resolution.
-    const childProcess = spawn(acpCmd.cmd, acpCmd.args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd,
-      env,
-      shell: acpCmd.cmd === 'npx',
-    });
+    const childProcess = spawnAcpAdapter(acpCmd, cwd, env);
     // Surface adapter stderr in the app log for diagnostics (was 'inherit' — invisible)
     childProcess.stderr?.on('data', (chunk: Buffer) => {
       console.error(`[ACP ${id}] stderr:`, chunk.toString().trim());
@@ -925,6 +1064,15 @@ export class AcpManager {
 
   /** Load an existing ACP session by sessionId (for resume). */
   async load(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
+    const releaseLoadSlot = await acquireLoadSlot();
+    try {
+      return await this.loadInternal(id, agentLabel, cwd, acpSessionId, providerEnv);
+    } finally {
+      releaseLoadSlot();
+    }
+  }
+
+  private async loadInternal(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
     // A retry reuses the renderer session id. Silently retire any previous adapter attempt so
     // its exit/status callbacks cannot replace the retry's state.
     this.destroy(id, false);
@@ -942,15 +1090,7 @@ export class AcpManager {
       PATH: augmentedPath(process.env.PATH),
       NPM_CONFIG_PREFER_OFFLINE: 'true',
     };
-    // npx is a shell script, not a binary — needs shell:true to resolve on macOS.
-    // System-installed agents (copilot, kiro-cli, opencode) are real binaries but
-    // shell:true is harmless for them too and ensures PATH resolution.
-    const childProcess = spawn(acpCmd.cmd, acpCmd.args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd,
-      env,
-      shell: acpCmd.cmd === 'npx',
-    });
+    const childProcess = spawnAcpAdapter(acpCmd, cwd, env);
     // Surface adapter stderr in the app log for diagnostics (was 'inherit' — invisible)
     childProcess.stderr?.on('data', (chunk: Buffer) => {
       console.error(`[ACP ${id}] stderr:`, chunk.toString().trim());
