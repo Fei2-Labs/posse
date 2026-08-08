@@ -5425,8 +5425,13 @@ function mountLoadedAcpSessionView(
   if (previous) {
     const previousElement = previous.getElement();
     view.getElement().style.display = previousElement.style.display;
-    previous.destroy();
+    // #113: swap the element in BEFORE destroying the old view. destroy() calls
+    // container.remove(), which detaches previousElement — a replaceWith() after that
+    // is a silent no-op and the retried view never enters the DOM (blank stuck panel).
     previousElement.replaceWith(view.getElement());
+    previous.destroy();
+    // Fallback: if the old element was already detached, replaceWith did nothing.
+    if (!view.getElement().parentNode) acpContent.appendChild(view.getElement());
   } else {
     acpContent.appendChild(view.getElement());
   }

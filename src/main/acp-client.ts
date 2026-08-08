@@ -150,7 +150,12 @@ function buildBrowserInstructionBlocks(): { type: 'text'; text: string }[] {
 
 function loadAcpSdk(): Promise<AcpSdk> {
   if (!acpSdkPromise) {
-    acpSdkPromise = importEsm('@agentclientprotocol/sdk');
+    // #113: never cache a rejected import — a cached rejection makes every later
+    // Retry fail with the original error even once the cause is gone.
+    acpSdkPromise = importEsm('@agentclientprotocol/sdk').catch((error) => {
+      acpSdkPromise = null;
+      throw error;
+    });
   }
   return acpSdkPromise;
 }
