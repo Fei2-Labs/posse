@@ -291,6 +291,13 @@ function buildBrowserInstructionBlocks(): { type: 'text'; text: string }[] {
       'The user is already logged into this browser (persist:posse-browser-default); reuse that session rather than asking the user to re-authenticate. Do not request, print, or exfiltrate cookies, passwords, MFA codes, authorization headers, or stored secrets — the tools intentionally do not expose them.',
       'Screenshots are pixel captures only; DOM snapshots are sanitized.',
       '',
+      '[ChatGPT delegation (issue #121)]',
+      'When the user explicitly asks to use ChatGPT (e.g. "ask ChatGPT", "get ChatGPT\'s take", "continue in ChatGPT", "second opinion from ChatGPT"), invoke the `posse chatgpt` CLI rather than opening ChatGPT yourself or falling back to any other model/API. The CLI reuses this same logged-in built-in browser (no separate Chrome/profile) over a scoped local socket.',
+      'Commands: `posse chatgpt ask "<prompt>"` (sync), `posse chatgpt ask "<prompt>" --detach` then `posse chatgpt wait <jobId>` (async), `posse chatgpt doctor` (diagnostics). Use `--json` for machine-readable output and to capture exit codes.',
+      'Continuation: each completed ask returns a chatId. To follow up in the same conversation, pass `--chat <chatId>` (explicit) or `--continue` (reuses the most recent chatId). Without either, a fresh chat starts.',
+      'Never silently fall back to another model or an API if ChatGPT is unavailable — surface the CLI error (e.g. not_logged_in, busy, selectors_stale) to the user so they can act on it.',
+      'The CLI sends context to ChatGPT at the user\'s explicit intent. Do not send secrets you were told not to send; the prompt is logged to the Posse session timeline for audit.',
+      '',
     ].join('\n'),
   }];
 }

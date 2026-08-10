@@ -106,6 +106,20 @@ export type BrowserAgentDomSnapshotOptions = {
   maxDepth?: number;
 };
 
+// Result of the ChatGPT completion probe (#121). All fields are booleans/numbers/hashes —
+// no page text leaves the browser. The bridge uses these signals to detect streaming-done.
+export type ChatGptProbeResult = {
+  stopVisible: boolean;
+  composerEnabled: boolean;
+  sendEnabled: boolean;
+  lastTextLen: number;
+  lastTextHash: string;
+  lastMsgPresent: boolean;
+  assistantCount: number;
+  copyVisible: boolean;
+  loginPresent: boolean;
+};
+
 type PendingPermission = {
   ownerId: number;
   contentId: number;
@@ -318,6 +332,129 @@ function buildScrollScript(options: { selector?: BrowserAgentElementSelector; x?
     if (target.scrollBy) target.scrollBy(${dx}, ${dy});
     else { target.scrollLeft += ${dx}; target.scrollTop += ${dy}; }
     return { ok: true };
+  })()`;
+}
+
+// ---- ChatGPT bridge probe + reply scripts (#121) ----
+// These are FIXED scripts: the caller passes selector DATA (CSS strings from the
+// registry) via JSON.stringify, never code. The CLI cannot inject arbitrary JS because
+// it only controls the selector *values*, not the script structure. Both run in the
+// isolated world alongside the credential/DOM scripts.
+type ChatGptSelectorEntry = { css?: string; role?: string; role_name?: string; text?: string; xpath?: string };
+
+function buildChatgptProbeScript(selectors: {
+  composer?: ChatGptSelectorEntry;
+  send_button?: ChatGptSelectorEntry;
+  stop_button?: ChatGptSelectorEntry;
+  assistant_message_last?: ChatGptSelectorEntry;
+  login_indicator?: ChatGptSelectorEntry;
+}): string {
+  const payload = JSON.stringify(selectors);
+  return `(async () => {
+    const spec = ${payload};
+    const visible = (node) => {
+      if (!node || !(node instanceof Element)) return false;
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      return rect.width > 0 && rect.height > 0;
+    };
+    const resolve = (entry, preferLast = false) => {
+      if (!entry || !entry.css) return null;
+      let nodes = [];
+      try { nodes = Array.from(document.querySelectorAll(entry.css)); } catch { nodes = []; }
+      const visibleNodes = nodes.filter(visible);
+      let match = preferLast ? (visibleNodes[visibleNodes.length - 1] || null) : (visibleNodes[0] || null);
+      if (!match && entry.role) {
+        try {
+          const byRole = Array.from(document.querySelectorAll('[role="' + CSS.escape(entry.role) + '"]'));
+          match = byRole.find((n) => !entry.role_name || ((n.getAttribute('aria-label') || n.textContent || '').toLowerCase().includes(entry.role_name.toLowerCase()))) || null;
+        } catch { /* fall through */ }
+      }
+      if (!match && entry.text) {
+        const lower = entry.text.toLowerCase();
+        try {
+          match = Array.from(document.querySelectorAll('button,a,div,span')).find((n) => (n.textContent || '').trim().toLowerCase().includes(lower) && visible(n)) || null;
+        } catch { /* fall through */ }
+      }
+      if (!match && entry.xpath) {
+        try {
+          const r = document.evaluate(entry.xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+          for (let i = 0; i < r.snapshotLength; i++) {
+            const n = r.snapshotItem(i);
+            if (visible(n)) { match = n; break; }
+          }
+        } catch { /* fall through */ }
+      }
+      return match;
+    };
+    const composer = resolve(spec.composer);
+    const sendBtn = resolve(spec.send_button);
+    const stopBtn = resolve(spec.stop_button);
+    const lastMsg = resolve(spec.assistant_message_last, true);
+    const assistantNodes = spec.assistant_message_last?.css
+      ? Array.from(document.querySelectorAll(spec.assistant_message_last.css)).filter(visible)
+      : (lastMsg ? [lastMsg] : []);
+    const copyBtn = lastMsg?.closest('article')?.querySelector('button[data-testid="copy-turn-action-button"], button[aria-label*="Copy"]');
+    const login = resolve(spec.login_indicator);
+    const composerEnabled = composer ? (composer.getAttribute('contenteditable') === 'true' || !composer.hasAttribute('aria-disabled')) : false;
+    const sendEnabled = sendBtn ? !sendBtn.disabled && !sendBtn.hasAttribute('aria-disabled') : false;
+    const stopVisible = !!stopBtn && visible(stopBtn);
+    const lastText = lastMsg ? (lastMsg.textContent || '').trim() : '';
+    const hashText = (t) => {
+      let h = 5381 >>> 0;
+      for (let i = 0; i < t.length; i++) h = (((h << 5) + h) ^ t.charCodeAt(i)) >>> 0;
+      return h.toString(36);
+    };
+    return {
+      stopVisible,
+      composerEnabled,
+      sendEnabled,
+      lastTextLen: lastText.length,
+      lastTextHash: hashText(lastText),
+      lastMsgPresent: !!lastMsg,
+      assistantCount: assistantNodes.length,
+      copyVisible: !!copyBtn && visible(copyBtn),
+      loginPresent: !!login,
+    };
+  })()`;
+}
+
+function buildChatgptReplyScript(selector: ChatGptSelectorEntry): string {
+  return `(async () => {
+    const spec = ${JSON.stringify(selector)};
+    const visible = (node) => {
+      if (!node || !(node instanceof Element)) return false;
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      return rect.width > 0 && rect.height > 0;
+    };
+    const resolve = (entry) => {
+      if (!entry || !entry.css) return null;
+      let nodes = [];
+      try { nodes = Array.from(document.querySelectorAll(entry.css)); } catch { nodes = []; }
+      const visibleNodes = nodes.filter(visible);
+      return visibleNodes[visibleNodes.length - 1] || nodes[nodes.length - 1] || null;
+    };
+    const node = resolve(spec);
+    if (!node) return { ok: false, error: 'reply_not_readable' };
+    const SECRET_ATTR = /secret|token|csrf|nonce/i;
+    let text = '';
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        const parent = n.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        const tag = parent.tagName.toLowerCase();
+        if (tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT;
+        for (const attr of Array.from(parent.attributes || [])) {
+          if (SECRET_ATTR.test(attr.name)) return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    while (walker.nextNode()) text += walker.currentNode.nodeValue + ' ';
+    return { ok: true, text: text.replace(/\\s+/g, ' ').trim() };
   })()`;
 }
 
@@ -810,6 +947,55 @@ export class EmbeddedBrowserController {
       return result?.error ? { ok: false, error: result.error } : { ok: true };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Scroll failed.' };
+    }
+  }
+
+  // ===================== ChatGPT bridge probe + reply extraction (#121) =====================
+  // These run FIXED scripts in the isolated world. The caller passes selector DATA (CSS
+  // strings from the registry), never code — so the ChatGPT CLI cannot inject arbitrary
+  // JavaScript into the browser. Both return sanitized, text-only results: the probe
+  // returns booleans/lengths/hashes (no page text), the reply extractor returns plain
+  // text with script/style/secret-attribute nodes stripped. No cookies/storage/auth.
+
+  // A logical-name -> selector-entry map, mirroring chatgpt-selectors.ts SelectorEntry.
+  // Defined here so the controller doesn't import the selectors module (keeps the
+  // dependency direction clean: the service imports the controller, not vice-versa).
+  async agentRunChatgptProbe(selectors: {
+    composer?: { css?: string; role?: string; role_name?: string; text?: string; xpath?: string };
+    send_button?: { css?: string; role?: string; role_name?: string; text?: string; xpath?: string };
+    stop_button?: { css?: string; role?: string; role_name?: string; text?: string; xpath?: string };
+    assistant_message_last?: { css?: string; role?: string; role_name?: string; text?: string; xpath?: string };
+    login_indicator?: { css?: string; role?: string; role_name?: string; text?: string; xpath?: string };
+  }): Promise<{ ok: boolean; probe?: ChatGptProbeResult; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    try {
+      const result = await contents.executeJavaScriptInIsolatedWorld(CREDENTIAL_WORLD_ID, [{
+        code: buildChatgptProbeScript(selectors),
+        url: 'posse://chatgpt-probe',
+      }], true) as ChatGptProbeResult | undefined;
+      if (!result) return { ok: false, error: 'Probe returned no result.' };
+      return { ok: true, probe: result };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Probe failed.' };
+    }
+  }
+
+  // Extract the latest assistant message as plain text. The selector is data (CSS), not
+  // code. Text is walked via TreeWalker; script/style and secret-attribute nodes are
+  // rejected. Returns text only — no DOM tree, no attributes, no secrets.
+  async agentExtractChatgptReply(selector: { css?: string; role?: string; role_name?: string; text?: string; xpath?: string }): Promise<{ ok: boolean; text?: string; error?: string }> {
+    const contents = this.view.webContents;
+    if (contents.isDestroyed()) return { ok: false, error: 'Browser is unavailable.' };
+    try {
+      const result = await contents.executeJavaScriptInIsolatedWorld(CREDENTIAL_WORLD_ID, [{
+        code: buildChatgptReplyScript(selector),
+        url: 'posse://chatgpt-reply',
+      }], true) as { ok?: boolean; text?: string; error?: string } | undefined;
+      if (!result || result.ok === false) return { ok: false, error: result?.error || 'reply_not_readable' };
+      return { ok: true, text: result.text || '' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Reply extraction failed.' };
     }
   }
 

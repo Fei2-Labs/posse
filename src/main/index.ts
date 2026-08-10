@@ -39,6 +39,7 @@ import {
   type EmbeddedBrowserCredentialMappings,
 } from './browser-controller';
 import { startBrowserOpsServer, type BrowserOpsServer } from './browser-ops-server';
+import { startChatGptBridgeService, type ChatGptBridge } from './chatgpt-bridge-service';
 
 import { bootstrapRemoteHost, resolveRemoteBundleDir, stopSshTunnel, stopAllSshTunnels } from './remote-bootstrap';
 import { AcpManager, getAcpCommand, isAcpEligible, setBrowserMcpConfig, setBrowserBridgeEnabled } from './acp-client';
@@ -875,6 +876,10 @@ let embeddedBrowserManager: EmbeddedBrowserManager | null = null;
 // Null until startBrowserOpsServer runs at launch; null also means agent browser tools
 // are unavailable (no live server to hit).
 let browserOpsServer: BrowserOpsServer | null = null;
+// ChatGPT bridge (#121): narrow, scoped local IPC (0600 Unix socket) for the
+// `posse chatgpt` CLI. Null until startChatGptBridgeService runs at launch. Shares the
+// #109 browser ownership lock with the ACP agent path so the two conflict fairly.
+let chatgptBridge: ChatGptBridge | null = null;
 const acpOwners = new Map<string, WebContents>();
 
 function sendToAcpOwner(channel: string, id: string, ...args: unknown[]): void {
@@ -4232,7 +4237,7 @@ app.whenReady().then(async () => {
   embeddedBrowserManager = new EmbeddedBrowserManager();
   // Start the agent browser-ops loopback server before any ACP session is created.
   // The ACP client reads this config to build the McpServerStdio entry passed to agents.
-  browserOpsServer = startBrowserOpsServer(embeddedBrowserManager);
+  browserOpsServer = await startBrowserOpsServer(embeddedBrowserManager);
   if (browserOpsServer) {
     setBrowserMcpConfig({
       baseUrl: browserOpsServer.baseUrl,
@@ -4241,6 +4246,20 @@ app.whenReady().then(async () => {
     console.info(`[BrowserOps] agent bridge ready on ${browserOpsServer.baseUrl}`);
   } else {
     console.warn('[BrowserOps] agent bridge unavailable (server failed to start)');
+  }
+  // Start the ChatGPT bridge (#121): a narrow 0600 Unix socket for the `posse chatgpt`
+  // CLI. Scoped to ChatGPT ops only — it never exposes general browser control or the
+  // POSSE_BROWSER_OPS_TOKEN to the CLI. Shares the #109 ownership lock directly with
+  // browserOpsServer (acquireOwner/releaseOwner) so ACP mutations and the CLI conflict fairly.
+  if (browserOpsServer) {
+    chatgptBridge = await startChatGptBridgeService(embeddedBrowserManager, browserOpsServer);
+    if (chatgptBridge) {
+      console.info(`[ChatGptBridge] CLI bridge ready on ${chatgptBridge.address}`);
+    } else {
+      console.warn('[ChatGptBridge] CLI bridge unavailable (server failed to start)');
+    }
+  } else {
+    console.warn('[ChatGptBridge] CLI bridge unavailable (browser ops server not running)');
   }
   // Apply the persisted browser-tool policy (issue #109): gates whether ACP sessions
   // receive the browser MCP server. Default ON; user can disable globally in settings.
@@ -4256,6 +4275,10 @@ app.whenReady().then(async () => {
   });
   cloudflaredManager = new CloudflaredManager(path.join(__dirname, '../..'));
   createWindow(appIcon);
+  // Pre-create the single built-in browser controller so `posse chatgpt` works immediately
+  // after app launch, even before the user opens the Inspector Browser tab. The view stays
+  // detached/hidden until renderer bounds arrive and reuses persist:posse-browser-default.
+  if (mainWindow && !mainWindow.isDestroyed()) embeddedBrowserManager.controllerFor(mainWindow);
 
   // Check for app updates (packaged builds only; never blocks/crashes startup).
   initAutoUpdater();
@@ -4331,7 +4354,8 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow(currentAppIcon);
+    const win = createWindow(currentAppIcon);
+    embeddedBrowserManager?.controllerFor(win);
   }
 });
 
@@ -4345,6 +4369,8 @@ app.on('before-quit', async () => {
   acpOwners.clear();
   browserOpsServer?.close();
   browserOpsServer = null;
+  chatgptBridge?.close();
+  chatgptBridge = null;
   tray?.destroy();
   tray = null;
 });

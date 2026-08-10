@@ -19,3 +19,29 @@ cp -R "$SRC" "$DEST"
 
 VER="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo '?')"
 echo "[install] $DEST is now version $VER"
+
+# Install the Posse CLI without launching another Node/Chrome runtime. Electron runs the
+# bundled CLI in Node mode, while ChatGPT work remains inside the already-running app.
+CLI_DIR="$HOME/.local/bin"
+CLI_PATH="$CLI_DIR/posse"
+CLI_MARKER="# managed by Posse installer"
+mkdir -p "$CLI_DIR"
+if [ -e "$CLI_PATH" ] && ! grep -qF "$CLI_MARKER" "$CLI_PATH" 2>/dev/null; then
+  echo "[install] preserving existing non-Posse command: $CLI_PATH" >&2
+else
+  cat > "$CLI_PATH" <<'SH'
+#!/usr/bin/env bash
+# managed by Posse installer
+set -euo pipefail
+APP="/Applications/Posse.app"
+EXEC="$APP/Contents/MacOS/Posse"
+CLI="$APP/Contents/Resources/app.asar/dist/cli/posse.js"
+if [ ! -x "$EXEC" ] || [ ! -f "$CLI" ]; then
+  echo "Posse CLI unavailable. Reinstall /Applications/Posse.app." >&2
+  exit 3
+fi
+ELECTRON_RUN_AS_NODE=1 exec "$EXEC" "$CLI" "$@"
+SH
+  chmod 0755 "$CLI_PATH"
+  echo "[install] CLI installed: $CLI_PATH"
+fi

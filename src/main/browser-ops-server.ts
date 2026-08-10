@@ -34,6 +34,18 @@ export interface BrowserOpsServer {
   releaseOwner(sessionId: string): void;
   /** The session id that currently owns the browser, or null. */
   currentOwner(): string | null;
+  /**
+   * Acquire ownership on behalf of a session id (e.g. the ChatGPT CLI label) WITHOUT going
+   * through an HTTP mutating call. Used by the ChatGPT bridge (#121) so the CLI's hold is
+   * visible to ACP mutations (they get 423) and vice versa. Returns false if another session
+   * currently owns. Refreshes the idle timer so the hold doesn't time out mid-stream.
+   */
+  acquireOwner(sessionId: string): boolean;
+  /**
+   * Check whether a specific session id is the current owner. Convenience for the bridge
+   * to test its own label without a full currentOwner() string compare at the call site.
+   */
+  isOwner(sessionId: string): boolean;
   /** Subscribe to ownership changes (acquire/release). Used by the UI indicator (#109). */
   onOwnershipChange(handler: (ownerSessionId: string | null) => void): void;
   close(): void;
@@ -76,7 +88,7 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
-export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserOpsServer | null {
+export async function startBrowserOpsServer(manager: EmbeddedBrowserManager): Promise<BrowserOpsServer | null> {
   const token = randomUUID();
   let ownerSessionId: string | null = null;
   let ownerTimer: NodeJS.Timeout | null = null;
@@ -90,11 +102,38 @@ export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserO
   const clearOwnerTimer = () => {
     if (ownerTimer) { clearTimeout(ownerTimer); ownerTimer = null; }
   };
+  // (Re)start the idle timer that drops ownership after OWNER_IDLE_TIMEOUT_MS of no
+  // mutating calls. Called on every mutating HTTP call from the owner AND on
+  // acquireOwner (ChatGPT CLI). The timer prevents a dead session/process from holding
+  // the browser forever.
+  const refreshOwnerTimer = () => {
+    clearOwnerTimer();
+    ownerTimer = setTimeout(() => {
+      if (ownerSessionId) {
+        ownerSessionId = null;
+        ownerTimer = null;
+        notifyOwnership();
+      }
+    }, OWNER_IDLE_TIMEOUT_MS);
+  };
   const releaseOwnerInternal = (sessionId: string) => {
     if (ownerSessionId !== sessionId) return;
     clearOwnerTimer();
     ownerSessionId = null;
     notifyOwnership();
+  };
+  // Acquire ownership on behalf of a session id without an HTTP call. Used by the
+  // ChatGPT bridge (#121). Returns false if another session currently owns. On success,
+  // sets the owner, broadcasts, and starts the idle timer.
+  const acquireOwnerInternal = (sessionId: string): boolean => {
+    if (!sessionId) return false;
+    if (ownerSessionId && ownerSessionId !== sessionId) return false;
+    if (ownerSessionId !== sessionId) {
+      ownerSessionId = sessionId;
+      notifyOwnership();
+    }
+    refreshOwnerTimer();
+    return true;
   };
 
   let server: http.Server | null = null;
@@ -125,14 +164,7 @@ export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserO
           notifyOwnership();
         }
         // Refresh the idle timer on every mutating call from the owner.
-        clearOwnerTimer();
-        ownerTimer = setTimeout(() => {
-          if (ownerSessionId) {
-            ownerSessionId = null;
-            ownerTimer = null;
-            notifyOwnership();
-          }
-        }, OWNER_IDLE_TIMEOUT_MS);
+        refreshOwnerTimer();
       }
 
       const controller = manager.agentController();
@@ -149,9 +181,17 @@ export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserO
       }
       send(res, 200, result);
     });
-    // 0 = let the OS pick a free port on loopback.
-    server.listen(0, '127.0.0.1');
+    // 0 = let the OS pick a free port on loopback. Wait for the listening event:
+    // server.address() is not guaranteed to be populated synchronously after listen().
+    await new Promise<void>((resolve, reject) => {
+      server!.once('error', reject);
+      server!.listen(0, '127.0.0.1', () => {
+        server!.off('error', reject);
+        resolve();
+      });
+    });
   } catch (error) {
+    try { server?.close(); } catch { /* ignore */ }
     console.error('[BrowserOps] failed to start server:', error);
     return null;
   }
@@ -175,6 +215,12 @@ export function startBrowserOpsServer(manager: EmbeddedBrowserManager): BrowserO
     },
     currentOwner(): string | null {
       return ownerSessionId;
+    },
+    acquireOwner(sessionId: string): boolean {
+      return acquireOwnerInternal(sessionId);
+    },
+    isOwner(sessionId: string): boolean {
+      return ownerSessionId === sessionId;
     },
     onOwnershipChange(handler: (ownerSessionId: string | null) => void): void {
       ownershipHandlers.add(handler);
