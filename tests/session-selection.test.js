@@ -58,8 +58,17 @@ test('closing ACP sessions persists resumable metadata before clearing live stat
   assert.match(appSource, /function acpClosedSessionMetadata\(id: string\)/);
   assert.match(appSource, /window\.posse\.acpDestroy\(id, acpClosedSessionMetadata\(id\)\);\s*removePersistedActiveAcpSession\(id\)/);
   assert.match(preloadSource, /acpDestroy: \(id: string, closedSession\?: AcpClosedSessionMetadata\)/);
-  assert.match(mainSource, /ipcMain\.on\('acp:destroy', \(_e, id: string, closedSession\?: unknown\)/);
+  assert.match(mainSource, /ipcMain\.handle\('acp:destroy', async \(_e, id: string, closedSession\?: unknown\)/);
   assert.match(mainSource, /existing\.resumeId !== session\.resumeId/);
+});
+
+test('restart awaits ACP teardown before reusing the stable session id', () => {
+  const restart = appSource.match(/async function handleRestartClick\(id: string\): Promise<void> \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(restart, 'expected restart handler');
+  assert.match(restart, /await window\.posse\.acpDestroy\(id, closedMeta\)/);
+  assert.match(restart, /mountLoadedAcpSessionView\(id, agentLabel, cwd, presetCommand, resumeId\)/);
+  const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src/preload/index.ts'), 'utf8');
+  assert.match(preloadSource, /ipcRenderer\.invoke\('acp:destroy'/);
 });
 
 test('resuming a closed session redraws Recent after its persisted row is removed', () => {

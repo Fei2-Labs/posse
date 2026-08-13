@@ -231,7 +231,7 @@ declare global {
       acpCancel: (id: string) => Promise<boolean>;
       acpSetConfigOption: (id: string, configId: string, value: string | boolean) => Promise<SessionConfigOption[]>;
       acpInfo: (id: string) => Promise<AcpSessionInfo | null>;
-      acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) => void;
+      acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) => Promise<boolean>;
       acpDelete: (id: string) => Promise<{ ok: boolean; terminated: boolean; error?: string }>;
       acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
       acpDrainReplay: (id: string) => Promise<SessionUpdate[]>;
@@ -6264,7 +6264,10 @@ async function handleRestartClick(id: string): Promise<void> {
 
   // --- Terminate gracefully (main waits for the normal timeout before SIGKILL). ---
   if (isAcp) {
-    window.posse.acpDestroy(id, closedMeta);
+    // Await main-process teardown before reusing this id for session/load. Fire-and-forget
+    // destroy races the new adapter: it can delete the freshly-created entry or leave the
+    // old process owning the id, making Restart appear to do nothing (#112).
+    await window.posse.acpDestroy(id, closedMeta);
   } else {
     // PTY: destroy is a fire-and-forget send; main saves the closed-session record
     // asynchronously. Remove the renderer row/term now so restoreClosedSession (which

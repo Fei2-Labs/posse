@@ -360,7 +360,7 @@ contextBridge.exposeInMainWorld('posse', {
   acpInfo: (id: string) =>
     ipcRenderer.invoke('acp:info', id) as Promise<AcpSessionInfo | null>,
   acpDestroy: (id: string, closedSession?: AcpClosedSessionMetadata) =>
-    ipcRenderer.send('acp:destroy', id, closedSession),
+    ipcRenderer.invoke('acp:destroy', id, closedSession) as Promise<boolean>,
   acpDelete: (id: string) =>
     ipcRenderer.invoke('acp:delete', id) as Promise<{ ok: boolean; terminated: boolean; error?: string }>,
   acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) =>

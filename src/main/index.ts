@@ -2854,7 +2854,7 @@ function registerIPC(): void {
   });
 
   // Destroy an ACP session
-  ipcMain.on('acp:destroy', (_e, id: string, closedSession?: unknown) => {
+  ipcMain.handle('acp:destroy', async (_e, id: string, closedSession?: unknown) => {
     if (closedSession && typeof closedSession === 'object') {
       const candidate = closedSession as Partial<ClosedSession>;
       if (typeof candidate.title === 'string'
@@ -2872,6 +2872,7 @@ function registerIPC(): void {
     }
     acpManager.destroy(id);
     acpOwners.delete(id);
+    return true;
   });
 
   ipcMain.handle('acp:delete', (_e, id: string): { ok: boolean; terminated: boolean; error?: string } => {
