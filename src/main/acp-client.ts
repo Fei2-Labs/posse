@@ -423,11 +423,18 @@ function flattenConfigOptions(option: Extract<SessionConfigOption, { type: 'sele
 
 function parseContextSize(value: string): number | null {
   const normalized = value.replace(/,/g, '').trim().toLowerCase();
-  const match = normalized.match(/(\d+(?:\.\d+)?)\s*(m|k)?(?:\s*tokens?)?/);
-  if (!match) return null;
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  return amount * (match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1_000 : 1);
+  // Prefer explicit k/M context units. This avoids treating model versions such as
+  // "5.3" as token counts when a model_config option contains both.
+  const unitMatches = [...normalized.matchAll(/(\d+(?:\.\d+)?)\s*(m|k)\b/g)];
+  if (unitMatches.length) {
+    return Math.max(...unitMatches.map(match => Number(match[1]) * (match[2] === 'm' ? 1_000_000 : 1_000)));
+  }
+  const tokenMatch = normalized.match(/(\d{4,})\s*(?:tokens?|token|context|window)/);
+  if (tokenMatch) return Number(tokenMatch[1]);
+  // Bare numeric values are accepted only when the whole value is numeric; model IDs
+  // and unrelated numbers must not become context sizes.
+  if (/^\d{4,}$/.test(normalized)) return Number(normalized);
+  return null;
 }
 
 export function preferredContextWindowConfig(

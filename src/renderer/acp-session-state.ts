@@ -107,13 +107,30 @@ export class AcpPromptQueue<T> {
   }
 }
 
-const STATUS_CONFIG_IDS = ['model', 'context_window', 'context-window', 'context', 'reasoning_effort', 'effort', 'fast-mode', 'mode'];
+const STATUS_CONFIG_IDS = ['model', 'model_config', 'context_window', 'context-window', 'context', 'context-window-size', 'context_window_size', 'context_length', 'max_context_tokens', 'reasoning_effort', 'effort', 'fast-mode', 'mode'];
+
+function flattenedConfigValues(option: Extract<SessionConfigOption, { type: 'select' }>): string {
+  return option.options.flatMap(item => 'group' in item ? item.options : [item])
+    .map(value => `${value.value} ${value.name} ${value.description || ''}`)
+    .join(' ');
+}
+
+function isContextConfigOption(option: SessionConfigOption): boolean {
+  if (option.type !== 'select') return false;
+  const metadata = `${option.id} ${option.name} ${option.category || ''} ${option.description || ''}`.toLowerCase();
+  if (/context|window|token.?limit|context.?length/.test(metadata)) return true;
+  return /(?:context|window)\s*(?:window|size|limit)?|\b\d+(?:\.\d+)?\s*[mk]\b/.test(flattenedConfigValues(option).toLowerCase());
+}
 
 export function statusConfigOptions(configOptions: SessionConfigOption[]): SessionConfigOption[] {
   const byId = new Map(configOptions.map(option => [option.id, option]));
-  return STATUS_CONFIG_IDS
+  const ordered = STATUS_CONFIG_IDS
     .map(id => byId.get(id))
     .filter((option): option is SessionConfigOption => option?.type === 'select');
+  for (const option of configOptions) {
+    if (option.type === 'select' && isContextConfigOption(option) && !ordered.includes(option)) ordered.splice(1, 0, option);
+  }
+  return ordered;
 }
 
 export function configControlLabel(option: SessionConfigOption): string {
@@ -126,6 +143,7 @@ export function configControlLabel(option: SessionConfigOption): string {
 export function configValueLabel(option: SessionConfigOption): string {
   if (option.type !== 'select') return String(option.currentValue);
   if (option.id === 'fast-mode') return option.currentValue === 'on' ? 'Fast' : 'Standard';
+  if (/context|window|token.?limit|context.?length/i.test(`${option.id} ${option.name}`)) return `Context ${String(option.currentValue)}`;
   const flattened = option.options.flatMap(item => 'group' in item ? item.options : [item]);
   return flattened.find(item => item.value === option.currentValue)?.name || String(option.currentValue);
 }

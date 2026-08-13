@@ -40,9 +40,12 @@ test('status controls expose model, effort, speed and access in stable order', (
     { id: 'model', type: 'select', currentValue: 'gpt', options: [] },
     { id: 'reasoning_effort', type: 'select', currentValue: 'medium', options: [] },
     { id: 'collaboration_mode', type: 'select', currentValue: 'default', options: [] },
+    { id: 'model_config', name: 'Model config', category: 'model_config', type: 'select', currentValue: '1m', options: [
+      { value: '200k', name: '200k context' }, { value: '1m', name: '1M context' },
+    ] },
   ];
   assert.deepEqual(statusConfigOptions(options).map(option => option.id), [
-    'model', 'reasoning_effort', 'fast-mode', 'mode',
+    'model', 'model_config', 'reasoning_effort', 'fast-mode', 'mode',
   ]);
 });
 
