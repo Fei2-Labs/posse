@@ -758,6 +758,39 @@ async function openFileInEditor(filePath: string): Promise<OpenEditorResult> {
 
 // ========== CLI model provider detection ==========
 
+// Resolve the preferred Claude 1M model variant for a fresh built-in launch (#122).
+// Claude Code exposes extended context as a model alias (e.g. sonnet[1m]), not a
+// separate --context-window flag. Keep an explicit user model, custom command, and
+// every resume command untouched; only enrich Posse's built-in fresh Claude preset.
+function defaultClaude1mModel(): string | null {
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as { model?: unknown };
+    const model = typeof settings.model === 'string' ? settings.model.trim() : '';
+    if (!model || /\[\d+(?:\.\d+)?m\]$/i.test(model)) return null;
+    // Only stable Claude Code aliases are safe to extend. Full provider model IDs and
+    // custom aliases may not accept the [1m] suffix, so leave them at their own default.
+    return /^(sonnet|opus|fable)$/i.test(model) ? `${model}[1m]` : null;
+  } catch {
+    // Missing/malformed user settings must never block terminal creation.
+    return null;
+  }
+}
+
+function withDefaultClaude1mContext(presetCommand: string): string {
+  const model = defaultClaude1mModel();
+  return presetCommand.trim() === 'claude --dangerously-skip-permissions' && model
+    ? `${presetCommand} --model '${model}'`
+    : presetCommand;
+}
+
+function withDefaultClaude1mEnv(agentLabel: string, providerEnv?: Record<string, string>): Record<string, string> | undefined {
+  if (agentLabel.trim() !== 'claude --dangerously-skip-permissions') return providerEnv;
+  const model = defaultClaude1mModel();
+  if (!model || providerEnv?.ANTHROPIC_MODEL) return providerEnv;
+  return { ...(providerEnv || {}), ANTHROPIC_MODEL: model };
+}
+
 // Resolve the model provider actually used from the preset command
 function getCliProvider(presetCommand: string): string | null {
   const home = os.homedir();
@@ -2639,7 +2672,8 @@ function registerIPC(): void {
         effectiveProviderEnv = { ...(providerEnv || {}), CLAUDE_CODE_OAUTH_TOKEN: subToken };
       }
     }
-    const session = await backend.create(cwd, presetCommand, themeId, effectiveProviderEnv);
+    const launchCommand = remoteBackendForEvent(_e) ? presetCommand : withDefaultClaude1mContext(presetCommand);
+    const session = await backend.create(cwd, launchCommand, themeId, effectiveProviderEnv);
     // If providerEnv is present, infer the provider name from baseUrl
     let provider: string | null = null;
     if (providerEnv && providerEnv.ANTHROPIC_BASE_URL) {
@@ -2790,7 +2824,7 @@ function registerIPC(): void {
     }
     acpOwners.set(id, _e.sender);
     try {
-      return await acpManager.create(id, agentLabel, cwd, providerEnv);
+      return await acpManager.create(id, agentLabel, cwd, withDefaultClaude1mEnv(agentLabel, providerEnv));
     } catch (error) {
       if (acpOwners.get(id) === _e.sender) acpOwners.delete(id);
       throw error;

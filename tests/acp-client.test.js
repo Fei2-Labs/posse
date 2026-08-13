@@ -47,6 +47,15 @@ const {
 } = loadAcpClientModule();
 const acpClientSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
 
+test('new built-in Claude ACP sessions receive the current model family 1M variant', () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
+  assert.match(mainSource, /function defaultClaude1mModel\(\)/);
+  assert.match(mainSource, /\$\{model\}\[1m\]/);
+  assert.match(mainSource, /withDefaultClaude1mEnv\(agentLabel, providerEnv\)/);
+  assert.match(mainSource, /acpManager\.create\(id, agentLabel, cwd, withDefaultClaude1mEnv/);
+  assert.match(mainSource, /backend\.create\(cwd, launchCommand/);
+});
+
 test('routes exact built-in presets to ACP', () => {
   const presets = [
     'claude --dangerously-skip-permissions',
