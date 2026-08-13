@@ -107,7 +107,7 @@ export class AcpPromptQueue<T> {
   }
 }
 
-const STATUS_CONFIG_IDS = ['model', 'reasoning_effort', 'effort', 'fast-mode', 'mode'];
+const STATUS_CONFIG_IDS = ['model', 'context_window', 'context-window', 'context', 'reasoning_effort', 'effort', 'fast-mode', 'mode'];
 
 export function statusConfigOptions(configOptions: SessionConfigOption[]): SessionConfigOption[] {
   const byId = new Map(configOptions.map(option => [option.id, option]));

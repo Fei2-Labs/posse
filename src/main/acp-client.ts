@@ -15,6 +15,7 @@ import type {
   PromptCapabilities,
   RequestPermissionOutcome,
   SessionConfigOption,
+  SessionConfigSelectOption,
   SessionModeState,
   SessionUpdate,
   SetSessionConfigOptionResponse,
@@ -414,6 +415,43 @@ export function preferredFullAccessConfig(
   return descriptiveMatch ? { configId: modeOption.id, value: descriptiveMatch.value } : null;
 }
 
+const DEFAULT_CONTEXT_WINDOW = 1_000_000;
+
+function flattenConfigOptions(option: Extract<SessionConfigOption, { type: 'select' }>): SessionConfigSelectOption[] {
+  return option.options.flatMap(item => 'group' in item ? item.options : [item]);
+}
+
+function parseContextSize(value: string): number | null {
+  const normalized = value.replace(/,/g, '').trim().toLowerCase();
+  const match = normalized.match(/(\d+(?:\.\d+)?)\s*(m|k)?(?:\s*tokens?)?/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return amount * (match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1_000 : 1);
+}
+
+export function preferredContextWindowConfig(
+  configOptions: SessionConfigOption[],
+  target = DEFAULT_CONTEXT_WINDOW,
+): { configId: string; value: string; size: number } | null {
+  const contextOption = configOptions.find(option => {
+    const haystack = `${option.id} ${option.name} ${option.category || ''} ${option.description || ''}`.toLowerCase();
+    return option.type === 'select' && /context|window|token.?limit/.test(haystack);
+  });
+  if (!contextOption || contextOption.type !== 'select') return null;
+  const candidates = flattenConfigOptions(contextOption).flatMap(option => {
+    const size = parseContextSize(`${option.value} ${option.name} ${option.description || ''}`);
+    return size ? [{ option, size }] : [];
+  });
+  if (!candidates.length) return null;
+  // Never silently select a larger window than requested. If 1M is unavailable,
+  // choose next lower available size; if no lower size exists, leave adapter default.
+  const eligible = candidates.filter(candidate => candidate.size <= target);
+  const selected = eligible.sort((a, b) => b.size - a.size)[0];
+  if (!selected || selected.option.value === contextOption.currentValue) return null;
+  return { configId: contextOption.id, value: selected.option.value, size: selected.size };
+}
+
 export function preferredAllowPermission(options: PermissionOption[]): PermissionOption | null {
   return options.find(option => option.kind === 'allow_always')
     || options.find(option => option.kind === 'allow_once')
@@ -725,6 +763,17 @@ export class AcpManager {
     }
   }
 
+  private async applyDefaultContextWindow(id: string, info: AcpSessionInfo): Promise<void> {
+    const preferred = preferredContextWindowConfig(info.configOptions);
+    if (!preferred) return;
+    try {
+      await this.setConfigOption(id, preferred.configId, preferred.value);
+      console.info(`[ACP ${id}] selected context window ${preferred.size} tokens`);
+    } catch (error) {
+      console.warn(`[ACP ${id}] Unable to apply default 1M context window:`, error);
+    }
+  }
+
   // #117: run `request`, and if the agent answers auth_required, authenticate with the
   // methods it advertised at initialize and run it once more. The credentials are already
   // on disk, so this is normally a silent round trip; it only becomes visible if every
@@ -899,6 +948,7 @@ export class AcpManager {
 
           this.advanceStartup(id, startup, 'applying-config', info);
           await this.applyDefaultFullAccess(id, info);
+          await this.applyDefaultContextWindow(id, info);
           this.advanceStartup(id, startup, 'ready', info);
           clearTimeout(timeout);
           console.info(`[ACP ${id}] startup timings`, info.startupTimingsMs);
@@ -1195,6 +1245,7 @@ export class AcpManager {
 
           this.advanceStartup(id, startup, 'applying-config', info);
           await this.applyDefaultFullAccess(id, info);
+          await this.applyDefaultContextWindow(id, info);
           this.advanceStartup(id, startup, 'ready', info);
           clearTimeout(timeout);
           console.info(`[ACP ${id}] load timings`, info.startupTimingsMs);

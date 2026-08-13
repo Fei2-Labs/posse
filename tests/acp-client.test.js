@@ -42,6 +42,7 @@ const {
   getAcpCommand,
   isAcpEligible,
   preferredFullAccessConfig,
+  preferredContextWindowConfig,
   preferredAllowPermission,
 } = loadAcpClientModule();
 const acpClientSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
@@ -126,6 +127,26 @@ test('selects each adapter\'s highest supported access mode', () => {
   }]), { configId: 'mode', value: 'autopilot' });
 
   assert.equal(preferredFullAccessConfig([]), null);
+});
+
+test('defaults context window to exact 1M, then next lower option', () => {
+  const options = [
+    {
+      id: 'context_window', name: 'Context window', type: 'select', currentValue: '200k',
+      options: [
+        { value: '128k', name: '128k tokens' },
+        { value: '200k', name: '200k tokens' },
+        { value: '1m', name: '1M tokens' },
+      ],
+    },
+  ];
+  assert.deepEqual(preferredContextWindowConfig(options), { configId: 'context_window', value: '1m', size: 1_000_000 });
+  assert.deepEqual(preferredContextWindowConfig(options.map(option => ({ ...option, currentValue: '128k', options: option.options.filter(item => item.value !== '1m') }))), { configId: 'context_window', value: '200k', size: 200_000 });
+});
+
+test('does not choose context window larger than 1M when no lower option exists', () => {
+  const options = [{ id: 'context', name: 'Context', type: 'select', currentValue: '2m', options: [{ value: '2m', name: '2M' }] }];
+  assert.equal(preferredContextWindowConfig(options), null);
 });
 
 test('defaults permission fallbacks to always allow, then allow once', () => {
