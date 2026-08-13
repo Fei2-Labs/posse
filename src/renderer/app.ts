@@ -271,6 +271,12 @@ const sessionAgentId: Map<string, string> = new Map();
 // sources (live / closed / on-disk history). Mirrors sessionAgentId but kept separately so the
 // dedup survives an app reload even if sessionAgentId is repopulated lazily.
 const sessionResumeId: Map<string, string> = new Map();
+// In-flight resume guards keyed by resumeId/uuid. A resume is async: dedup via
+// sessionResumeId only works AFTER createPty resolves. Two rapid clicks on the same
+// row both pass the pre-spawn dedup check and spawn two Devin/agent processes — which
+// the agent's own session lock then rejects ("already open in another process"). This
+// map holds the live Promise for the first restore so concurrent callers await it.
+const restoreInFlight: Map<string, Promise<string | null>> = new Map();
 // Custom provider ID used by each session (to restore selection when switching terminals)
 const sessionClaudeProviderIds: Map<string, string> = new Map();
 
@@ -5876,6 +5882,16 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
   if (cs.resumeId) {
     const existing = findLivePtyForUuid(cs.resumeId);
     if (existing) { switchSession(existing); return; }
+    // A prior click on this same row is still restoring (createPty hasn't resolved yet,
+    // so sessionResumeId isn't set). Await it instead of spawning a second agent process —
+    // the agent's own session lock would otherwise reject the duplicate ("already open
+    // in another process"), e.g. Devin/`devin -r <name>` sqlite session_locks.
+    const inflight = restoreInFlight.get(cs.resumeId);
+    if (inflight) {
+      const liveId = await inflight;
+      if (liveId) switchSession(liveId);
+      return;
+    }
   }
 
   const cwd = cs.cwd || sessionCwds.get(termManager.getActiveId() || '') || '';
@@ -5923,6 +5939,11 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
     command = cs.presetCommand || '';
   }
 
+  // Guard the async spawn so concurrent clicks on the same row await the first restore
+  // instead of each spawning its own agent process. Resolves to the live ptyId (or null
+  // if the restore aborted, e.g. session-not-found above) so waiters can focus it.
+  const resumeKey = cs.resumeId || cs.id;
+  const done = (async (): Promise<string | null> => {
   const result = await window.posse.createPty(cwd, command, themeId, undefined, useSubscriptionFlag());
   ptyPresetCommands.set(result.id, command);
   const now = Date.now();
@@ -5952,6 +5973,16 @@ async function restoreClosedSession(cs: ClosedSessionInfo): Promise<void> {
     const dims = termManager.getActiveDimensions();
     if (dims) window.posse.resizePty(result.id, dims.cols, dims.rows);
   }, 100);
+  return result.id;
+  })();
+  restoreInFlight.set(resumeKey, done);
+  try {
+    await done;
+  } finally {
+    // Clear only if this promise is still the guard (a later, valid second restore
+    // after the first settled should be allowed to run fresh).
+    if (restoreInFlight.get(resumeKey) === done) restoreInFlight.delete(resumeKey);
+  }
 }
 
 // Load the native Claude Code session history for the currently opened directory
@@ -5978,6 +6009,15 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   // If this on-disk session is already open as a live PTY, just focus it — never spawn a duplicate.
   const existing = findLivePtyForUuid(s.id);
   if (existing) { switchSession(existing); return; }
+  // A prior click on this same history row is still restoring (createPty hasn't resolved,
+  // so sessionResumeId isn't set yet). Await it instead of spawning a second agent process —
+  // same race as restoreClosedSession; Devin/`devin -r` rejects duplicate session_locks.
+  const inflight = restoreInFlight.get(s.id);
+  if (inflight) {
+    const liveId = await inflight;
+    if (liveId) switchSession(liveId);
+    return;
+  }
 
   // Validate the on-disk session exists in this cwd before resuming, else warn
   // instead of silently launching a fresh empty session.
@@ -6006,6 +6046,8 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
   }
 
   const themeId = resolveThemeId(currentThemeId, s.cwd);
+  const resumeKey = s.id;
+  const done = (async (): Promise<string | null> => {
   const result = await window.posse.createPty(s.cwd, s.resumeCommand, themeId, undefined, useSubscriptionFlag());
   ptyPresetCommands.set(result.id, presetFromResume || s.resumeCommand);
   const now = Date.now();
@@ -6032,6 +6074,14 @@ async function resumeAgentSession(s: ClaudeHistorySession): Promise<void> {
     const dims = termManager.getActiveDimensions();
     if (dims) window.posse.resizePty(result.id, dims.cols, dims.rows);
   }, 100);
+  return result.id;
+  })();
+  restoreInFlight.set(resumeKey, done);
+  try {
+    await done;
+  } finally {
+    if (restoreInFlight.get(resumeKey) === done) restoreInFlight.delete(resumeKey);
+  }
 }
 
 // Resume a closed chat session
