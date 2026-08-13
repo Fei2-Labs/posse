@@ -149,6 +149,18 @@ test('does not choose context window larger than 1M when no lower option exists'
   assert.equal(preferredContextWindowConfig(options), null);
 });
 
+test('Claude model variants carry context window preference when no context selector exists', () => {
+  const options = [{
+    id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'claude-sonnet-4-6',
+    options: [
+      { value: 'claude-sonnet-4-6', name: 'Sonnet' },
+      { value: 'claude-opus-4-6-1m', name: 'Opus (1M context)' },
+      { value: 'claude-sonnet-4-6-200k', name: 'Sonnet (200k)' },
+    ],
+  }];
+  assert.deepEqual(preferredContextWindowConfig(options), { configId: 'model', value: 'claude-opus-4-6-1m', size: 1_000_000 });
+});
+
 test('defaults permission fallbacks to always allow, then allow once', () => {
   assert.equal(preferredAllowPermission([
     { optionId: 'deny', name: 'Deny', kind: 'reject_once' },

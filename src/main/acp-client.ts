@@ -441,9 +441,15 @@ export function preferredContextWindowConfig(
   configOptions: SessionConfigOption[],
   target = DEFAULT_CONTEXT_WINDOW,
 ): { configId: string; value: string; size: number } | null {
+  // Claude Code exposes 1M as model variant (for example `opus[1m]` or
+  // `claude-opus-4-6-1m`), not as a separate context selector. Prefer an explicit
+  // context option when an adapter provides one; otherwise inspect model/model_config.
   const contextOption = configOptions.find(option => {
     const haystack = `${option.id} ${option.name} ${option.category || ''} ${option.description || ''}`.toLowerCase();
     return option.type === 'select' && /context|window|token.?limit/.test(haystack);
+  }) || configOptions.find(option => {
+    const haystack = `${option.id} ${option.name} ${option.category || ''}`.toLowerCase();
+    return option.type === 'select' && /^(model|model_config)$/.test(option.id) && /model/.test(haystack);
   });
   if (!contextOption || contextOption.type !== 'select') return null;
   const candidates = flattenConfigOptions(contextOption).flatMap(option => {
@@ -451,6 +457,10 @@ export function preferredContextWindowConfig(
     return size ? [{ option, size }] : [];
   });
   if (!candidates.length) return null;
+  // Claude Code exposes context capacity through model variants. The explicit product
+  // preference is 1M, so choose the largest eligible variant globally—even when that
+  // means switching from a 200k model to its available 1M sibling. The synthetic toolbar
+  // selector makes that model-backed choice visible and reversible.
   // Never silently select a larger window than requested. If 1M is unavailable,
   // choose next lower available size; if no lower size exists, leave adapter default.
   const eligible = candidates.filter(candidate => candidate.size <= target);

@@ -1,4 +1,4 @@
-import type { AvailableCommand, ContentBlock, SessionConfigOption } from '@agentclientprotocol/sdk';
+import type { AvailableCommand, ContentBlock, SessionConfigOption, SessionConfigSelectOption } from '@agentclientprotocol/sdk';
 
 export type ContextUsageState =
   | {
@@ -109,17 +109,44 @@ export class AcpPromptQueue<T> {
 
 const STATUS_CONFIG_IDS = ['model', 'model_config', 'context_window', 'context-window', 'context', 'context-window-size', 'context_window_size', 'context_length', 'max_context_tokens', 'reasoning_effort', 'effort', 'fast-mode', 'mode'];
 
-function flattenedConfigValues(option: Extract<SessionConfigOption, { type: 'select' }>): string {
-  return option.options.flatMap(item => 'group' in item ? item.options : [item])
-    .map(value => `${value.value} ${value.name} ${value.description || ''}`)
-    .join(' ');
+function flattenedConfigValues(option: Extract<SessionConfigOption, { type: 'select' }>): SessionConfigSelectOption[] {
+  return option.options.flatMap(item => 'group' in item ? item.options : [item]);
+}
+
+function contextSize(value: string): number | null {
+  const text = value.replace(/,/g, '').toLowerCase();
+  const matches = [...text.matchAll(/(\d+(?:\.\d+)?)\s*(m|k)\b/g)];
+  if (matches.length) return Math.max(...matches.map(match => Number(match[1]) * (match[2] === 'm' ? 1_000_000 : 1_000)));
+  const tokenCount = text.match(/(\d{4,})\s*(?:tokens?|token|context|window)/);
+  if (tokenCount) return Number(tokenCount[1]);
+  return /^\d{4,}$/.test(text) ? Number(text) : null;
+}
+
+function isModelConfigOption(option: SessionConfigOption): boolean {
+  return option.type === 'select' && (/^(model|model_config)$/.test(option.id) || option.category === 'model');
 }
 
 function isContextConfigOption(option: SessionConfigOption): boolean {
   if (option.type !== 'select') return false;
   const metadata = `${option.id} ${option.name} ${option.category || ''} ${option.description || ''}`.toLowerCase();
   if (/context|window|token.?limit|context.?length/.test(metadata)) return true;
-  return /(?:context|window)\s*(?:window|size|limit)?|\b\d+(?:\.\d+)?\s*[mk]\b/.test(flattenedConfigValues(option).toLowerCase());
+  return flattenedConfigValues(option).some(value => contextSize(`${value.value} ${value.name} ${value.description || ''}`) !== null);
+}
+
+export function contextWindowConfigOption(configOptions: SessionConfigOption[]): SessionConfigOption | null {
+  const model = configOptions.find(isModelConfigOption);
+  if (!model || model.type !== 'select') return null;
+  const options = flattenedConfigValues(model).filter(option => contextSize(`${option.value} ${option.name} ${option.description || ''}`) !== null);
+  if (options.length < 2) return null;
+  return {
+    id: 'context_window',
+    name: 'Context window',
+    description: 'Select model variant by context window size',
+    type: 'select',
+    currentValue: model.currentValue,
+    options,
+    _meta: { sourceConfigId: model.id },
+  } as SessionConfigOption;
 }
 
 export function statusConfigOptions(configOptions: SessionConfigOption[]): SessionConfigOption[] {
@@ -129,6 +156,10 @@ export function statusConfigOptions(configOptions: SessionConfigOption[]): Sessi
     .filter((option): option is SessionConfigOption => option?.type === 'select');
   for (const option of configOptions) {
     if (option.type === 'select' && isContextConfigOption(option) && !ordered.includes(option)) ordered.splice(1, 0, option);
+  }
+  if (!ordered.some(option => option.id === 'context_window')) {
+    const synthetic = contextWindowConfigOption(configOptions);
+    if (synthetic) ordered.splice(1, 0, synthetic);
   }
   return ordered;
 }

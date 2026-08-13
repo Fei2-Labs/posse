@@ -1599,7 +1599,8 @@ export class AcpSessionView {
             this.renderStatusbar();
           }
           try {
-            const updated = await window.posse.acpSetConfigOption(this.sessionId, opt.id, option.value);
+            const sourceConfigId = (opt._meta as { sourceConfigId?: string } | null | undefined)?.sourceConfigId || opt.id;
+            const updated = await window.posse.acpSetConfigOption(this.sessionId, sourceConfigId, option.value);
             this.configOptions = updated || [];
             this.renderStatusbar();
           } catch (err) {
