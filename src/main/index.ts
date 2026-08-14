@@ -2870,7 +2870,7 @@ function registerIPC(): void {
         });
       }
     }
-    acpManager.destroy(id);
+    await acpManager.destroyAndWait(id);
     acpOwners.delete(id);
     return true;
   });

@@ -201,6 +201,7 @@ let acpSdkPromise: Promise<AcpSdk> | null = null;
 
 const ACP_CREATE_TIMEOUT_MS = 30_000;
 const ACP_LOAD_TIMEOUT_MS = 90_000;
+const ACP_DESTROY_TIMEOUT_MS = 5_000;
 
 // ===================== Agent browser bridge (MCP) =====================
 // ACP has no in-process transport; the only universally-required transport is stdio.
@@ -1147,9 +1148,10 @@ export class AcpManager {
   }
 
   private async loadInternal(id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>): Promise<AcpSessionInfo> {
-    // A retry reuses the renderer session id. Silently retire any previous adapter attempt so
-    // its exit/status callbacks cannot replace the retry's state.
-    this.destroy(id, false);
+    // A retry reuses the renderer session id. Wait for the old adapter process to exit before
+    // respawning: Claude's adapter holds its native session lock until exit, so a synchronous
+    // kill followed by session/load races and makes restart close the session without reopening.
+    await this.destroyAndWait(id, false);
     const startup = this.startStartup(id);
     const acp = await loadAcpSdk();
     this.advanceStartup(id, startup, 'spawning-adapter');
@@ -1315,21 +1317,39 @@ export class AcpManager {
   }
 
   destroy(id: string, notify = true): void {
+    void this.destroyAndWait(id, notify);
+  }
+
+  // Stop an adapter and wait for its OS process to exit. Needed before restart/load: an
+  // adapter may still own the native agent session lock immediately after kill() returns.
+  async destroyAndWait(id: string, notify = true): Promise<void> {
     const session = this.sessions.get(id);
     if (!session) return;
 
     this.cancelPendingPermissions(id);
     this.sessions.delete(id);
+    const waitForExit = (): Promise<void> => new Promise((resolve) => {
+      if (session.process.exitCode !== null || session.process.signalCode !== null) { resolve(); return; }
+      session.process.once('exit', () => resolve());
+    });
     try { session.process.kill(); } catch { /* already exited */ }
+    await Promise.race([
+      waitForExit(),
+      new Promise<void>((resolve) => setTimeout(resolve, ACP_DESTROY_TIMEOUT_MS)),
+    ]);
+    // A stubborn adapter must not retain a Claude session lock forever. SIGKILL is only
+    // escalation after the graceful wait; normal restart paths do not reach it.
+    if (session.process.exitCode === null && session.process.signalCode === null) {
+      try { session.process.kill('SIGKILL'); } catch { /* already exited */ }
+      await Promise.race([
+        waitForExit(),
+        new Promise<void>((resolve) => setTimeout(resolve, ACP_DESTROY_TIMEOUT_MS)),
+      ]);
+    }
     session.info.status = 'closed';
     closeAcpSession(id);
     this.releaseSessionResources(id);
-    if (notify) {
-      this.onStatus(id, { status: 'closed' });
-      for (const listener of this.remoteListeners) {
-        try { listener.onStatus(id, { status: 'closed' }); } catch { /* listener must not throw */ }
-      }
-    }
+    if (notify) this.fanoutStatus(id, { status: 'closed' });
   }
 
   // Central hook for resources bound to a session by id — currently the browser

@@ -298,7 +298,7 @@ test('ACP startup reports measured phases and does not advertise fake rollback',
   assert.match(client, /'loading-session'/);
   assert.match(client, /supportsPromptRollback: false/);
   assert.match(client, /const ACP_LOAD_TIMEOUT_MS = 90_000/);
-  assert.match(client, /this\.destroy\(id, false\)/);
+  assert.match(client, /this\.destroyAndWait\(id, false\)/);
   assert.match(client, /this\.sessions\.get\(id\)\?\.process === childProcess/);
   assert.match(view, /'loading-session': 'Loading history'/);
   assert.match(view, /className = 'acp-session-retry'/);
