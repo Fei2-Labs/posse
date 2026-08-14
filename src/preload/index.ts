@@ -283,6 +283,12 @@ contextBridge.exposeInMainWorld('posse', {
   syncSessionStatus: (statuses: Record<string, string>) =>
     ipcRenderer.send('session:sync-status', statuses),
 
+  // #124: report the live session this window is currently displaying, so main can
+  // suppress local desktop alerts when a focused Posse window shows the affected
+  // session. Pass null when no live session is selected (Chat/empty/another host).
+  notifySelectedSession: (identity: string | null) =>
+    ipcRenderer.send('notify:selected-session', identity),
+
   // ========== Closed sessions ==========
   closedSessionsList: () => ipcRenderer.invoke('closed-sessions:list'),
   closedSessionsRemove: (id: string) => ipcRenderer.invoke('closed-sessions:remove', id),

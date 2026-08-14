@@ -579,6 +579,12 @@ type AcpPermissionRequestHandler = (
 // release the browser ownership lock so another session can take over (#109).
 type AcpSessionClosedHandler = (id: string) => void;
 
+// #124: structured attention edges for desktop completion alerts. Main maps these to the
+// common user-notification delivery path. Only requestPermission and end_turn produce
+// attention — never assistant prose, tool-call completion, or generic idle status.
+export type AcpAttentionKind = 'decision-needed' | 'task-completed';
+export type AcpAttentionHandler = (id: string, kind: AcpAttentionKind) => void;
+
 type PendingPermission = {
   resolve: (outcome: RequestPermissionOutcome) => void;
   timeout: NodeJS.Timeout;
@@ -621,6 +627,9 @@ export class AcpManager {
   private onStatus: AcpStatusHandler;
   private onPermissionRequest: AcpPermissionRequestHandler;
   private readonly onSessionClosed: AcpSessionClosedHandler | undefined;
+  // #124: optional structured attention sink. Desktop wires it to native desktop alerts;
+  // headless/remote leave it undefined (mobile push keeps its own path).
+  private readonly onAttention: AcpAttentionHandler | undefined;
   private pendingPermissions = new Map<string, PendingPermission>();
   // Remote (mobile/headless) listeners. Each receives the same update/status
   // events as the desktop owner, so a mobile client can render structured
@@ -653,6 +662,13 @@ export class AcpManager {
     }
   }
 
+  // #124: emit a structured attention edge. Best-effort — a throwing sink must never
+  // break the agent loop or pending permission/prompt resolution.
+  private emitAttention(id: string, kind: AcpAttentionKind): void {
+    if (!this.onAttention) return;
+    try { this.onAttention(id, kind); } catch { /* attention sink must not break the agent loop */ }
+  }
+
   /** Register a remote listener that receives every ACP update/status event. */
   addRemoteListener(listener: AcpRemoteListener): AcpRemoteListener {
     this.remoteListeners.add(listener);
@@ -670,12 +686,14 @@ export class AcpManager {
     onPermissionRequest: AcpPermissionRequestHandler,
     autoAllowPermissions = true,
     onSessionClosed?: (id: string) => void,
+    onAttention?: AcpAttentionHandler,
   ) {
     this.onUpdate = onUpdate;
     this.onStatus = onStatus;
     this.onPermissionRequest = onPermissionRequest;
     this.autoAllowPermissions = autoAllowPermissions;
     this.onSessionClosed = onSessionClosed;
+    this.onAttention = onAttention;
   }
 
   private startStartup(id: string): StartupTracker {
@@ -739,6 +757,11 @@ export class AcpManager {
       // Fan out to the desktop renderer (no-op in headless) AND to remote/mobile
       // listeners so a mobile client can render a permission prompt.
       this.onPermissionRequest(id, toolCallId, toolName, options);
+      // #124: surface a structured attention edge ONLY for permission requests that
+      // actually reach the user. Auto-allowed requests (the bypass-mode default) never
+      // get here because preferredAllowPermission short-circuits above — so this fires
+      // exactly when the renderer/mobile is prompted to decide.
+      this.emitAttention(id, 'decision-needed');
       for (const listener of this.remoteListeners) {
         try { listener.onPermissionRequest?.(id, toolCallId, toolName, options); }
         catch { /* listener must not throw the agent loop */ }
@@ -1056,12 +1079,19 @@ export class AcpManager {
       const promptBlocks = session.browserInstructionsSent ? blocks
         : [...buildBrowserInstructionBlocks(), ...blocks];
       session.browserInstructionsSent = true;
-      await session.context.request(acp.methods.agent.session.prompt, {
+      const response = await session.context.request(acp.methods.agent.session.prompt, {
         sessionId: session.info.sessionId,
         prompt: promptBlocks,
       });
       session.info.status = 'idle';
       this.fanoutStatus(id, { status: 'idle' });
+      // #124: only `end_turn` means the agent completed and returned control to the
+      // user. Other stop reasons (max_tokens, refusal, cancelled, max_turn_requests)
+      // are NOT completion — never notify for them, and never infer completion from
+      // assistant prose, tool-call completion, or internal task-notification envelopes.
+      if (response && (response as { stopReason?: string }).stopReason === 'end_turn') {
+        this.emitAttention(id, 'task-completed');
+      }
     } catch (err) {
       session.info.status = 'error';
       session.info.errorMessage = err instanceof Error ? err.message : String(err);

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, globalShortcut, Tray, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, globalShortcut, Tray, Menu, Notification } from 'electron';
 import type { WebContents } from 'electron';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { spawn } from 'child_process';
@@ -141,6 +141,69 @@ const IMESSAGE_SERVICE = ((process.env.POSSE_IMESSAGE_SERVICE || 'iMessage').tri
   : 'iMessage';
 
 const sessionOutputTail: Map<string, string> = new Map();
+
+// ========== #124: Desktop agent completion alerts ==========
+// Per-window selected live session identity, reported by the renderer via
+// `notify:selected-session`. Keyed by webContents.id. Null/undefined means the
+// window has no live session selected (Chat/empty/another host's session).
+//
+// PTY session identity is `<connectionId>\0<sessionId>` (same connection-scoped key
+// used by maybeNotifyAttention's deletion map) so two remote hosts with a `term-1`
+// each can never collide. ACP session identity is just the renderer session id —
+// ACP ids are globally unique (acp:<agent>:<uuid>) and the owner WebContents is
+// tracked separately via acpOwners.
+const windowSelectedSessions = new Map<number, string | null>();
+
+function setSelectedSessionForWindow(webContentsId: number, identity: string | null): void {
+  if (identity) windowSelectedSessions.set(webContentsId, identity);
+  else windowSelectedSessions.delete(webContentsId);
+}
+
+function clearSelectedSessionForWindow(webContentsId: number): void {
+  windowSelectedSessions.delete(webContentsId);
+}
+
+// Returns true when a focused, non-destroyed Posse window is currently displaying
+// the affected session — the case where a local desktop alert would be noise.
+function focusedWindowShowsSession(identity: string): boolean {
+  if (!identity) return false;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || !win.isFocused()) continue;
+    const selected = windowSelectedSessions.get(win.webContents.id);
+    if (selected === identity) return true;
+  }
+  return false;
+}
+
+// Best-effort native desktop notification. OS notification policy (Do Not Disturb,
+// per-app sound settings) governs delivery and audible cue — Posse does not play an
+// independent audio asset. Unsupported Notification capability or show failure is
+// swallowed so it never blocks existing remote channels or alters session lifecycle.
+function sendDesktopNotification(title: string, body: string): void {
+  try {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({
+      title,
+      body,
+      // Request OS-controlled audible delivery. Relying on OS policy (including Do Not
+      // Disturb and per-app settings) rather than an independent audio player.
+      silent: false,
+    });
+    notification.on('click', () => {
+      // Focus the primary window so the user lands on Posse. Best-effort.
+      const target = mainWindow ?? BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ?? null;
+      if (target) {
+        if (target.isMinimized()) target.restore();
+        target.show();
+        target.focus();
+      }
+    });
+    notification.show();
+  } catch {
+    // Unsupported notification APIs or creation/show failure must not break
+    // agent sessions or existing remote push/iMessage delivery.
+  }
+}
 
 // ========== Closed session persistence ==========
 interface ClosedSession {
@@ -947,6 +1010,15 @@ const acpManager = new AcpManager(
     browserOpsServer?.releaseOwner(id);
     sendToAcpOwner('acp:browser-ownership', id, null);
   },
+  // #124: structured ACP attention → common delivery path. Main derives the session
+  // title from safe known metadata (never from agent text) and routes through
+  // sendUserNotification with the ACP renderer session id as identity.
+  (id: string, kind) => {
+    const info = acpManager.getSession(id);
+    const title = info?.agentLabel || info?.presetCommand || 'Agent';
+    const label = kind === 'task-completed' ? 'Task completed' : 'Your decision needed';
+    sendUserNotification(id, label, title, id);
+  },
 );
 
 // Connection registry — the seam for multi-host. Holds connections keyed by id
@@ -1210,6 +1282,9 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
     // the binding so its frames stop routing here.
     revokeProjectPreviewRoots(windowWebContentsId);
     embeddedBrowserManager?.destroyFor(win);
+    // #124: drop this window's selected-session tracking so it can't suppress alerts
+    // for a session the user is no longer viewing.
+    clearSelectedSessionForWindow(windowWebContentsId);
     unbindWindow(win);
     if (win === mainWindow) {
       mainWindow = null;
@@ -1294,9 +1369,17 @@ function sendIMessageNotification(message: string): void {
   p.unref();
 }
 
-function sendUserNotification(id: string, title: string, body: string): void {
+// #124: single delivery path. Push + iMessage ALWAYS run (foreground suppression
+// never blocks remote delivery). The native desktop notification + its OS-controlled
+// sound are suppressed ONLY when a focused Posse window is currently displaying the
+// affected live session. `sessionIdentity` is the connection-scoped PTY key or the
+// ACP renderer session id; when omitted, native delivery always fires (no way to
+// suppress for an unknown session).
+function sendUserNotification(id: string, title: string, body: string, sessionIdentity?: string): void {
   sendRemotePush(title, body, id);
   sendIMessageNotification(`[Posse] ${title}：${body}`);
+  if (sessionIdentity && focusedWindowShowsSession(sessionIdentity)) return;
+  sendDesktopNotification(title, body);
 }
 
 function maybeNotifyAttention(id: string, data: string, connectionId: string = activeConnectionId): void {
@@ -1320,9 +1403,11 @@ function maybeNotifyAttention(id: string, data: string, connectionId: string = a
 
   const session = backendFor(connectionId).getSession(id);
   const title = session?.title || session?.presetCommand || 'Terminal';
+  // #124: PTY identity is connection-scoped so two remote hosts' `term-1` never collide.
+  const ptyIdentity = connectionSessionKey(connectionId, id);
 
   if (hasPrompt && needDecision) {
-    sendUserNotification(id, 'Your decision needed', title);
+    sendUserNotification(id, 'Your decision needed', title, ptyIdentity);
     sessionLastNotifyAt.set(id, now);
     sessionArmedForNotify.delete(id);
     return;
@@ -1331,9 +1416,9 @@ function maybeNotifyAttention(id: string, data: string, connectionId: string = a
   if (!sessionArmedForNotify.has(id) || !hasPrompt || !waitedLongEnough) return;
 
   if (taskDone) {
-    sendUserNotification(id, 'Task completed', title);
+    sendUserNotification(id, 'Task completed', title, ptyIdentity);
   } else {
-    sendUserNotification(id, 'Session waiting for input', title);
+    sendUserNotification(id, 'Session waiting for input', title, ptyIdentity);
   }
   sessionLastNotifyAt.set(id, now);
   sessionArmedForNotify.delete(id);
@@ -1381,7 +1466,7 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
       // Do not notify for sessions the user closed deliberately
       if (!sessionUserClosed.has(id)) {
         const title = session?.title || 'Terminal';
-        sendUserNotification(id, 'Session ended', title);
+        sendUserNotification(id, 'Session ended', title, deletionKey);
       }
       sessionUserClosed.delete(id);
       sessionUserDeleted.delete(deletionKey);
@@ -4219,6 +4304,16 @@ function registerIPC(): void {
     (global as any).__sessionStatuses = statuses;
   });
 
+  // #124: renderer reports the live session it is currently displaying, so main can
+  // suppress local desktop alerts when a focused Posse window shows the affected
+  // session. Null/clear means no live session is selected (Chat/empty/another host).
+  // The signal is one-way (no reply) — it only updates per-window selection state.
+  ipcMain.on('notify:selected-session', (event, identity: string | null) => {
+    const sender = BrowserWindow.fromWebContents(event.sender);
+    if (!sender || sender.isDestroyed()) return;
+    setSelectedSessionForWindow(sender.webContents.id, typeof identity === 'string' && identity ? identity : null);
+  });
+
 }
 
 // Auto-update via electron-updater. Reads the GitHub Releases channel files
@@ -4402,6 +4497,7 @@ app.on('before-quit', async () => {
   // App shutdown is not a user close: renderer restores these resumable ACP sessions next launch.
   acpManager.destroyAll(false);
   acpOwners.clear();
+  windowSelectedSessions.clear();
   browserOpsServer?.close();
   browserOpsServer = null;
   chatgptBridge?.close();

@@ -203,6 +203,9 @@ declare global {
       readDirectory: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean; isFile: boolean }>>;
       // Session status sync
       syncSessionStatus: (statuses: Record<string, string>) => void;
+      // #124: report the live session this window is currently displaying, so main
+      // can suppress local desktop alerts when a focused Posse window shows it.
+      notifySelectedSession: (identity: string | null) => void;
       // Closed sessions
       closedSessionsList: () => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
       closedSessionsRemove: (id: string) => Promise<Array<{ id: string; title: string; cwd: string; presetCommand: string; resumeId: string; resumeCommand: string; displayName: string; closedAt: number }>>;
@@ -3519,6 +3522,25 @@ function getActiveSessionId(): string | null {
   return resolveActiveLiveSessionId(activeChatId, activeAcpId, termManager.getActiveId());
 }
 
+// #124: build the session identity main uses for desktop-alert suppression. ACP ids
+// are globally unique → passed through. PTY ids are connection-scoped →
+// `<connectionId>\0<sessionId>` (matches main's connectionSessionKey). Chat / no
+// session → null (no suppression).
+function buildSelectedSessionIdentity(): string | null {
+  if (activeChatId) return null;
+  if (activeAcpId) return activeAcpId;
+  const ptyId = termManager.getActiveId();
+  if (!ptyId) return null;
+  if (!currentWindowConnectionId) return null;
+  return `${currentWindowConnectionId}\0${ptyId}`;
+}
+
+// #124: report the currently-displayed live session to main so a focused Posse
+// window showing the affected session suppresses its local desktop alert.
+function notifySelectedSessionToMain(): void {
+  window.posse.notifySelectedSession(buildSelectedSessionIdentity());
+}
+
 function getActiveSessionCwd(): string {
   // An explicitly selected project takes precedence so the RIGHT file panel follows the project
   // the user clicked, even when no terminal session is open in it yet.
@@ -6133,6 +6155,7 @@ function switchSession(id: string): void {
     updateSessionTitleBar();
     void renderFileTree();
     renderFileStatusbar();
+    notifySelectedSessionToMain();
     return;
   }
 
@@ -6169,6 +6192,7 @@ function switchSession(id: string): void {
   renderFileStatusbar();
   const dims = termManager.getActiveDimensions();
   if (dims) window.posse.resizePty(id, dims.cols, dims.rows);
+  notifySelectedSessionToMain();
 }
 
 // Show confirmation when clicking ×
@@ -6595,6 +6619,7 @@ function switchToChat(id: string): void {
     chatViews.set(id, view);
   }
   view.focus();
+  notifySelectedSessionToMain();
 }
 
 function switchToTerminal(preserveSavedAcp = false): void {
@@ -6605,6 +6630,7 @@ function switchToTerminal(preserveSavedAcp = false): void {
   activeAcpId = null;
   if (!preserveSavedAcp) clearSavedAcpForeground();
   updateEmptyState();
+  notifySelectedSessionToMain();
 }
 
 function switchToAcp(id: string): void {
@@ -6629,6 +6655,7 @@ function switchToAcp(id: string): void {
 
   updateEmptyState();
   renderFileStatusbar();
+  notifySelectedSessionToMain();
 }
 
 function destroyChatSession(id: string): void {
@@ -7858,6 +7885,12 @@ let useSubscriptionForNew = false;
 let activeConnectionIsRemote = false;
 let subscriptionTokenIsSet = false;
 
+// #124: this window's bound connection id. Used to build the connection-scoped PTY
+// session identity (`<connectionId>\0<sessionId>`) that main matches against the
+// focused window's selected session for desktop-alert suppression. ACP ids are
+// globally unique so they are passed through unmodified.
+let currentWindowConnectionId: string | null = null;
+
 // Whether the "Use my Claude subscription" toggle is applicable in the current state.
 function subscriptionToggleApplicable(): boolean {
   return activeConnectionIsRemote && subscriptionTokenIsSet;
@@ -7874,8 +7907,14 @@ async function refreshSubscriptionState(): Promise<void> {
     const list = await window.posse.connectionsList();
     const active = list.find((c) => c.active) || list[0];
     activeConnectionIsRemote = !!active && active.kind === 'remote';
+    // #124: track this window's bound connection id so PTY session identities can be
+    // built connection-scoped (`<connectionId>\0<sessionId>`), matching main's
+    // connectionSessionKey. Falls back to 'local' (the LOCAL_CONNECTION_ID constant)
+    // when no connection is active yet.
+    currentWindowConnectionId = active ? active.id : 'local';
   } catch {
     activeConnectionIsRemote = false;
+    currentWindowConnectionId = null;
   }
   try {
     const status = await window.posse.subscriptionTokenStatus();
@@ -8480,7 +8519,12 @@ toolbarSettingsBtn?.addEventListener('click', openSettingsDialog);
 
 // When the active connection changes (switch / add / remove), refetch the navigator + file
 // tree so the sidebar reflects the new host's sessions and the file panel reroots.
-window.posse.onConnectionChanged(() => {
+window.posse.onConnectionChanged((id) => {
+  currentWindowConnectionId = id || null;
+  // #124: connection changed — the previously-selected session belongs to the old
+  // connection, so clear suppression. The new selection will be reported on the
+  // next switchSession call.
+  window.posse.notifySelectedSession(null);
   // Clear the local project selection — the new connection's sessions/projects are
   // independent, so the old selectedProjectPath would be sent to the new backend
   // (e.g. remote fsList) where that path doesn't exist, yielding an empty file tree.
