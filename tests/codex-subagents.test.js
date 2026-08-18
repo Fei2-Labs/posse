@@ -51,6 +51,8 @@ test('detects terminal task_complete events without treating ordinary output as 
   assert.equal(codexSessionIsCompleted(filename), true);
   fs.writeFileSync(filename, '{"type":"event_msg","payload":{"type":"agent_message"}}\n');
   assert.equal(codexSessionIsCompleted(filename), false);
+  fs.writeFileSync(filename, '{"type":"response_item","payload":{"text":"the string task_complete is only mentioned here"}}\n');
+  assert.equal(codexSessionIsCompleted(filename), false);
   fs.unlinkSync(filename);
 });
 

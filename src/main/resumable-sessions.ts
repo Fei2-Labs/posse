@@ -63,7 +63,13 @@ export function codexSessionIsCompleted(filePath: string): boolean {
       const start = Math.max(0, stat.size - maxBytes);
       const buf = Buffer.alloc(stat.size - start);
       fs.readSync(fd, buf, 0, buf.length, start);
-      return /"type"\s*:\s*"task_complete"/.test(buf.toString('utf-8'));
+      for (const line of buf.toString('utf-8').split('\n').reverse()) {
+        try {
+          const event = JSON.parse(line) as { type?: string; payload?: { type?: string } };
+          if (event.type === 'event_msg' && event.payload?.type === 'task_complete') return true;
+        } catch { /* the first tail line may be a partial JSON record */ }
+      }
+      return false;
     } finally {
       fs.closeSync(fd);
     }
