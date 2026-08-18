@@ -393,7 +393,9 @@ type ClaudeHistorySession = { id: string; title: string; cwd: string; mtimeMs: n
   // Routing for sidebar archive/delete. `storeAgent` is the true backend agent (kiro/copilot too,
   // which `agent` above cannot represent); `sourcePath` locates the backing file; `archived` is
   // the Posse-internal soft-hide flag from the backend.
-  storeAgent?: ProjectsAgentId; sourcePath?: string; archived?: boolean };
+  storeAgent?: ProjectsAgentId; sourcePath?: string; archived?: boolean;
+  parentSessionId?: string; subagentRole?: string; subagentPath?: string;
+  children?: ClaudeHistorySession[] };
 let claudeHistorySessions: ClaudeHistorySession[] = [];
 let claudeHistoryCollapsed = false;
 let claudeHistoryCwd = '';
@@ -653,7 +655,12 @@ let selectedProjectPath: string | null = null;
 // Backend-discovered, multi-agent (Claude/Codex/Kiro/Copilot) session history keyed by normalized
 // project path. Loaded via window.posse.projectsList({ extraFolders }) — see refreshProjectsData().
 type ProjectsAgentId = 'claude' | 'codex' | 'kiro' | 'copilot' | 'devin';
-interface BackendProjectSession { id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId; sourcePath?: string; archived?: boolean; cwd?: string }
+interface BackendProjectSession {
+  id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId;
+  sourcePath?: string; archived?: boolean; cwd?: string;
+  parentSessionId?: string; subagentRole?: string; subagentPath?: string;
+  children?: BackendProjectSession[];
+}
 interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
 interface BackendProject { path: string; name: string; aliases: string[]; agents: BackendProjectAgent[]; lastActiveMs: number }
 
@@ -4415,6 +4422,14 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   timeSpan.className = 'nav-session-time';
   timeSpan.textContent = relativeTimeShort(s.mtimeMs);
 
+  let roleSpan: HTMLElement | null = null;
+  if (s.subagentRole) {
+    roleSpan = document.createElement('span');
+    roleSpan.className = 'nav-session-subagent-role';
+    roleSpan.textContent = s.subagentRole;
+    roleSpan.title = s.subagentPath || s.subagentRole;
+  }
+
   const resumeBtn = makeSessionActionButton(ICON.resume, 'Resume history session');
   resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); void resumeAgentSession(s); });
 
@@ -4449,6 +4464,7 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
 
   item.appendChild(dot);
   item.appendChild(titleSpan);
+  if (roleSpan) item.appendChild(roleSpan);
   item.appendChild(timeSpan);
   item.appendChild(makeSessionPinButton(pinKey));
   item.appendChild(editBtn);
@@ -4460,6 +4476,36 @@ function buildHistorySessionRow(s: ClaudeHistorySession): HTMLElement {
   return item;
 }
 
+// Codex ACP parents own a compact, collapsed child panel. Child rows reuse the
+// normal history actions, so each subagent remains independently resumable.
+function buildHistorySessionTree(s: ClaudeHistorySession): HTMLElement {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'nav-session-tree';
+  const parent = buildHistorySessionRow(s);
+  wrapper.appendChild(parent);
+  const children = (s.children || []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs);
+  if (children.length === 0) return wrapper;
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'nav-session-children-toggle';
+  toggle.innerHTML = `${ICON.chevron}<span>Subagents (${children.length})</span>`;
+  toggle.title = 'Show subagent sessions';
+  const panel = document.createElement('div');
+  panel.className = 'nav-session-children';
+  panel.hidden = true;
+  for (const child of children) panel.appendChild(buildHistorySessionRow(child));
+  toggle.addEventListener('click', (event) => {
+    event.stopPropagation();
+    panel.hidden = !panel.hidden;
+    toggle.classList.toggle('expanded', !panel.hidden);
+    toggle.title = panel.hidden ? 'Show subagent sessions' : 'Hide subagent sessions';
+  });
+  wrapper.appendChild(toggle);
+  wrapper.appendChild(panel);
+  return wrapper;
+}
+
 // Collect & group a project's sessions by agent family.
 // Returns Map<agentFamily, { lives, closed, history }> with time-desc ordering applied per group.
 interface ProjectAgentGroup {
@@ -4469,14 +4515,13 @@ interface ProjectAgentGroup {
   latest: number;
 }
 
-// Claude/Codex print a short 8-hex prefix in their resume hints, while the on-disk session file
-// uses the full uuid (8-4-4-4-12). Collapse both forms to the shared 8-hex prefix so the same
-// conversation dedups across the live / closed / history sources regardless of which form a
-// source captured. Non-hex ids (rare) fall back to the lowercased full string.
+// Keep full UUIDs distinct. Collapsing every UUID to its first eight characters
+// made unrelated Codex sessions disappear or appear as duplicate rows.
 function conversationKey(uuid: string): string {
-  const u = uuid.toLowerCase();
-  const m = u.match(/^[0-9a-f]{8}/);
-  return m ? m[0] : u;
+  const u = uuid.trim().toLowerCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(u)) return `uuid:${u}`;
+  if (/^[0-9a-f]{8}$/.test(u)) return `short:${u}`;
+  return u;
 }
 
 // Recent-list dedup key for closed sessions.
@@ -4502,8 +4547,8 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
 
   // Canonical dedup: each conversation is identified by its agent session uuid. The same uuid can
   // appear as a LIVE PTY (resumeId), a CLOSED DuoCLI record (cs.resumeId), and an on-disk HISTORY
-  // row (s.id). Sources capture the uuid in different forms (short 8-hex prefix vs full uuid), so
-  // every uuid is routed through conversationKey() to a canonical key before matching. Preference
+  // row (s.id), so every uuid is routed through conversationKey() before matching. Full UUIDs are
+  // intentionally kept intact: an eight-character prefix is not a unique session identity. Preference
   // order is live > closed > history: once a key is shown by a higher-priority source,
   // lower-priority duplicates are skipped.
   const shownUuids = new Set<string>();
@@ -4556,17 +4601,23 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
         // Archived soft-hide: unless Show Archived is on for this project, drop archived rows.
         if (s.archived && !isShowArchived(key)) continue;
         shownUuids.add(conversationKey(s.id));
-        g.history.push({
-          id: s.id,
-          title: s.title,
-          cwd: s.cwd || backend.path,
-          mtimeMs: s.mtimeMs,
-          // ClaudeHistorySession.agent is a narrow union; only claude/codex are typed there.
+        const toHistorySession = (session: BackendProjectSession): ClaudeHistorySession => ({
+          id: session.id,
+          title: session.title,
+          cwd: session.cwd || backend.path,
+          mtimeMs: session.mtimeMs,
           agent: agentGroup.agent === 'codex' ? 'codex' : 'claude',
-          resumeCommand: s.resumeCommand,
+          resumeCommand: session.resumeCommand,
           storeAgent: agentGroup.agent,
-          sourcePath: s.sourcePath,
-          archived: s.archived,
+          sourcePath: session.sourcePath,
+          archived: session.archived,
+          parentSessionId: session.parentSessionId,
+          subagentRole: session.subagentRole,
+          subagentPath: session.subagentPath,
+          children: session.children?.map(toHistorySession),
+        });
+        g.history.push({
+          ...toHistorySession(s),
         });
         g.latest = Math.max(g.latest, s.mtimeMs || 0);
       }
@@ -4719,8 +4770,11 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
     }
     for (const s of g.history) {
       if (isSessionPinned(historySessionPinKey(s))) continue;
-      const el = buildHistorySessionRow(s);
-      if (tagged) appendAgentTag(el, family);
+      const el = buildHistorySessionTree(s);
+      if (tagged) {
+        const parentRow = el.querySelector<HTMLElement>('.nav-session');
+        if (parentRow) appendAgentTag(parentRow, family);
+      }
       rows.push({ time: s.mtimeMs || 0, active: false, el });
     }
   }
@@ -4738,7 +4792,10 @@ function renderProjectEntry(p: ProjectEntry, activeId: string | null): void {
   for (const r of rows) sessionList.appendChild(r.el);
 
   if (projectBox) {
-    const keys = rows.map(r => r.el.dataset.selectKey).filter((k): k is string => !!k);
+    const keys = rows.flatMap((r) => {
+      const own = r.el.dataset.selectKey ? [r.el.dataset.selectKey] : [];
+      return own.concat(Array.from(r.el.querySelectorAll<HTMLElement>('[data-select-key]')).map((node) => node.dataset.selectKey || '').filter(Boolean));
+    });
     if (keys.length === 0) projectBox.remove();
     else decorateProjectSelectAll(projectBox, Array.from(new Set(keys)));
   }

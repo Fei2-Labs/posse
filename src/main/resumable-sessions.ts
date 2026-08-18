@@ -26,7 +26,29 @@ export type AgentHistorySession = {
   // need to delete/archive the session route by this; absent for callers that
   // don't populate it.
   sourcePath?: string;
+  /** Codex ACP subagent metadata. Children are rendered under this parent session. */
+  parentSessionId?: string;
+  subagentRole?: string;
+  subagentPath?: string;
 };
+
+const CODEX_UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+
+/**
+ * Extract the small, stable part of Codex's ACP thread_spawn metadata without
+ * parsing the complete session_meta line (which can contain a very large prompt).
+ */
+export function extractCodexSubagentMetadata(head: string): Pick<AgentHistorySession, 'parentSessionId' | 'subagentRole' | 'subagentPath'> {
+  const parent = head.match(new RegExp('"parent_thread_id"\\s*:\\s*"(' + CODEX_UUID_RE + ')"', 'i'))?.[1];
+  const role = head.match(/"agent_role"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+  const agentPath = head.match(/"agent_path"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+  const unescape = (value?: string): string | undefined => value ? value.replace(/\\(.)/g, '$1') : undefined;
+  return {
+    ...(parent ? { parentSessionId: parent } : {}),
+    ...(role ? { subagentRole: unescape(role) } : {}),
+    ...(agentPath ? { subagentPath: unescape(agentPath) } : {}),
+  };
+}
 
 // Read the first line of a file (up to ~16KB) for cheap parsing of the Codex session_meta
 export function readFirstLine(filePath: string, maxBytes = 16 * 1024): string {
@@ -132,16 +154,19 @@ export function listCodexSessions(targetCwd: string): AgentHistorySession[] {
             try {
               const st = fs.statSync(full);
               if (!st.isFile()) continue;
-              const firstLine = readFirstLine(full).trim();
+              // ACP session_meta records often exceed 16KB because they embed
+              // the system prompt. Read a larger bounded line and fall back to
+              // regex extraction when the JSON object is truncated.
+              const firstLine = readFirstLine(full, 64 * 1024).trim();
               if (!firstLine) continue;
-              const obj = JSON.parse(firstLine) as {
-                type?: string;
-                payload?: { id?: string; cwd?: string };
-              };
-              if (obj.type !== 'session_meta' || !obj.payload) continue;
-              const fileCwd = path.resolve(String(obj.payload.cwd || ''));
+              let obj: { type?: string; payload?: { id?: string; cwd?: string } } = {};
+              try { obj = JSON.parse(firstLine); } catch { /* use bounded regex fallback */ }
+              if (obj.type && obj.type !== 'session_meta') continue;
+              const cwdRaw = obj.payload?.cwd || firstLine.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/)?.[1]?.replace(/\\(.)/g, '$1');
+              if (!cwdRaw) continue;
+              const fileCwd = path.resolve(String(cwdRaw));
               if (fileCwd !== normTarget) continue;
-              const id = String(obj.payload.id || '');
+              const id = String(obj.payload?.id || path.basename(file).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1] || '');
               if (!id) continue;
               const rawTn = titleMap.get(id);
               let codexTitle: string;
@@ -159,6 +184,7 @@ export function listCodexSessions(targetCwd: string): AgentHistorySession[] {
                 agent: 'codex',
                 resumeCommand: `codex resume ${id}`,
                 sourcePath: full,
+                ...extractCodexSubagentMetadata(firstLine),
               });
             } catch { /* skip unreadable / unparseable file */ }
           }

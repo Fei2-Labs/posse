@@ -2296,6 +2296,66 @@ html, body {
   color: var(--text-secondary, #888);
 }
 
+/* Codex ACP subagents stay nested under their parent instead of becoming a
+   second top-level conversation. The panel starts collapsed to keep the
+   project list scannable, with a compact role label on expanded child rows. */
+.nav-session-tree {
+  min-width: 0;
+}
+
+.nav-session-subagent-role {
+  flex-shrink: 1;
+  max-width: 116px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text-secondary, #9aa0a6);
+  background: color-mix(in srgb, var(--bg-secondary, #2a2a2a) 72%, transparent);
+  font-size: 9px;
+}
+
+.nav-session-children-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  margin: 0 6px 1px 27px;
+  padding: 0 6px;
+  border: 0;
+  border-left: 1px solid color-mix(in srgb, var(--accent-green, #73c991) 35%, transparent);
+  background: transparent;
+  color: var(--text-secondary, #9aa0a6);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.nav-session-children-toggle svg {
+  width: 11px;
+  height: 11px;
+  transition: transform 120ms ease;
+}
+
+.nav-session-children-toggle.expanded svg {
+  transform: rotate(90deg);
+}
+
+.nav-session-children-toggle:hover {
+  color: var(--text-primary);
+}
+
+.nav-session-children {
+  margin-left: 20px;
+  padding-left: 7px;
+  border-left: 1px solid color-mix(in srgb, var(--accent-green, #73c991) 25%, transparent);
+}
+
+.nav-session-children .nav-session {
+  margin-left: 0;
+  padding-left: 7px;
+}
+
 /* Context-usage chip: shown only when the agent emits a parseable context line (Claude, Devin).
    Color tiers: green < 60%, amber 60–85%, red > 85%. */
 .nav-session-context-chip {

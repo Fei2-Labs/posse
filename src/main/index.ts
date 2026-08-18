@@ -50,6 +50,7 @@ import {
   readFirstLine,
   codexTitleIsDefault,
   codexFirstUserPrompt,
+  extractCodexSubagentMetadata,
   listCodexSessions,
   cleanSessionTitle,
   extractRenameTitle,
@@ -1600,6 +1601,10 @@ type ProjectSession = {
   archived?: boolean;
   // Actual checkout cwd used for resume/file/Git operations. ProjectEntry.path is grouping-only.
   cwd?: string;
+  parentSessionId?: string;
+  subagentRole?: string;
+  subagentPath?: string;
+  children?: ProjectSession[];
 };
 
 // Internal flat record before bucketing
@@ -1861,6 +1866,7 @@ function discoverCodexSessions(): DiscoveredSession[] {
           mtimeMs: f.mtimeMs,
           resumeCommand: `codex resume ${id}`,
           sourcePath: f.full,
+          ...extractCodexSubagentMetadata(head),
         });
       } catch { /* skip */ }
     }
@@ -2424,6 +2430,9 @@ async function buildProjectsList(
       sourcePath: s.sourcePath,
       archived: archivedIds.has(s.id),
       cwd: s.cwd ? (effectiveSessionCwds.get(s) || s.cwd) : undefined,
+      parentSessionId: s.parentSessionId,
+      subagentRole: s.subagentRole,
+      subagentPath: s.subagentPath,
     });
   }
 
@@ -2463,6 +2472,9 @@ async function buildProjectsList(
             sourcePath: s.sourcePath,
             archived: archivedIds.has(s.id),
             cwd: s.cwd || abs,
+            parentSessionId: s.parentSessionId,
+            subagentRole: s.subagentRole,
+            subagentPath: s.subagentPath,
           });
         }
       };
@@ -2485,9 +2497,38 @@ async function buildProjectsList(
           mtimeMs: c.mtimeMs,
           resumeCommand: c.resumeCommand,
           sourcePath: c.sourcePath || '',
+          parentSessionId: c.parentSessionId,
+          subagentRole: c.subagentRole,
+          subagentPath: c.subagentPath,
         })));
       }
     } catch { /* ignore bad folder */ }
+  }
+
+  // Codex ACP writes each spawned agent as its own rollout file. Keep those files
+  // resumable, but expose them as children of the parent instead of flooding the
+  // project's top-level session list. If a parent rollout is unavailable, retain
+  // the child at top level so no session becomes unreachable.
+  for (const bucket of buckets.values()) {
+    const codex = bucket.agentMap.get('codex');
+    if (!codex || codex.length < 2) continue;
+    const byId = new Map(codex.map((session) => [session.id.toLowerCase(), session]));
+    const topLevel: ProjectSession[] = [];
+    for (const session of codex) {
+      const parentId = session.parentSessionId?.toLowerCase();
+      const parent = parentId ? byId.get(parentId) : undefined;
+      if (!parent || parent === session) {
+        topLevel.push(session);
+        continue;
+      }
+      (parent.children ||= []).push(session);
+      // Surface the newest child activity on the parent row for project sorting.
+      parent.mtimeMs = Math.max(parent.mtimeMs, session.mtimeMs);
+    }
+    for (const session of topLevel) {
+      session.children?.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    }
+    bucket.agentMap.set('codex', topLevel);
   }
 
   const projects: ProjectEntry[] = [];
@@ -2591,6 +2632,9 @@ async function buildRemoteProjectsList(
         resumeCommand: r.resumeCommand || '',
         agent: normAgent(r.agent),
         sourcePath: '',
+        parentSessionId: (r as { parentSessionId?: string }).parentSessionId,
+        subagentRole: (r as { subagentRole?: string }).subagentRole,
+        subagentPath: (r as { subagentPath?: string }).subagentPath,
       });
     }
   } catch { /* ignore */ }
@@ -2606,6 +2650,24 @@ async function buildRemoteProjectsList(
     const canonical = canonicalByPath.get(folder) || folder;
     const bucket = getBucket(canonical, canonical, path.basename(canonical) || canonical);
     bucket.aliases.add(folder);
+  }
+
+  // Keep remote Codex subagents nested using the same shape as local projects.
+  for (const bucket of buckets.values()) {
+    const codex = bucket.agentMap.get('codex');
+    if (!codex || codex.length < 2) continue;
+    const byId = new Map(codex.map((session) => [session.id.toLowerCase(), session]));
+    const topLevel: ProjectSession[] = [];
+    for (const session of codex) {
+      const parent = session.parentSessionId ? byId.get(session.parentSessionId.toLowerCase()) : undefined;
+      if (!parent || parent === session) topLevel.push(session);
+      else {
+        (parent.children ||= []).push(session);
+        parent.mtimeMs = Math.max(parent.mtimeMs, session.mtimeMs);
+      }
+    }
+    for (const session of topLevel) session.children?.sort((a, b2) => b2.mtimeMs - a.mtimeMs);
+    bucket.agentMap.set('codex', topLevel);
   }
 
   const projects: ProjectEntry[] = [];
