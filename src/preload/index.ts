@@ -272,6 +272,9 @@ contextBridge.exposeInMainWorld('posse', {
   // Browser-tool policy (issue #109): global on/off for the agent browser bridge.
   browserBridgeGetEnabled: () => ipcRenderer.invoke('browser-bridge:get-enabled') as Promise<boolean>,
   browserBridgeSetEnabled: (enabled: boolean) => ipcRenderer.invoke('browser-bridge:set-enabled', enabled) as Promise<boolean>,
+  // #124: local Electron notification + OS-managed sound policy.
+  desktopAlertsGetEnabled: () => ipcRenderer.invoke('desktop-alerts:get-enabled') as Promise<boolean>,
+  desktopAlertsSetEnabled: (enabled: boolean) => ipcRenderer.invoke('desktop-alerts:set-enabled', enabled) as Promise<boolean>,
   // Get the model provider actually used by the CLI
   getCliProvider: (presetCommand: string) => ipcRenderer.invoke('cli:get-provider', presetCommand),
 

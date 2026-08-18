@@ -194,6 +194,9 @@ declare global {
       aiApplyConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => Promise<boolean>;
       aiTestConfig: (config: { apiFormat: string; baseUrl: string; apiKey: string; model: string }) => Promise<{ ok: boolean; error?: string; response?: string }>;
       aiGetCurrentConfig: () => Promise<{ apiFormat: string; baseUrl: string; apiKey: string; model: string; providerId: string | null } | null>;
+      // #124: local Electron notification + OS-managed sound preference.
+      desktopAlertsGetEnabled: () => Promise<boolean>;
+      desktopAlertsSetEnabled: (enabled: boolean) => Promise<boolean>;
       getCliProvider: (presetCommand: string) => Promise<string | null>;
       // Claude provider config
       claudeProvidersList: () => Promise<Array<{ id: string; name: string; baseUrl: string; apiKey: string; model?: string }>>;
@@ -8475,9 +8478,16 @@ function updateConversationPreferences(next: ConversationPreferences): void {
   for (const view of acpViews.values()) view.setConversationPreferences(conversationPreferences);
 }
 
-function openSettingsDialog(): void {
+async function openSettingsDialog(): Promise<void> {
   const existing = document.getElementById('app-settings-overlay');
   if (existing) return;
+
+  // #124: main owns persisted desktop-alert policy; default ON if IPC is unavailable.
+  let desktopAlertsEnabled = true;
+  try { desktopAlertsEnabled = await window.posse.desktopAlertsGetEnabled(); }
+  catch { /* Settings remains usable even if the policy read fails. */ }
+  // The async policy read may have raced another Settings open.
+  if (document.getElementById('app-settings-overlay')) return;
 
   const overlay = document.createElement('div');
   overlay.id = 'app-settings-overlay';
@@ -8521,6 +8531,20 @@ function openSettingsDialog(): void {
           <span class="settings-toggle__control" aria-hidden="true"></span>
         </label>
       </section>
+      <section class="settings-section" aria-labelledby="settings-notifications-title">
+        <div class="settings-section__heading">
+          <h3 id="settings-notifications-title">Notifications</h3>
+          <p>Control local desktop completion alerts. Phone push and iMessage stay enabled.</p>
+        </div>
+        <label class="settings-toggle">
+          <span class="settings-toggle__copy">
+            <span class="settings-toggle__title">Desktop alerts</span>
+            <span class="settings-toggle__description">Show native notifications with one OS-controlled sound when an agent needs attention.</span>
+          </span>
+          <input type="checkbox" data-setting="desktop-alerts" ${desktopAlertsEnabled ? 'checked' : ''}>
+          <span class="settings-toggle__control" aria-hidden="true"></span>
+        </label>
+      </section>
     </div>`;
 
   overlay.appendChild(dialog);
@@ -8529,6 +8553,7 @@ function openSettingsDialog(): void {
   const closeButton = dialog.querySelector<HTMLButtonElement>('.settings-dialog__close');
   const thoughtInput = dialog.querySelector<HTMLInputElement>('[data-setting="thoughts"]');
   const toolInput = dialog.querySelector<HTMLInputElement>('[data-setting="tools"]');
+  const desktopAlertsInput = dialog.querySelector<HTMLInputElement>('[data-setting="desktop-alerts"]');
 
   const cleanup = (): void => {
     overlay.remove();
@@ -8550,6 +8575,12 @@ function openSettingsDialog(): void {
       ...conversationPreferences,
       expandToolsByDefault: toolInput.checked,
     });
+  });
+  desktopAlertsInput?.addEventListener('change', async () => {
+    const requested = desktopAlertsInput.checked;
+    const saved = await window.posse.desktopAlertsSetEnabled(requested);
+    // Persist failure: immediately restore the checkbox to the known policy value.
+    if (!saved) desktopAlertsInput.checked = !requested;
   });
 
   dialog.addEventListener('keydown', (event) => {

@@ -165,6 +165,30 @@ function clearSelectedSessionForWindow(webContentsId: number): void {
   windowSelectedSessions.delete(webContentsId);
 }
 
+// #124: unacknowledged attention is a session identity, not an event count. On macOS
+// app.dock.setBadge('•') renders the OS-standard red dot. A single dot communicates
+// "something needs attention" without pretending multiple bursty events are an exact
+// unread count. Every non-macOS/API-unavailable path safely no-ops.
+const attentionSessions = new Set<string>();
+
+function refreshDockAttentionBadge(): void {
+  if (process.platform !== 'darwin' || !app.dock) return;
+  try {
+    app.dock.setBadge(attentionSessions.size > 0 ? '•' : '');
+  } catch { /* Dock badge is best-effort and must not affect agent lifecycle. */ }
+}
+
+function markSessionAttention(identity: string | undefined): void {
+  if (!identity) return;
+  attentionSessions.add(identity);
+  refreshDockAttentionBadge();
+}
+
+function acknowledgeSessionAttention(identity: string | null): void {
+  if (!identity || !attentionSessions.delete(identity)) return;
+  refreshDockAttentionBadge();
+}
+
 // Returns true when a focused, non-destroyed Posse window is currently displaying
 // the affected session — the case where a local desktop alert would be noise.
 function focusedWindowShowsSession(identity: string): boolean {
@@ -694,6 +718,32 @@ function saveBrowserPolicy(enabled: boolean): void {
   try {
     fs.writeFileSync(getBrowserPolicyPath(), JSON.stringify({ browserBridgeEnabled: enabled }));
     browserPolicyCache = null;
+  } catch { /* ignore */ }
+}
+
+// #124: local desktop-alert policy. This controls only Electron native notification
+// + its OS-managed sound. Remote web push and optional iMessage remain enabled even
+// when this toggle is off. Missing/malformed preference defaults to enabled.
+function getDesktopAlertsPolicyPath(): string {
+  return path.join(app.getPath('userData'), 'desktop-alerts-policy.json');
+}
+
+let desktopAlertsPolicyCache: { desktopAlertsEnabled: boolean } | null = null;
+function loadDesktopAlertsPolicy(): { desktopAlertsEnabled: boolean } {
+  if (desktopAlertsPolicyCache) return desktopAlertsPolicyCache;
+  try {
+    const data = JSON.parse(fs.readFileSync(getDesktopAlertsPolicyPath(), 'utf-8'));
+    desktopAlertsPolicyCache = { desktopAlertsEnabled: data.desktopAlertsEnabled !== false };
+  } catch {
+    desktopAlertsPolicyCache = { desktopAlertsEnabled: true };
+  }
+  return desktopAlertsPolicyCache;
+}
+
+function saveDesktopAlertsPolicy(enabled: boolean): void {
+  try {
+    fs.writeFileSync(getDesktopAlertsPolicyPath(), JSON.stringify({ desktopAlertsEnabled: enabled }));
+    desktopAlertsPolicyCache = null;
   } catch { /* ignore */ }
 }
 
@@ -1246,6 +1296,11 @@ function createWindow(appIcon?: Electron.NativeImage, connectionId: string = LOC
     },
   });
   const windowWebContentsId = win.webContents.id;
+  // Returning to an already selected session acknowledges any attention that arrived
+  // while Posse was unfocused, so the Dock dot clears without requiring a tab switch.
+  win.on('focus', () => {
+    acknowledgeSessionAttention(windowSelectedSessions.get(windowWebContentsId) || null);
+  });
 
   if (isPrimary) mainWindow = win;
 
@@ -1377,10 +1432,25 @@ function sendIMessageNotification(message: string): void {
 // affected live session. `sessionIdentity` is the connection-scoped PTY key or the
 // ACP renderer session id; when omitted, native delivery always fires (no way to
 // suppress for an unknown session).
-function sendUserNotification(id: string, title: string, body: string, sessionIdentity?: string): void {
+function sendUserNotification(
+  id: string,
+  title: string,
+  body: string,
+  sessionIdentity?: string,
+  trackDockAttention = true,
+): void {
+  // Remote channels are never affected by local preference or foreground suppression.
   sendRemotePush(title, body, id);
   sendIMessageNotification(`[Posse] ${title}：${body}`);
+
+  // A focused window already showing this session has acknowledged the attention: do
+  // not make local noise or a new Dock dot. Background sessions get both cues.
   if (sessionIdentity && focusedWindowShowsSession(sessionIdentity)) return;
+  if (trackDockAttention) markSessionAttention(sessionIdentity);
+
+  // #124 Settings policy gates local Electron notification + its one OS-managed sound
+  // only. The Dock dot remains as an in-app attention cue when alerts are disabled.
+  if (!loadDesktopAlertsPolicy().desktopAlertsEnabled) return;
   sendDesktopNotification(title, body);
 }
 
@@ -1468,7 +1538,9 @@ function buildConnectionEvents(connId: string): import('./pty-backend').PtyBacke
       // Do not notify for sessions the user closed deliberately
       if (!sessionUserClosed.has(id)) {
         const title = session?.title || 'Terminal';
-        sendUserNotification(id, 'Session ended', title, deletionKey);
+        // An exited session has no live row to open/acknowledge, so retain the existing
+        // notification but do not leave a permanent Dock-attention dot for it.
+        sendUserNotification(id, 'Session ended', title, deletionKey, false);
       }
       sessionUserClosed.delete(id);
       sessionUserDeleted.delete(deletionKey);
@@ -4380,7 +4452,23 @@ function registerIPC(): void {
   ipcMain.on('notify:selected-session', (event, identity: string | null) => {
     const sender = BrowserWindow.fromWebContents(event.sender);
     if (!sender || sender.isDestroyed()) return;
-    setSelectedSessionForWindow(sender.webContents.id, typeof identity === 'string' && identity ? identity : null);
+    const selectedIdentity = typeof identity === 'string' && identity ? identity : null;
+    setSelectedSessionForWindow(sender.webContents.id, selectedIdentity);
+    // Opening/focusing a session acknowledges its pending Dock attention (#124). A
+    // background window's programmatic/tab change is not acknowledgement yet.
+    if (sender.isFocused()) acknowledgeSessionAttention(selectedIdentity);
+  });
+
+  // #124: local desktop notification/sound policy. Defaults enabled and takes effect
+  // immediately. It never gates remote push/iMessage or the macOS Dock attention dot.
+  ipcMain.handle('desktop-alerts:get-enabled', (): boolean => {
+    return loadDesktopAlertsPolicy().desktopAlertsEnabled;
+  });
+
+  ipcMain.handle('desktop-alerts:set-enabled', (_event, enabled: boolean): boolean => {
+    if (typeof enabled !== 'boolean') return false;
+    saveDesktopAlertsPolicy(enabled);
+    return true;
   });
 
 }
@@ -4567,6 +4655,8 @@ app.on('before-quit', async () => {
   acpManager.destroyAll(false);
   acpOwners.clear();
   windowSelectedSessions.clear();
+  attentionSessions.clear();
+  refreshDockAttentionBadge();
   browserOpsServer?.close();
   browserOpsServer = null;
   chatgptBridge?.close();

@@ -105,10 +105,10 @@ test('PTY attention passes connection-scoped identity for suppression', () => {
   assert.match(fn[0], /sendUserNotification\(id, 'Session waiting for input', title, ptyIdentity\)/);
 });
 
-test('PTY exit notification passes connection-scoped identity', () => {
+test('PTY exit notification passes connection-scoped identity without permanent Dock attention', () => {
   const exitBlock = mainSource.match(/if \(!sessionUserClosed\.has\(id\)\) \{[\s\S]*?\}/);
   assert.ok(exitBlock, 'expected exit notification block');
-  assert.match(exitBlock[0], /sendUserNotification\(id, 'Session ended', title, deletionKey\)/);
+  assert.match(exitBlock[0], /sendUserNotification\(id, 'Session ended', title, deletionKey, false\)/);
 });
 
 test('existing PTY cooldown, arming, and detection logic remain the sole PTY path', () => {
@@ -227,6 +227,69 @@ test('renderer reports selection on session switch and connection change', () =>
   assert.ok(connChanged, 'expected onConnectionChanged handler');
   assert.match(connChanged[0], /currentWindowConnectionId = id \|\| null/);
   assert.match(connChanged[0], /window\.posse\.notifySelectedSession\(null\)/);
+});
+
+// ========== #124 follow-up: local toggle + macOS Dock attention ==========
+
+test('desktop-alerts policy defaults enabled and persists independently of browser policy', () => {
+  assert.match(mainSource, /function getDesktopAlertsPolicyPath\(\): string/);
+  assert.match(mainSource, /desktop-alerts-policy\.json/);
+  assert.match(mainSource, /function loadDesktopAlertsPolicy\(\): \{ desktopAlertsEnabled: boolean \}/);
+  assert.match(mainSource, /desktopAlertsEnabled: data\.desktopAlertsEnabled !== false/);
+  assert.match(mainSource, /desktopAlertsEnabled: true/);
+  assert.match(mainSource, /function saveDesktopAlertsPolicy\(enabled: boolean\): void/);
+});
+
+test('desktop-alerts IPC and preload expose a narrow boolean policy contract', () => {
+  assert.match(mainSource, /ipcMain\.handle\('desktop-alerts:get-enabled'/);
+  assert.match(mainSource, /ipcMain\.handle\('desktop-alerts:set-enabled'/);
+  assert.match(preloadSource, /desktopAlertsGetEnabled: \(\) => ipcRenderer\.invoke\('desktop-alerts:get-enabled'\)/);
+  assert.match(preloadSource, /desktopAlertsSetEnabled: \(enabled: boolean\) => ipcRenderer\.invoke\('desktop-alerts:set-enabled', enabled\)/);
+  assert.match(rendererSource, /desktopAlertsGetEnabled: \(\) => Promise<boolean>;/);
+  assert.match(rendererSource, /desktopAlertsSetEnabled: \(enabled: boolean\) => Promise<boolean>;/);
+});
+
+test('local toggle gates only Electron notification after remote push and iMessage', () => {
+  const fn = mainSource.match(/function sendUserNotification[\s\S]*?\n\}\n/);
+  assert.ok(fn, 'expected sendUserNotification helper');
+  const remotePushIdx = fn[0].indexOf('sendRemotePush');
+  const iMessageIdx = fn[0].indexOf('sendIMessageNotification');
+  const policyIdx = fn[0].indexOf('loadDesktopAlertsPolicy');
+  const desktopIdx = fn[0].indexOf('sendDesktopNotification');
+  assert.ok(remotePushIdx > -1 && remotePushIdx < policyIdx);
+  assert.ok(iMessageIdx > -1 && iMessageIdx < policyIdx);
+  assert.ok(policyIdx > -1 && policyIdx < desktopIdx);
+});
+
+test('Dock attention uses a single macOS red-dot badge and tracks session identities', () => {
+  assert.match(mainSource, /const attentionSessions = new Set<string>\(\)/);
+  const fn = mainSource.match(/function refreshDockAttentionBadge[\s\S]*?\n\}/);
+  assert.ok(fn, 'expected Dock badge refresh helper');
+  assert.match(fn[0], /process\.platform !== 'darwin'/);
+  assert.match(fn[0], /app\.dock\.setBadge\(attentionSessions\.size > 0 \? '•' : ''\)/);
+  assert.match(mainSource, /function markSessionAttention\(identity: string \| undefined\)/);
+  assert.match(mainSource, /function acknowledgeSessionAttention\(identity: string \| null\)/);
+});
+
+test('selection acknowledges only the opened session Dock attention', () => {
+  const handler = mainSource.match(/ipcMain\.on\('notify:selected-session'[\s\S]*?\n  \}\);/);
+  assert.ok(handler, 'expected selected-session IPC handler');
+  assert.match(handler[0], /if \(sender\.isFocused\(\)\) acknowledgeSessionAttention\(selectedIdentity\)/);
+});
+
+test('focusing a Posse window acknowledges its selected session attention', () => {
+  const createWindowFn = mainSource.match(/function createWindow[\s\S]*?\n\}/);
+  assert.ok(createWindowFn, 'expected createWindow');
+  assert.match(createWindowFn[0], /win\.on\('focus'/);
+  assert.match(createWindowFn[0], /acknowledgeSessionAttention\(windowSelectedSessions\.get\(windowWebContentsId\)/);
+});
+
+test('Settings renders default-on Desktop alerts notification toggle', () => {
+  assert.match(rendererSource, /<h3 id="settings-notifications-title">Notifications<\/h3>/);
+  assert.match(rendererSource, /Desktop alerts/);
+  assert.match(rendererSource, /data-setting="desktop-alerts"/);
+  assert.match(rendererSource, /desktopAlertsGetEnabled\(\)/);
+  assert.match(rendererSource, /desktopAlertsSetEnabled\(requested\)/);
 });
 
 // ========== R6: Documentation ==========
