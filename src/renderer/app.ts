@@ -395,6 +395,7 @@ type ClaudeHistorySession = { id: string; title: string; cwd: string; mtimeMs: n
   // the Posse-internal soft-hide flag from the backend.
   storeAgent?: ProjectsAgentId; sourcePath?: string; archived?: boolean;
   parentSessionId?: string; subagentRole?: string; subagentPath?: string;
+  completed?: boolean;
   children?: ClaudeHistorySession[] };
 let claudeHistorySessions: ClaudeHistorySession[] = [];
 let claudeHistoryCollapsed = false;
@@ -659,6 +660,7 @@ interface BackendProjectSession {
   id: string; title: string; mtimeMs: number; resumeCommand: string; agent?: ProjectsAgentId;
   sourcePath?: string; archived?: boolean; cwd?: string;
   parentSessionId?: string; subagentRole?: string; subagentPath?: string;
+  completed?: boolean;
   children?: BackendProjectSession[];
 }
 interface BackendProjectAgent { agent: ProjectsAgentId; sessions: BackendProjectSession[] }
@@ -4483,7 +4485,7 @@ function buildHistorySessionTree(s: ClaudeHistorySession): HTMLElement {
   wrapper.className = 'nav-session-tree';
   const parent = buildHistorySessionRow(s);
   wrapper.appendChild(parent);
-  const children = (s.children || []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const children = (s.children || []).filter((child) => !child.completed).slice().sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (children.length === 0) return wrapper;
 
   const toggle = document.createElement('button');
@@ -4614,6 +4616,7 @@ function collectProjectSessions(projPath: string): Map<string, ProjectAgentGroup
           parentSessionId: session.parentSessionId,
           subagentRole: session.subagentRole,
           subagentPath: session.subagentPath,
+          completed: session.completed,
           children: session.children?.map(toHistorySession),
         });
         g.history.push({

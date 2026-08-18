@@ -30,6 +30,7 @@ export type AgentHistorySession = {
   parentSessionId?: string;
   subagentRole?: string;
   subagentPath?: string;
+  completed?: boolean;
 };
 
 const CODEX_UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -48,6 +49,27 @@ export function extractCodexSubagentMetadata(head: string): Pick<AgentHistorySes
     ...(role ? { subagentRole: unescape(role) } : {}),
     ...(agentPath ? { subagentPath: unescape(agentPath) } : {}),
   };
+}
+
+// A completed ACP turn is recorded as a compact event near the end of the
+// rollout. Read only a bounded tail so completion checks stay cheap even for
+// very large sessions, and never infer completion from elapsed time.
+export function codexSessionIsCompleted(filePath: string): boolean {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      const maxBytes = 128 * 1024;
+      const start = Math.max(0, stat.size - maxBytes);
+      const buf = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      return /"type"\s*:\s*"task_complete"/.test(buf.toString('utf-8'));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 // Read the first line of a file (up to ~16KB) for cheap parsing of the Codex session_meta
@@ -185,6 +207,7 @@ export function listCodexSessions(targetCwd: string): AgentHistorySession[] {
                 resumeCommand: `codex resume ${id}`,
                 sourcePath: full,
                 ...extractCodexSubagentMetadata(firstLine),
+                completed: codexSessionIsCompleted(full),
               });
             } catch { /* skip unreadable / unparseable file */ }
           }
