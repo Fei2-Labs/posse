@@ -608,8 +608,12 @@ export class EmbeddedBrowserController {
     for (const popup of Array.from(this.popups)) {
       if (!popup.isDestroyed()) popup.close();
     }
-    this.manager.unregisterBrowserContents(this.view.webContents.id);
-    if (!this.view.webContents.isDestroyed()) this.view.webContents.close();
+    // Guard: webContents may already be destroyed during window teardown (#79 exit crash)
+    const wc = this.view?.webContents;
+    if (wc && !wc.isDestroyed()) {
+      this.manager.unregisterBrowserContents(wc.id);
+      wc.close();
+    }
   }
 
   private detach(): void {
