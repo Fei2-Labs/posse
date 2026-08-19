@@ -5820,7 +5820,14 @@ function mountLoadedAcpSessionView(
     if (acpViews.get(acpId) === view) view.handleStatus(info);
   }).catch((error) => {
     if (acpViews.get(acpId) !== view) return;
-    view.handleStatus({ status: 'error', errorMessage: error instanceof Error ? error.message : String(error) });
+    const raw = error instanceof Error ? error.message : String(error);
+    // Adapter-internal errors (bugs in Claude/Codex/Copilot's ACP process) are not actionable
+    // for the user — wrap with a friendly hint to retry or start fresh.
+    const isAdapterInternal = /is not a function|is not defined|Cannot read propert|unexpected token/i.test(raw);
+    const message = isAdapterInternal
+      ? `The agent failed to load this session (${raw}). Try again — or start a new conversation if the error persists.`
+      : raw;
+    view.handleStatus({ status: 'error', errorMessage: message });
   });
   return view;
 }
