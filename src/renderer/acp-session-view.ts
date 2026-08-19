@@ -37,6 +37,9 @@ type UserMessageChunkUpdate = Extract<SessionUpdate, { sessionUpdate: 'user_mess
 type AgentThoughtChunkUpdate = Extract<SessionUpdate, { sessionUpdate: 'agent_thought_chunk' }>;
 type ToolCallUpdate = Extract<SessionUpdate, { sessionUpdate: 'tool_call' }>;
 type ToolCallProgressUpdate = Extract<SessionUpdate, { sessionUpdate: 'tool_call_update' }>;
+type ToolCallContentChunkUpdate = Extract<SessionUpdate, { sessionUpdate: 'tool_call_content_chunk' }>;
+type TerminalUpdateEvent = Extract<SessionUpdate, { sessionUpdate: 'terminal_update' }>;
+type TerminalOutputChunkEvent = Extract<SessionUpdate, { sessionUpdate: 'terminal_output_chunk' }>;
 type PlanUpdate = Extract<SessionUpdate, { sessionUpdate: 'plan' }>;
 type UsageSessionUpdate = Extract<SessionUpdate, { sessionUpdate: 'usage_update' }>;
 
@@ -64,6 +67,18 @@ interface ToolCallState {
   activityGroup?: HTMLDetailsElement;
   // Wall-clock when the call first appeared (for subagent elapsed display). Set once on creation.
   startedMs?: number;
+}
+
+/** Tracks an agent-owned terminal and its accumulated output. */
+interface TerminalState {
+  terminalId: string;
+  command?: string;
+  cwd?: string;
+  outputEl: HTMLPreElement;
+  wrapperEl: HTMLElement;
+  exitCode?: number | null;
+  signal?: string | null;
+  exited: boolean;
 }
 
 interface ComposerImage {
@@ -127,6 +142,7 @@ export class AcpSessionView {
   // #109: true while this session holds browser-control ownership.
   private browserOwner = false;
   private toolCalls = new Map<string, ToolCallState>();
+  private terminals = new Map<string, TerminalState>();
   // 1s tick that re-renders only in-progress subagent panels so their elapsed timer updates
   // live. Allocated lazily and cleared as soon as no subagent is still running.
   private subagentTickHandle: ReturnType<typeof setInterval> | null = null;
@@ -741,6 +757,7 @@ export class AcpSessionView {
     }
   }
 
+  /**
   private drainPromptQueue(): void {
     const next = this.promptQueue.next();
     this.renderQueue();
@@ -803,6 +820,15 @@ export class AcpSessionView {
         break;
       case 'agent_thought_chunk':
         this.handleThoughtChunk(update);
+        break;
+      case 'terminal_update':
+        this.handleTerminalUpdate(update as TerminalUpdateEvent);
+        break;
+      case 'terminal_output_chunk':
+        this.handleTerminalOutputChunk(update as TerminalOutputChunkEvent);
+        break;
+      case 'tool_call_content_chunk':
+        this.handleToolCallContentChunk(update as ToolCallContentChunkUpdate);
         break;
       default:
         console.log('[ACP] Unhandled update type:', update.sessionUpdate);
@@ -1098,6 +1124,139 @@ export class AcpSessionView {
     if (state.activityGroup) this.updateActivityGroupSummary(state.activityGroup);
   }
 
+  // ========== Terminal rendering (#79) ==========
+
+  /**
+   * Handle terminal_update: creates or updates an agent-owned terminal panel.
+   * This event carries metadata (command, cwd, exit status) — not the output bytes.
+   */
+  private handleTerminalUpdate(update: TerminalUpdateEvent): void {
+    const tid = (update as unknown as { terminalId: string }).terminalId;
+    if (!tid) return;
+
+    let state = this.terminals.get(tid);
+    if (!state) {
+      // Create the terminal output block
+      this.ensureConversationStarted();
+      const wrapper = document.createElement('div');
+      wrapper.className = 'acp-terminal-block';
+
+      const header = document.createElement('div');
+      header.className = 'acp-terminal-header';
+      wrapper.appendChild(header);
+
+      const pre = document.createElement('pre');
+      pre.className = 'acp-terminal-pre';
+      wrapper.appendChild(pre);
+
+      state = {
+        terminalId: tid,
+        outputEl: pre,
+        wrapperEl: wrapper,
+        exited: false,
+      };
+      this.terminals.set(tid, state);
+
+      // Append inside the current activity group (alongside the tool call that owns it)
+      this.appendActivityNode(wrapper, this.currentActivityEl || undefined);
+    }
+
+    // Update metadata
+    const raw = update as unknown as { command?: string; cwd?: string; output?: { data: string } | null; exitStatus?: { exitCode?: number | null; signal?: string | null } };
+    if (raw.command) state.command = raw.command;
+    if (raw.cwd) state.cwd = raw.cwd;
+
+    // output is an authoritative REPLACEMENT snapshot (not incremental)
+    if (raw.output && raw.output.data) {
+      try {
+        const decoded = atob(raw.output.data);
+        const bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+        state.outputEl.textContent = new TextDecoder('utf-8').decode(bytes);
+      } catch {
+        state.outputEl.textContent = raw.output.data;
+      }
+    }
+
+    if (raw.exitStatus) {
+      state.exited = true;
+      state.exitCode = raw.exitStatus.exitCode;
+      state.signal = raw.exitStatus.signal;
+    }
+
+    // Render/update the header
+    const headerEl = state.wrapperEl.querySelector('.acp-terminal-header') as HTMLElement;
+    if (headerEl) {
+      const cmd = state.command || '';
+      const cwdSuffix = state.cwd ? ` (${state.cwd})` : '';
+      headerEl.textContent = `$ ${cmd}${cwdSuffix}`;
+    }
+
+    // Show exit status footer if exited
+    if (state.exited) {
+      let footer = state.wrapperEl.querySelector('.acp-terminal-footer') as HTMLElement | null;
+      if (!footer) {
+        footer = document.createElement('div');
+        state.wrapperEl.appendChild(footer);
+      }
+      const ok = state.exitCode === 0;
+      footer.className = ok ? 'acp-terminal-footer acp-terminal-ok' : 'acp-terminal-footer acp-terminal-error';
+      if (state.signal) {
+        footer.textContent = `✗ killed by ${state.signal}`;
+      } else {
+        footer.textContent = ok ? '✓ exited 0' : `✗ exited ${state.exitCode ?? '?'}`;
+      }
+    }
+
+    this.scrollToBottom();
+  }
+
+  /**
+   * Handle terminal_output_chunk: decode base64 output bytes and append to the terminal.
+   */
+  private handleTerminalOutputChunk(update: TerminalOutputChunkEvent): void {
+    const raw = update as unknown as { terminalId: string; data: string };
+    if (!raw.terminalId || !raw.data) return;
+
+    let state = this.terminals.get(raw.terminalId);
+    if (!state) {
+      // Terminal might arrive before terminal_update in some edge cases — create a placeholder
+      this.handleTerminalUpdate({ sessionUpdate: 'terminal_update', terminalId: raw.terminalId } as unknown as TerminalUpdateEvent);
+      state = this.terminals.get(raw.terminalId);
+      if (!state) return;
+    }
+
+    // Decode base64 output
+    try {
+      const decoded = atob(raw.data);
+      // Convert latin1 string to proper UTF-8 (base64 encodes raw bytes, atob gives latin1)
+      const bytes = new Uint8Array(decoded.length);
+      for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+      const text = new TextDecoder('utf-8').decode(bytes);
+      state.outputEl.textContent += text;
+    } catch {
+      // Fallback: treat as plain text if decoding fails
+      state.outputEl.textContent += raw.data;
+    }
+    this.scrollToBottom();
+  }
+
+  /**
+   * Handle tool_call_content_chunk: incrementally append content to a tool call.
+   * This includes terminal references that we can link to rendered terminals.
+   */
+  private handleToolCallContentChunk(update: ToolCallContentChunkUpdate): void {
+    const raw = update as unknown as { toolCallId: string; content: ToolCallContent };
+    if (!raw.toolCallId || !raw.content) return;
+
+    const state = this.toolCalls.get(raw.toolCallId);
+    if (!state) return;
+
+    if (!state.content) state.content = [];
+    state.content.push(raw.content);
+    this.renderToolCall(state, true);
+  }
+
   // ========== Plan rendering ==========
   private handlePlan(update: PlanUpdate): void {
     const entries: PlanEntry[] = update.entries || [];
@@ -1356,6 +1515,10 @@ export class AcpSessionView {
             return `<div class="acp-tool-resource">${this.escapeHtml(c.path)}</div>`;
           }
           if (c.type === 'terminal') {
+            // If we have a rendered terminal block for this ID, skip the placeholder —
+            // the terminal output block is rendered separately by handleTerminalUpdate.
+            const termState = this.terminals.get(c.terminalId);
+            if (termState) return '';
             return `<div class="acp-tool-resource">Terminal ${this.escapeHtml(c.terminalId)}</div>`;
           }
           return '';
