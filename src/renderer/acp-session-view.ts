@@ -729,24 +729,6 @@ export class AcpSessionView {
       this.promptHistory.save(this.promptHistoryKey);
     }
     this.addUserMessage(message.text, message.images);
-
-    // ─── Inline shell execution (#79) ──────────────────────────────────────────
-    // Intercept `! <command>` prompts and run them in a real PTY instead of sending
-    // them to the agent. This gives the subprocess an interactive TTY (isTTY=true),
-    // streams stdout/stderr back in real time, and avoids the readline/inquirer crash.
-    const shellMatch = message.text?.match(/^!\s+(.+)/s);
-    if (shellMatch) {
-      const command = shellMatch[1].trim();
-      this.setPrompting(true);
-      try {
-        await this.runInlineShell(command);
-      } finally {
-        this.setPrompting(false);
-        this.drainPromptQueue();
-      }
-      return;
-    }
-
     this.setPrompting(true);
 
     try {
@@ -756,53 +738,6 @@ export class AcpSessionView {
     } finally {
       this.setPrompting(false);
       this.drainPromptQueue();
-    }
-  }
-
-  /**
-   * Run an inline shell command in a real PTY (#79).
-   * Streams output in real time and shows exit code on completion.
-   */
-  private async runInlineShell(command: string): Promise<void> {
-    // Create a pre element to stream output into
-    const wrapper = document.createElement('div');
-    wrapper.className = 'acp-shell-output';
-
-    const header = document.createElement('div');
-    header.className = 'acp-shell-header';
-    header.textContent = `$ ${command}`;
-    wrapper.appendChild(header);
-
-    const pre = document.createElement('pre');
-    pre.className = 'acp-shell-pre';
-    wrapper.appendChild(pre);
-
-    this.appendConversationNode(wrapper);
-    this.scrollToBottom();
-
-    // Listen for streaming output — scoped to this session ID
-    const handler = (_id: string, data: string) => {
-      if (_id !== this.sessionId) return;
-      pre.textContent += data;
-      this.scrollToBottom();
-    };
-    window.posse.onAcpShellOutput(handler);
-
-    try {
-      const result = await window.posse.acpShellExec(this.sessionId, command);
-
-      // Show exit status
-      const footer = document.createElement('div');
-      footer.className = result.exitCode === 0 ? 'acp-shell-footer acp-shell-ok' : 'acp-shell-footer acp-shell-error';
-      footer.textContent = result.exitCode === 0 ? '✓ exited 0' : `✗ exited ${result.exitCode}`;
-      wrapper.appendChild(footer);
-      this.scrollToBottom();
-    } catch (err) {
-      const footer = document.createElement('div');
-      footer.className = 'acp-shell-footer acp-shell-error';
-      footer.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-      wrapper.appendChild(footer);
-      this.scrollToBottom();
     }
   }
 

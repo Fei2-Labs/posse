@@ -2,7 +2,6 @@ import { app, BrowserWindow, ipcMain, dialog, clipboard, nativeImage, shell, glo
 import type { WebContents } from 'electron';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { spawn } from 'child_process';
-import * as pty from 'node-pty';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getDisplayName, writeClaudeSessionTitle, writeCodexSessionTitle, writeDevinSessionTitle } from './pty-manager';
@@ -3140,76 +3139,6 @@ function registerIPC(): void {
   ipcMain.handle('acp:resolve-permission', async (_e, id: string, toolCallId: string, outcome: string, optionId?: string) => {
     return acpManager.resolvePermission(id, toolCallId, outcome, optionId);
   });
-
-  // ─── Inline shell execution for ACP sessions (#79) ───────────────────────────
-  // Runs `! <cmd>` commands in a real PTY so they get an interactive TTY and their
-  // stdout/stderr streams back to the renderer. Fixes the three failures described
-  // in issue #79: readline crashes, swallowed stdout, and isolated env.
-  ipcMain.handle('acp:shell-exec', async (event, id: string, command: string) => {
-    const session = acpManager.getSession(id);
-    if (!session) throw new Error(`ACP session ${id} not found`);
-
-    const cwd = session.cwd;
-    const shellPath = process.platform === 'win32'
-      ? (process.env.COMSPEC || 'cmd.exe')
-      : (process.env.SHELL || '/bin/zsh');
-
-    // Build environment matching the PTY manager's logic
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined) env[key] = value;
-    }
-    const localBin = path.join(os.homedir(), '.local', 'bin');
-    const currentPath = env.PATH || '';
-    if (!currentPath.split(':').includes(localBin)) {
-      env.PATH = currentPath ? `${localBin}:${currentPath}` : localBin;
-    }
-    if (!env.LANG && !env.LC_ALL && !env.LC_CTYPE) env.LANG = 'en_US.UTF-8';
-    if (!env.LC_CTYPE && !env.LC_ALL) env.LC_CTYPE = 'UTF-8';
-
-    const sender = event.sender;
-
-    return new Promise<{ exitCode: number; output: string }>((resolve) => {
-      // Spawn the command inside a real PTY so isTTY=true for child processes,
-      // and interactive prompts (readline/inquirer) work correctly.
-      const shellArgs = process.platform === 'win32'
-        ? ['/c', command]
-        : ['-i', '-c', command];
-
-      const ptyProc = pty.spawn(shellPath, shellArgs, {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 30,
-        cwd,
-        env,
-        encoding: 'utf8',
-      });
-
-      let output = '';
-
-      ptyProc.onData((data: string) => {
-        output += data;
-        // Stream output chunks to the renderer in real time
-        if (!sender.isDestroyed()) {
-          sender.send('acp:shell-output', id, data);
-        }
-      });
-
-      ptyProc.onExit(({ exitCode }) => {
-        resolve({ exitCode: exitCode ?? 0, output });
-      });
-
-      // Safety timeout: kill after 5 minutes if the command hangs
-      const timeout = setTimeout(() => {
-        ptyProc.kill();
-      }, 5 * 60 * 1000);
-
-      ptyProc.onExit(() => clearTimeout(timeout));
-    });
-  });
-
-  // Allow renderer to write stdin to a running shell-exec PTY (for interactive prompts)
-  // This is a future enhancement — for now, the -i flag on the shell handles most cases.
 
   // Gracefully restart the background PTY daemon.
   // Saves every live session as resumable FIRST so nothing is lost, then
