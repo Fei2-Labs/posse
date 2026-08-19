@@ -242,6 +242,8 @@ declare global {
       acpLoad: (id: string, agentLabel: string, cwd: string, acpSessionId: string, providerEnv?: Record<string, string>) => Promise<AcpSessionInfo>;
       acpDrainReplay: (id: string) => Promise<SessionUpdate[]>;
       acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) => Promise<boolean>;
+      acpShellExec: (id: string, command: string) => Promise<{ exitCode: number; output: string }>;
+      onAcpShellOutput: (cb: (id: string, data: string) => void) => void;
       onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) => void;
       onAcpStatus: (cb: (id: string, info: Partial<AcpSessionInfo>) => void) => void;
       onAcpPermission: (cb: (id: string, request: { toolCallId: string; toolName: string; options: PermissionOption[] }) => void) => void;

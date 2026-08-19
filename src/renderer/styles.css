@@ -4237,6 +4237,45 @@ select.ai-form-input {
 .acp-session-retry:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
 .acp-session-retry:disabled { opacity: 0.6; cursor: default; }
 
+/* Inline shell output (#79) */
+.acp-shell-output {
+  align-self: flex-start;
+  width: min(100%, 90ch);
+  margin: 6px 0;
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-secondary, #161b22);
+}
+.acp-shell-header {
+  padding: 6px 10px;
+  font-family: var(--font-mono, 'SF Mono', 'Menlo', monospace);
+  font-size: 12px;
+  color: var(--text-secondary, #8b949e);
+  background: color-mix(in srgb, var(--bg-secondary, #161b22) 80%, var(--border-color, #30363d) 20%);
+  border-bottom: 1px solid var(--border-color, #30363d);
+}
+.acp-shell-pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono, 'SF Mono', 'Menlo', monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary, #c9d1d9);
+  max-height: 400px;
+  overflow-y: auto;
+}
+.acp-shell-footer {
+  padding: 4px 10px;
+  font-family: var(--font-mono, 'SF Mono', 'Menlo', monospace);
+  font-size: 11px;
+  border-top: 1px solid var(--border-color, #30363d);
+}
+.acp-shell-ok { color: var(--status-success, #3fb950); }
+.acp-shell-error { color: var(--status-error, #f85149); }
+
 /* Thought */
 .acp-activity-group {
   width: 100%;

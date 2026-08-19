@@ -56,3 +56,4 @@ frp/cloudflared-config.private.yml
 
 # stray esbuild bundle (entry is dist/main/index.js)
 /app.js
+.kiro/settings/

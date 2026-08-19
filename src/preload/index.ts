@@ -378,6 +378,11 @@ contextBridge.exposeInMainWorld('posse', {
     ipcRenderer.invoke('acp:drain-replay', id) as Promise<SessionUpdate[]>,
   acpResolvePermission: (id: string, toolCallId: string, outcome: string, optionId?: string) =>
     ipcRenderer.invoke('acp:resolve-permission', id, toolCallId, outcome, optionId) as Promise<boolean>,
+  // Inline shell execution for ACP sessions (#79) — runs `! <cmd>` in a real PTY
+  acpShellExec: (id: string, command: string) =>
+    ipcRenderer.invoke('acp:shell-exec', id, command) as Promise<{ exitCode: number; output: string }>,
+  onAcpShellOutput: (cb: (id: string, data: string) => void) =>
+    ipcRenderer.on('acp:shell-output', (_e, id, data) => cb(id, data)),
   onAcpUpdate: (cb: (id: string, update: SessionUpdate) => void) =>
     ipcRenderer.on('acp:update', (_e, id, update) => cb(id, update)),
   onAcpStatus: (cb: (id: string, info: Partial<AcpSessionInfo>) => void) =>
