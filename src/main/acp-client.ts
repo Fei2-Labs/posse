@@ -330,6 +330,7 @@ const ACP_AGENT_COMMANDS: Record<string, [string, string[]]> = {
 // The set of built-in preset command prefixes that are ACP-eligible.
 // Custom presets and ssh wrappers are NOT matched — they stay PTY in Phase 1.
 const ACP_BUILTIN_PRESETS = new Set([
+  'claude',
   'claude --dangerously-skip-permissions',
   'codex -c sandbox_mode="danger-full-access" -c approval="never" -c network="enabled"',
   'copilot --allow-all --autopilot',
