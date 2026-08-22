@@ -5821,11 +5821,19 @@ function mountLoadedAcpSessionView(
   }).catch((error) => {
     if (acpViews.get(acpId) !== view) return;
     const raw = error instanceof Error ? error.message : String(error);
-    // Adapter-internal errors (bugs in Claude/Codex/Copilot's ACP process) are not actionable
-    // for the user — wrap with a friendly hint to retry or start fresh.
+
+    // Session expired / deleted on the agent side — unrecoverable, remove silently.
+    const isGone = /Resource not found|session.*not found|session.*expired|session.*deleted/i.test(raw);
+    if (isGone) {
+      removeLiveSessionFromRenderer(acpId);
+      return;
+    }
+
+    // Adapter-internal errors (bugs in the agent's ACP process) — the session MAY recover
+    // on retry (e.g. after agent restarts), so keep it but show a clear message.
     const isAdapterInternal = /is not a function|is not defined|Cannot read propert|unexpected token/i.test(raw);
     const message = isAdapterInternal
-      ? `The agent failed to load this session (${raw}). Try again — or start a new conversation if the error persists.`
+      ? `Session failed to load (agent internal error). Close and reopen it, or start a new conversation.`
       : raw;
     view.handleStatus({ status: 'error', errorMessage: message });
   });
