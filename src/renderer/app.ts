@@ -7653,9 +7653,12 @@ async function restoreActiveAcpSessions(): Promise<void> {
 
 async function restoreStartupSessions(): Promise<void> {
   await restoreDaemonSessions();
-  await restoreActiveAcpSessions();
-  // Re-run project/history discovery only after every live session has populated its
-  // cwd and stable resume id. This removes the startup race that produced a stale Recent list.
+  // ACP sessions are NOT auto-restored on startup. Unlike PTY sessions (which keep their
+  // process alive in the daemon), ACP adapters die with the app — so "restoring" them
+  // just re-spawns the adapter and calls session/load, which is identical to clicking
+  // a Recent Session entry. Skipping this avoids slow startup from loading stale/expired
+  // sessions and eliminates "Resource not found" errors on launch.
+  // Users can resume any ACP session from the sidebar history on demand.
   await refreshProjectsData();
 }
 
