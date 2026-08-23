@@ -5114,7 +5114,7 @@ function renderSessionList(): void {
     header.appendChild(groupBtn);
     header.addEventListener('click', () => toggleSectionCollapsed('active'));
     sessionList.appendChild(header);
-    if (!activeCollapsed) {
+    if (!activeCollapsed || (searching && activeSessionRows.length > 0)) {
       for (const r of activeSessionRows) sessionList.appendChild(r.el);
     }
   }
@@ -5138,7 +5138,7 @@ function renderSessionList(): void {
     header.appendChild(label);
     header.addEventListener('click', () => toggleSectionCollapsed('recent'));
     sessionList.appendChild(header);
-    if (!recentCollapsed) {
+    if (!recentCollapsed || (searching && recentSessionRows.length > 0)) {
       for (const r of recentSessionRows) sessionList.appendChild(r.el);
     }
   }
@@ -5164,7 +5164,7 @@ function renderSessionList(): void {
     // Clicking the header toggles the whole section's collapsed state.
     header.addEventListener('click', () => toggleSectionCollapsed('pinned'));
     sessionList.appendChild(header);
-    if (!pinnedCollapsed) {
+    if (!pinnedCollapsed || (searching && (pinnedSessionRows.length > 0 || pinned.length > 0))) {
       for (const r of pinnedSessionRows) sessionList.appendChild(r.el);
       for (const p of pinned) renderProjectEntry(p, activeId);
     }
@@ -5228,7 +5228,7 @@ function renderSessionList(): void {
   header.appendChild(actions);
   sessionList.appendChild(header);
 
-  if (!projectsCollapsed) {
+  if (!projectsCollapsed || (searching && rest.length > 0)) {
     if (rest.length === 0 && pinned.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'nav-project-empty';
