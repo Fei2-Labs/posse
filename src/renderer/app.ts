@@ -576,7 +576,6 @@ const expandedAgentGroups: Set<string> = new Set();
 // anyway so their collapse wins across re-renders. It is cleared whenever the query clears, so the
 // user's persisted `expandedProjects` state is restored exactly (no leakage into persistence).
 const searchCollapsedProjects: Set<string> = new Set();
-let projectsSectionCollapsed = false;
 
 function loadExpandState(): void {
   try {
@@ -601,43 +600,16 @@ function saveExpandState(): void {
 
 loadExpandState();
 
-// Per-section collapsed state (persisted). Holds 'pinned' / 'projects' when that whole section is
-// collapsed; when collapsed the section's project rows are skipped but the header stays visible.
-const COLLAPSED_SECTIONS_STORAGE_KEY = 'posse_collapsed_sections';
+// Per-section collapsed state — session-only by design. Every launch starts with RECENT /
+// PINNED / PROJECTS all expanded: persisting collapse hid whole sections on restart, which
+// read as "only one section at a time". Toggling still works independently within a session.
 const collapsedSections: Set<string> = new Set();
-
-function loadCollapsedSections(): void {
-  try {
-    const raw = JSON.parse(localStorage.getItem(COLLAPSED_SECTIONS_STORAGE_KEY) || '[]');
-    // Active and Recent are recovery surfaces: always expand them after a relaunch so a
-    // restored session cannot look missing merely because an old collapse bit survived.
-    if (Array.isArray(raw)) {
-      for (const k of raw) {
-        const key = String(k);
-        if (key === 'pinned' || key === 'projects') collapsedSections.add(key);
-      }
-    }
-  } catch {
-    /* ignore corrupt state */
-  }
-}
-
-function saveCollapsedSections(): void {
-  try {
-    localStorage.setItem(COLLAPSED_SECTIONS_STORAGE_KEY, JSON.stringify(Array.from(collapsedSections)));
-  } catch {
-    /* ignore quota errors */
-  }
-}
 
 function toggleSectionCollapsed(key: string): void {
   if (collapsedSections.has(key)) collapsedSections.delete(key);
   else collapsedSections.add(key);
-  saveCollapsedSections();
   renderSessionList();
 }
-
-loadCollapsedSections();
 
 function setProjectExpanded(key: string, expanded: boolean): void {
   if (expanded) expandedProjects.add(key);
@@ -5036,6 +5008,10 @@ function collectRecentSessionRows(): Array<{ time: number; el: HTMLElement }> {
 
 function renderSessionList(): void {
   const activeId = getActiveSessionId();
+  // `searching` was only defined inside renderProjectEntry; the section-collapse guards added
+  // in #127 referenced it here in renderSessionList scope → ReferenceError on every render,
+  // which is what truncated the sidebar to a single section. Define it once for the whole fn.
+  const searching = projectSearchQuery.length > 0;
   statusDbg('render', activeId || '', `liveCount=${sessionTitles.size}`);
 
   // Sync session status to the main process (read by the mobile client)
@@ -5803,12 +5779,16 @@ function mountLoadedAcpSessionView(
   }
   acpViews.set(acpId, view);
   view.handleStatus({ status: 'initializing', startupPhase: 'loading-session' });
+  // ACP status can reach the renderer before acpLoad resolves. Hold the ready/idle transition
+  // until the ordered replay has been painted so the composer cannot accept a prompt early.
+  view.beginReplayHistory();
 
   void window.posse.acpLoad(acpId, presetCommand, cwd, acpSessionId, undefined).then(async (info) => {
     if (acpViews.get(acpId) !== view) return;
-    // Drain the complete load stream before deciding whether user prompts are missing: some
-    // adapters may emit user_message_chunk late. If none exist, recover Posse's session-scoped
-    // locally submitted prompt history, then render the adapter's tool/agent replay.
+    // Drain the complete ordered load stream before painting it. The view buffers live updates
+    // while this happens, so replay remains ordered without losing notifications that arrive
+    // after the main process switches the manager to live delivery.
+
     const replayUpdates = [...(info.replayUpdates || [])];
     while (acpViews.get(acpId) === view) {
       const pending = await window.posse.acpDrainReplay(acpId);
@@ -5820,6 +5800,7 @@ function mountLoadedAcpSessionView(
     if (acpViews.get(acpId) === view) view.handleStatus(info);
   }).catch((error) => {
     if (acpViews.get(acpId) !== view) return;
+    view.finishReplayHistory();
     const raw = error instanceof Error ? error.message : String(error);
 
     // Session expired / deleted on the agent side — unrecoverable, remove silently.

@@ -58,6 +58,8 @@ export interface AcpSessionInfo {
   replayUpdates?: SessionUpdate[];
 }
 
+type SubagentCorrelationConfidence = 'inferred' | 'unknown';
+
 interface ToolCallState {
   toolCallId: string;
   title: string;
@@ -65,8 +67,22 @@ interface ToolCallState {
   content?: ToolCallContent[];
   expanded: boolean;
   activityGroup?: HTMLDetailsElement;
-  // Wall-clock when the call first appeared (for subagent elapsed display). Set once on creation.
+  // Wall-clock bounds for subagent elapsed display. Set once at creation/completion.
   startedMs?: number;
+  finishedMs?: number;
+  // Posse-local timeline identity. ACP proves the tool-call identity, but it does not prove
+  // that a delegation-like tool represents a distinct child ACP session.
+  timelineSequence: number;
+  runId: string | null;
+  isDelegationLike: boolean;
+  correlationConfidence: SubagentCorrelationConfidence;
+}
+
+interface UncorrelatedActivity {
+  id: string;
+  sequence: number;
+  title: string;
+  detail: string;
 }
 
 /** Tracks an agent-owned terminal and its accumulated output. */
@@ -174,7 +190,16 @@ export class AcpSessionView {
   private followsLatest = true;
   private messagesResizeObserver: ResizeObserver;
   private isReplayingHistory = false;
+  private queuedLiveUpdates: SessionUpdate[] = [];
+  private deferredReplayStatus: Partial<AcpSessionInfo> | null = null;
   private destroyed = false;
+  private timelineSequence = 0;
+  private runSequence = 0;
+  private activeRunId: string | null = null;
+  private subagentToggleEl: HTMLButtonElement;
+  private subagentDrawerEl: HTMLElement;
+  private subagentListEl: HTMLElement;
+  private uncorrelatedActivity: UncorrelatedActivity[] = [];
 
   constructor(
     sessionId: string,
@@ -223,7 +248,15 @@ export class AcpSessionView {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
         </button>
       </div>
+      <section class="acp-subagents-drawer" id="acp-subagents-${sessionId}" aria-label="Subagent activity" hidden>
+        <div class="acp-subagents-drawer-header">
+          <span>Subagents</span>
+          <span class="acp-subagents-drawer-note">Inferred from ACP tool activity</span>
+        </div>
+        <div class="acp-subagents-list" id="acp-subagents-list-${sessionId}"></div>
+      </section>
       <div class="acp-composer-dock">
+        <button class="acp-subagents-toggle" id="acp-subagents-toggle-${sessionId}" type="button" aria-expanded="false" aria-controls="acp-subagents-${sessionId}" title="Show subagent activity">Subagents <span class="acp-subagents-count">0</span></button>
         <div class="acp-composer">
           <div class="acp-queue" id="acp-queue-${sessionId}" style="display:none;"></div>
           <div class="acp-attachments" id="acp-attachments-${sessionId}" style="display:none;"></div>
@@ -262,6 +295,9 @@ export class AcpSessionView {
     this.cancelBtn = this.requiredElement(`#acp-cancel-${sessionId}`);
     this.statusbarEl = this.requiredElement(`#acp-statusbar-${sessionId}`);
     this.typingIndicatorEl = this.requiredElement(`#acp-typing-${sessionId}`);
+    this.subagentToggleEl = this.requiredElement(`#acp-subagents-toggle-${sessionId}`);
+    this.subagentDrawerEl = this.requiredElement(`#acp-subagents-${sessionId}`);
+    this.subagentListEl = this.requiredElement(`#acp-subagents-list-${sessionId}`);
 
     this.setupEvents();
     this.messagesResizeObserver = new ResizeObserver(() => {
@@ -294,6 +330,11 @@ export class AcpSessionView {
     this.sendBtn.addEventListener('click', () => this.submitComposer('queue'));
     this.cancelBtn.addEventListener('click', () => this.cancelPrompt());
     this.jumpToBottomBtn.addEventListener('click', () => this.scrollToBottom(true));
+    this.subagentToggleEl.addEventListener('click', () => {
+      const open = this.subagentDrawerEl.hidden;
+      this.subagentDrawerEl.hidden = !open;
+      this.subagentToggleEl.setAttribute('aria-expanded', String(open));
+    });
     this.scrollEl.addEventListener('scroll', () => {
       this.followsLatest = this.isNearBottom();
       this.updateJumpToBottomVisibility();
@@ -744,6 +785,7 @@ export class AcpSessionView {
       this.promptHistory.add(message.text);
       this.promptHistory.save(this.promptHistoryKey);
     }
+    this.activeRunId = `run-${++this.runSequence}`;
     this.addUserMessage(message.text, message.images);
     this.setPrompting(true);
 
@@ -753,11 +795,11 @@ export class AcpSessionView {
       this.addSystemMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.setPrompting(false);
+      this.activeRunId = null;
       this.drainPromptQueue();
     }
   }
 
-  /**
   private drainPromptQueue(): void {
     const next = this.promptQueue.next();
     this.renderQueue();
@@ -781,8 +823,17 @@ export class AcpSessionView {
     this.sendBtn.title = on ? 'Queue message (Enter)' : 'Send (Enter)';
   }
 
-  // Handle a session/update notification from the agent
+  // Handle a session/update notification from the agent. Live updates that arrive while replay is
+  // being painted are queued so replay remains ordered and the same update is not rendered twice.
   handleUpdate(update: SessionUpdate): void {
+    if (this.isReplayingHistory) {
+      this.queuedLiveUpdates.push(update);
+      return;
+    }
+    this.applyUpdate(update);
+  }
+
+  private applyUpdate(update: SessionUpdate): void {
     if (update.sessionUpdate !== 'user_message_chunk') this.currentUserMessageEl = null;
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
@@ -853,12 +904,16 @@ export class AcpSessionView {
     for (const prompt of prompts) this.addUserMessage(prompt);
   }
 
+  beginReplayHistory(): void {
+    if (!this.destroyed) this.isReplayingHistory = true;
+  }
+
   async replayUpdates(updates: SessionUpdate[], batchSize = 100): Promise<void> {
-    if (updates.length === 0 || this.destroyed) return;
+    if (this.destroyed) return;
     this.isReplayingHistory = true;
     try {
       for (let index = 0; index < updates.length && !this.destroyed; index += 1) {
-        this.handleUpdate(updates[index]);
+        this.applyUpdate(updates[index]);
         if ((index + 1) % batchSize === 0) {
           await new Promise<void>((resolve) => {
             let settled = false;
@@ -874,9 +929,23 @@ export class AcpSessionView {
         }
       }
     } finally {
-      this.isReplayingHistory = false;
-      if (!this.destroyed) this.scrollToBottom(true);
+      this.finishReplayHistory();
     }
+  }
+
+  finishReplayHistory(): void {
+    if (this.destroyed) {
+      this.queuedLiveUpdates = [];
+      this.deferredReplayStatus = null;
+      return;
+    }
+    this.isReplayingHistory = false;
+    const liveUpdates = this.queuedLiveUpdates.splice(0);
+    for (const update of liveUpdates) this.applyUpdate(update);
+    this.scrollToBottom(true);
+    const deferredStatus = this.deferredReplayStatus;
+    this.deferredReplayStatus = null;
+    if (deferredStatus) this.handleStatus(deferredStatus);
   }
 
   // #112: read the current session status (e.g. 'prompting') so a restart can decide
@@ -886,6 +955,10 @@ export class AcpSessionView {
   }
 
   handleStatus(info: Partial<AcpSessionInfo>): void {
+    if (this.isReplayingHistory && info.status === 'idle') {
+      this.deferredReplayStatus = info;
+      return;
+    }
     if (info.sessionId) {
       const stableHistoryKey = this.historyStorageKey(info.sessionId);
       if (stableHistoryKey !== this.promptHistoryKey) {
@@ -1097,30 +1170,62 @@ export class AcpSessionView {
 
   private handleToolCall(update: ToolCallUpdate): void {
     this.ensureConversationStarted();
+    const existing = this.toolCalls.get(update.toolCallId);
+    if (existing) {
+      existing.title = update.title || existing.title;
+      existing.status = update.status || existing.status;
+      existing.isDelegationLike = this.guessToolKind(existing.title) === 'subagent';
+      existing.correlationConfidence = existing.isDelegationLike ? 'inferred' : 'unknown';
+      if (update.content) existing.content = update.content;
+      if (this.isTerminalToolStatus(existing.status) && !existing.finishedMs) existing.finishedMs = Date.now();
+      const focusedSubagentToolId = this.focusedSubagentToolId();
+      this.renderToolCall(existing, true);
+      this.renderSubagentTimeline(focusedSubagentToolId);
+      return;
+    }
+    const title = update.title || 'Tool call';
+    const status = update.status || 'pending';
     const state: ToolCallState = {
       toolCallId: update.toolCallId,
-      title: update.title || 'Tool call',
-      status: update.status || 'pending',
+      title,
+      status,
       content: update.content,
-      expanded: this.conversationPreferences.expandToolsByDefault || update.status === 'failed',
+      expanded: this.conversationPreferences.expandToolsByDefault || status === 'failed',
       activityGroup: this.ensureActivityGroup(),
       startedMs: Date.now(),
+      finishedMs: this.isTerminalToolStatus(status) ? Date.now() : undefined,
+      timelineSequence: ++this.timelineSequence,
+      runId: this.activeRunId,
+      isDelegationLike: this.guessToolKind(title) === 'subagent',
+      correlationConfidence: this.guessToolKind(title) === 'subagent' ? 'inferred' : 'unknown',
     };
     this.toolCalls.set(update.toolCallId, state);
+    const focusedSubagentToolId = this.focusedSubagentToolId();
     this.renderToolCall(state);
+    this.renderSubagentTimeline(focusedSubagentToolId);
   }
 
   private handleToolCallUpdate(update: ToolCallProgressUpdate): void {
     const state = this.toolCalls.get(update.toolCallId);
-    if (!state) return;
+    if (!state) {
+      this.addUncorrelatedActivity('Tool update', update.title || `Unknown tool ${update.toolCallId}`);
+      return;
+    }
 
     const previousStatus = state.status;
     state.status = update.status || state.status;
     if (update.content) state.content = update.content;
-    if (update.title) state.title = update.title;
+    if (update.title) {
+      state.title = update.title;
+      state.isDelegationLike = this.guessToolKind(state.title) === 'subagent';
+      state.correlationConfidence = state.isDelegationLike ? 'inferred' : 'unknown';
+    }
+    if (this.isTerminalToolStatus(state.status) && !state.finishedMs) state.finishedMs = Date.now();
     if (state.status === 'failed' && previousStatus !== 'failed') state.expanded = true;
 
+    const focusedSubagentToolId = this.focusedSubagentToolId();
     this.renderToolCall(state, true);
+    this.renderSubagentTimeline(focusedSubagentToolId);
     if (state.activityGroup) this.updateActivityGroupSummary(state.activityGroup);
   }
 
@@ -1250,11 +1355,16 @@ export class AcpSessionView {
     if (!raw.toolCallId || !raw.content) return;
 
     const state = this.toolCalls.get(raw.toolCallId);
-    if (!state) return;
+    if (!state) {
+      this.addUncorrelatedActivity('Tool activity', `Unknown tool ${raw.toolCallId}`);
+      return;
+    }
 
     if (!state.content) state.content = [];
     state.content.push(raw.content);
+    const focusedSubagentToolId = this.focusedSubagentToolId();
     this.renderToolCall(state, true);
+    this.renderSubagentTimeline(focusedSubagentToolId);
   }
 
   // ========== Plan rendering ==========
@@ -1481,14 +1591,17 @@ export class AcpSessionView {
       });
     }
 
-    const kind = this.guessToolKind(state.title);
+    const kind = state.isDelegationLike ? 'subagent' : this.guessToolKind(state.title);
     const kindIcon = this.toolKindIcon(kind);
-    const isSubagent = kind === 'subagent';
+    const isSubagent = state.isDelegationLike;
     el.className = `acp-tool-call acp-tool-${state.status}${isSubagent ? ' acp-tool-subagent' : ''}`;
     (el as HTMLDetailsElement).open = state.expanded;
 
     const statusIcon = this.toolStatusIcon(state.status);
     const statusLabel = this.toolStatusLabel(state.status);
+    const focusedToolSummary = document.activeElement instanceof HTMLElement
+      && document.activeElement.closest<HTMLElement>('.acp-tool-call') === el
+      && document.activeElement.closest('summary') !== null;
 
     // Subagent panels get a richer collapsed summary: nested-window icon, task title, live
     // elapsed, status, and a one-line latest-activity preview drawn from the tool-call content.
@@ -1496,7 +1609,7 @@ export class AcpSessionView {
     // content stays available under the disclosure.
     let summaryExtras = '';
     if (isSubagent) {
-      const elapsed = this.formatElapsed(state.startedMs, state.status);
+      const elapsed = this.formatElapsed(state.startedMs, state.status, state.finishedMs);
       const preview = this.subagentPreview(state.content);
       summaryExtras = `
         <span class="acp-subagent-elapsed" aria-hidden="true">${this.escapeHtml(elapsed)}</span>
@@ -1536,6 +1649,7 @@ export class AcpSessionView {
       ${contentHtml}
     `;
     this.linkifyPlainUrls(el, true);
+    if (focusedToolSummary) this.requiredElement<HTMLElement>('summary', el).focus();
 
     this.maybeReconcileSubagentTick();
     this.scrollToBottom();
@@ -1557,12 +1671,122 @@ export class AcpSessionView {
     return single.length > 140 ? single.slice(0, 140) + '…' : single;
   }
 
-  // Human-readable elapsed for a subagent: from startedMs to now while running, frozen once
-  // the call reaches a terminal status (completed/failed).
-  private formatElapsed(startedMs: number | undefined, status: ToolCallStatus): string {
+  // Dedicated drawer for delegated activity. Tool-call identity is protocol-proven; the
+  // delegated-agent relationship is explicitly inferred because ACP supplies no child session ID.
+  private focusedSubagentToolId(): string | undefined {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return undefined;
+    return active.closest<HTMLElement>('.acp-subagent-timeline-card')?.dataset.subagentToolId;
+  }
+
+  private renderSubagentTimeline(focusedSubagentToolId?: string): void {
+    const subagents = Array.from(this.toolCalls.values())
+      .filter(state => state.isDelegationLike)
+      .sort((a, b) => a.timelineSequence - b.timelineSequence);
+    const count = this.subagentToggleEl.querySelector<HTMLElement>('.acp-subagents-count');
+    if (count) count.textContent = String(subagents.length);
+    this.subagentToggleEl.hidden = subagents.length === 0 && this.uncorrelatedActivity.length === 0;
+    if (subagents.length === 0 && this.uncorrelatedActivity.length === 0) {
+      this.subagentDrawerEl.hidden = true;
+      this.subagentToggleEl.setAttribute('aria-expanded', 'false');
+      return;
+    }
+
+    const focusedElement = document.activeElement;
+    const focusedCardId = focusedSubagentToolId || (focusedElement instanceof HTMLElement
+      ? focusedElement.closest<HTMLElement>('[data-subagent-tool-id]')?.dataset.subagentToolId
+      : undefined);
+    const openCardIds = new Set(
+      Array.from(this.subagentListEl.querySelectorAll<HTMLDetailsElement>('[data-subagent-tool-id][open]'))
+        .map(card => card.dataset.subagentToolId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    this.subagentListEl.innerHTML = '';
+    for (const state of subagents) {
+      const card = document.createElement('details');
+      card.className = `acp-subagent-timeline-card acp-tool-${state.status}`;
+      card.dataset.subagentToolId = state.toolCallId;
+      card.open = openCardIds.has(state.toolCallId) || state.status === 'failed';
+      const summary = document.createElement('summary');
+      summary.className = 'acp-subagent-timeline-summary';
+      summary.innerHTML = `
+        <span class="acp-disclosure-chevron" aria-hidden="true">›</span>
+        <span class="acp-tool-kind-icon">${this.toolKindIcon('subagent')}</span>
+        <span class="acp-subagent-timeline-title">${this.escapeHtml(state.title)}</span>
+        <span class="acp-subagent-confidence" title="ACP identifies this tool call, but does not provide a child-session relationship">Inferred</span>
+        <span class="acp-subagent-elapsed">${this.escapeHtml(this.formatElapsed(state.startedMs, state.status, state.finishedMs))}</span>
+        <span class="acp-subagent-status acp-subagent-status-${state.status}">${this.toolStatusIcon(state.status)}<span class="acp-subagent-status-text">${this.escapeHtml(this.toolStatusLabel(state.status))}</span></span>`;
+      const body = document.createElement('div');
+      body.className = 'acp-subagent-timeline-body';
+      const evidence = document.createElement('p');
+      evidence.className = 'acp-subagent-evidence';
+      evidence.textContent = `Tool call ${state.toolCallId} · Posse run ${state.runId || 'replay'} · inferred from delegation-like ACP tool activity.`;
+      body.appendChild(evidence);
+      const preview = this.subagentPreview(state.content);
+      if (preview) {
+        const activity = document.createElement('p');
+        activity.className = 'acp-subagent-timeline-activity';
+        activity.textContent = preview;
+        body.appendChild(activity);
+      }
+      if (state.content?.length) {
+        const result = document.createElement('pre');
+        result.className = 'acp-subagent-timeline-result';
+        result.textContent = state.content
+          .filter(content => content.type === 'content' && content.content?.type === 'text')
+          .map(content => content.type === 'content' && content.content?.type === 'text' ? content.content.text : '')
+          .filter(Boolean)
+          .join('\n');
+        if (result.textContent) body.appendChild(result);
+      }
+      card.append(summary, body);
+      this.subagentListEl.appendChild(card);
+    }
+    if (this.uncorrelatedActivity.length > 0) this.renderUncorrelatedActivity();
+    if (focusedCardId) {
+      const restoredCard = Array.from(this.subagentListEl.querySelectorAll<HTMLElement>('[data-subagent-tool-id]'))
+        .find(card => card.dataset.subagentToolId === focusedCardId);
+      restoredCard?.querySelector<HTMLElement>('summary')?.focus();
+    }
+  }
+
+  private renderUncorrelatedActivity(): void {
+    const section = document.createElement('section');
+    section.className = 'acp-subagent-uncorrelated';
+    const heading = document.createElement('h3');
+    heading.textContent = 'Uncorrelated activity';
+    section.appendChild(heading);
+    for (const event of this.uncorrelatedActivity) {
+      const row = document.createElement('div');
+      row.className = 'acp-subagent-uncorrelated-row';
+      row.textContent = `${event.title}: ${event.detail}`;
+      section.appendChild(row);
+    }
+    this.subagentListEl.appendChild(section);
+  }
+
+  private addUncorrelatedActivity(title: string, detail: string): void {
+    const last = this.uncorrelatedActivity[this.uncorrelatedActivity.length - 1];
+    if (last?.title === title && last.detail === detail) return;
+    this.uncorrelatedActivity.push({
+      id: `activity-${++this.timelineSequence}`,
+      sequence: this.timelineSequence,
+      title,
+      detail,
+    });
+    if (this.uncorrelatedActivity.length > 20) this.uncorrelatedActivity.shift();
+    this.renderSubagentTimeline();
+  }
+
+  private isTerminalToolStatus(status: ToolCallStatus): boolean {
+    return status === 'completed' || status === 'failed' || status === 'cancelled';
+  }
+
+  // Human-readable elapsed for a subagent: from startedMs to now while running, frozen at the
+  // first terminal update. ACP tool status may also be cancelled, not only completed/failed.
+  private formatElapsed(startedMs: number | undefined, status: ToolCallStatus, finishedMs?: number): string {
     if (!startedMs) return '';
-    const terminal = status === 'completed' || status === 'failed';
-    const end = terminal ? startedMs : Date.now();
+    const end = this.isTerminalToolStatus(status) ? (finishedMs || Date.now()) : Date.now();
     const ms = Math.max(0, end - startedMs);
     const s = Math.floor(ms / 1000);
     if (s < 60) return `${s}s`;
@@ -1579,7 +1803,8 @@ export class AcpSessionView {
       case 'in_progress': return 'Running';
       case 'completed': return 'Completed';
       case 'failed': return 'Failed';
-      default: return '';
+      case 'cancelled': return 'Cancelled';
+      default: return 'Unknown';
     }
   }
 
@@ -1587,7 +1812,7 @@ export class AcpSessionView {
   // non-terminal state, and is stopped otherwise (no steady timer when idle).
   private maybeReconcileSubagentTick(): void {
     const hasActive = Array.from(this.toolCalls.values()).some(
-      s => this.guessToolKind(s.title) === 'subagent' && (s.status === 'pending' || s.status === 'in_progress'),
+      s => s.isDelegationLike && (s.status === 'pending' || s.status === 'in_progress'),
     );
     if (hasActive && this.subagentTickHandle === null && !this.destroyed) {
       this.subagentTickHandle = setInterval(() => this.tickSubagentElapsed(), 1000);
@@ -1606,13 +1831,14 @@ export class AcpSessionView {
     }
     let stillActive = false;
     for (const state of this.toolCalls.values()) {
-      if (this.guessToolKind(state.title) !== 'subagent') continue;
+      if (!state.isDelegationLike) continue;
       if (state.status !== 'pending' && state.status !== 'in_progress') continue;
       stillActive = true;
       const el = this.toolCallEls.get(state.toolCallId);
       const elapsedEl = el?.querySelector<HTMLElement>('.acp-subagent-elapsed');
-      if (elapsedEl) elapsedEl.textContent = this.formatElapsed(state.startedMs, state.status);
+      if (elapsedEl) elapsedEl.textContent = this.formatElapsed(state.startedMs, state.status, state.finishedMs);
     }
+    this.renderSubagentTimeline();
     if (!stillActive && this.subagentTickHandle !== null) {
       clearInterval(this.subagentTickHandle);
       this.subagentTickHandle = null;

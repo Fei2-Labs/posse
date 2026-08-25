@@ -253,23 +253,54 @@ test('ACP activity is grouped into a single collapsible summary', () => {
   assert.match(styles, /\.acp-activity-content \{[\s\S]*flex-direction: column;/);
 });
 
-test('renderer starts on All and restores every persisted active ACP session', () => {
+test('renderer starts on All and leaves stale ACP sessions resumable on demand', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
   assert.match(source, /let activeAgentTab = 'all';/);
   assert.match(source, /async function restoreActiveAcpSessions\(\)/);
-  // #82: the foreground session is restored first so it isn't queued behind background
-  // restores, but the order still covers every persisted session exactly once.
   assert.match(source, /const restoreOrder = \[target, \.\.\.sessions\.filter\(saved => saved !== target\)\];/);
-  assert.match(source, /for \(const saved of restoreOrder\)/);
-  assert.match(source, /await restoreDaemonSessions\(\);[\s\S]*await restoreActiveAcpSessions\(\);/);
-  assert.match(source, /await restoreActiveAcpSessions\(\);[\s\S]*await refreshProjectsData\(\);/);
+  assert.match(source, /ACP sessions are NOT auto-restored on startup/);
+  assert.match(source, /await restoreDaemonSessions\(\);[\s\S]*await refreshProjectsData\(\);/);
+  assert.doesNotMatch(source, /await restoreDaemonSessions\(\);[\s\S]*await restoreActiveAcpSessions\(\);/);
 });
 
-test('restored recovery sections reopen and close rendering yields a paint first', () => {
+test('section collapse is session-only and close rendering yields a paint first', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
-  assert.match(source, /if \(key === 'pinned' \|\| key === 'projects'\) collapsedSections\.add\(key\)/);
+  assert.match(source, /Per-section collapsed state — session-only by design/);
+  assert.doesNotMatch(source, /COLLAPSED_SECTIONS_STORAGE_KEY/);
   assert.match(source, /function scheduleSessionChromeRender\([\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*window\.setTimeout/);
   assert.match(source, /removeSessionRowsInPlace\(\[id\]\);[\s\S]*scheduleSessionChromeRender\(wasActive\)/);
+});
+
+test('ACP subagent timeline keeps tool identity and labels delegation inference', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  assert.match(source, /type SubagentCorrelationConfidence = 'inferred' \| 'unknown'/);
+  assert.match(source, /existing = this\.toolCalls\.get\(update\.toolCallId\)/);
+  assert.match(source, /timelineSequence: \+\+this\.timelineSequence/);
+  assert.match(source, /runId: this\.activeRunId/);
+  assert.match(source, /private renderSubagentTimeline\(focusedSubagentToolId\?: string\): void/);
+  assert.match(source, /Inferred from ACP tool activity/);
+  assert.match(source, /Uncorrelated activity/);
+  assert.match(source, /this\.renderSubagentTimeline\(\);/);
+  assert.match(styles, /\.acp-subagents-drawer \{/);
+  assert.match(styles, /\.acp-subagent-confidence \{/);
+  assert.match(styles, /\.acp-subagent-uncorrelated \{/);
+});
+
+test('ACP subagent redraws freeze terminal elapsed time and preserve disclosure interaction state', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  assert.match(source, /if \(this\.isTerminalToolStatus\(existing\.status\) && !existing\.finishedMs\) existing\.finishedMs = Date\.now\(\)/);
+  assert.match(source, /finishedMs: this\.isTerminalToolStatus\(status\) \? Date\.now\(\) : undefined/);
+  assert.match(source, /if \(this\.isTerminalToolStatus\(state\.status\) && !state\.finishedMs\) state\.finishedMs = Date\.now\(\)/);
+  assert.match(source, /isDelegationLike: this\.guessToolKind\(title\) === 'subagent'/);
+  assert.match(source, /\.filter\(state => state\.isDelegationLike\)/);
+  assert.match(source, /card\.dataset\.subagentToolId = state\.toolCallId/);
+  assert.match(source, /openCardIds\.has\(state\.toolCallId\) \|\| state\.status === 'failed'/);
+  assert.match(source, /const focusedCardId = focusedSubagentToolId \|\| \(focusedElement instanceof HTMLElement/);
+  assert.match(source, /restoredCard\?\.querySelector<HTMLElement>\('summary'\)\?\.focus\(\)/);
+  assert.match(source, /const focusedToolSummary = document\.activeElement instanceof HTMLElement/);
+  assert.match(source, /if \(focusedToolSummary\) this\.requiredElement<HTMLElement>\('summary', el\)\.focus\(\)/);
+  assert.match(source, /if \(!state\.isDelegationLike\) continue/);
 });
 
 test('app theme changes are explicit and structured sessions consume live tokens', () => {

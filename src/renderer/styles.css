@@ -4490,6 +4490,41 @@ details[open] > summary .acp-disclosure-chevron { transform: rotate(90deg); }
 }
 .acp-tool-subagent > .acp-tool-content { margin-left: 10px; }
 
+/* Dedicated Subagents drawer. ACP confirms tool-call identity but not a child-session graph,
+   so the drawer uses an explicit inferred badge rather than fake nested session chrome. */
+.acp-subagents-toggle {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  margin: 8px auto 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 6px;
+  background: var(--bg-secondary, #161b22);
+  color: var(--text-secondary, #8b949e);
+  font: 600 11px var(--font-mono, 'SF Mono', monospace);
+  cursor: pointer;
+}
+.acp-subagents-toggle:not([hidden]) { display: inline-flex; }
+.acp-subagents-toggle:hover { color: var(--text-primary, #e6edf3); border-color: var(--text-muted, #6e7681); }
+.acp-subagents-toggle:focus-visible { outline: 2px solid var(--accent-color, #58a6ff); outline-offset: 2px; }
+.acp-subagents-count { min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--bg-tertiary, #0d1117); text-align: center; }
+.acp-subagents-drawer { flex: 0 0 auto; max-height: min(38vh, 360px); overflow-y: auto; border-top: 1px solid var(--border-color, #30363d); border-bottom: 1px solid var(--border-color, #30363d); background: var(--bg-secondary, #161b22); }
+.acp-subagents-drawer-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 8px 16px 5px; color: var(--text-primary, #e6edf3); font-size: 12px; font-weight: 700; }
+.acp-subagents-drawer-note { color: var(--text-muted, #6e7681); font-size: 10.5px; font-weight: 400; }
+.acp-subagents-list { display: flex; flex-direction: column; gap: 5px; padding: 0 16px 10px; }
+.acp-subagent-timeline-card { border: 1px solid var(--border-default, #30363d); border-radius: 7px; background: var(--bg-primary, #0d1117); overflow: hidden; }
+.acp-subagent-timeline-summary { display: flex; min-width: 0; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; list-style: none; font-size: 12px; }
+.acp-subagent-timeline-summary::-webkit-details-marker { display: none; }
+.acp-subagent-timeline-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary, #e6edf3); font-weight: 600; }
+.acp-subagent-confidence { flex: 0 0 auto; padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--text-muted, #6e7681) 50%, transparent); border-radius: 8px; color: var(--text-muted, #6e7681); font-size: 10px; }
+.acp-subagent-timeline-body { padding: 0 10px 9px 28px; }
+.acp-subagent-evidence { margin: 0 0 5px; color: var(--text-muted, #6e7681); font-size: 10.5px; line-height: 1.4; }
+.acp-subagent-timeline-activity { margin: 0 0 5px; color: var(--text-secondary, #8b949e); font-size: 11.5px; overflow-wrap: break-word; }
+.acp-subagent-timeline-result { max-height: 160px; margin: 0; padding: 7px; overflow: auto; border-radius: 4px; background: var(--bg-tertiary, #0d1117); color: var(--text-secondary, #8b949e); font: 11px/1.4 var(--font-mono, 'SF Mono', monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.acp-subagent-uncorrelated { padding: 6px 8px; border: 1px dashed var(--border-color, #30363d); border-radius: 7px; color: var(--text-muted, #6e7681); }
+.acp-subagent-uncorrelated h3 { margin: 0 0 4px; font-size: 11px; }
+.acp-subagent-uncorrelated-row { font-size: 10.5px; overflow-wrap: anywhere; }
 
 @keyframes acp-spin {
   to { transform: rotate(360deg); }
