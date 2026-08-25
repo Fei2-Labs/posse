@@ -885,7 +885,7 @@ function defaultClaude1mModel(): string | null {
     if (!model || /\[\d+(?:\.\d+)?m\]$/i.test(model)) return null;
     // Only stable Claude Code aliases are safe to extend. Full provider model IDs and
     // custom aliases may not accept the [1m] suffix, so leave them at their own default.
-    return /^(sonnet|opus|fable)$/i.test(model) ? `${model}[1m]` : null;
+    return /^(sonnet|opus)$/i.test(model) ? `${model}[1m]` : null;
   } catch {
     // Missing/malformed user settings must never block terminal creation.
     return null;

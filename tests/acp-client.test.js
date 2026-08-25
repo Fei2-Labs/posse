@@ -56,6 +56,15 @@ test('new built-in Claude ACP sessions receive the current model family 1M varia
   assert.match(mainSource, /backend\.create\(cwd, launchCommand/);
 });
 
+test('fable is excluded from the built-in Claude 1M model allowlist', () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
+  const match = mainSource.match(/return \/\^\(([a-z|]+)\)\$\/i\.test\(model\) \? `\$\{model\}\[1m\]` : null;/);
+  assert.ok(match, 'expected the defaultClaude1mModel allowlist regex to be present');
+  const allowlist = match[1].split('|');
+  assert.deepEqual(allowlist, ['sonnet', 'opus']);
+  assert.ok(!allowlist.includes('fable'));
+});
+
 test('routes exact built-in presets to ACP', () => {
   const presets = [
     'claude --dangerously-skip-permissions',
