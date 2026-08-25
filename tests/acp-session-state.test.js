@@ -303,6 +303,20 @@ test('ACP subagent redraws freeze terminal elapsed time and preserve disclosure 
   assert.match(source, /if \(!state\.isDelegationLike\) continue/);
 });
 
+test('ACP subagents drawer hides completed cards by default behind a reveal toggle', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/acp-session-view.ts'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/styles.css'), 'utf8');
+  assert.match(source, /private showCompletedSubagents = false;/);
+  assert.match(source, /const completedSubagents = allSubagents\.filter\(state => this\.isTerminalToolStatus\(state\.status\)\)/);
+  assert.match(source, /const activeSubagents = allSubagents\.filter\(state => !this\.isTerminalToolStatus\(state\.status\)\)/);
+  assert.match(source, /const subagents = this\.showCompletedSubagents \? allSubagents : activeSubagents;/);
+  assert.match(source, /if \(count\) count\.textContent = String\(allSubagents\.length\);/);
+  assert.match(source, /this\.showCompletedSubagents = !this\.showCompletedSubagents;/);
+  assert.match(source, /\$\{completedSubagents\.length\} completed — show/);
+  assert.match(source, /\$\{completedSubagents\.length\} completed — hide/);
+  assert.match(styles, /\.acp-subagents-completed-toggle \{/);
+});
+
 test('app theme changes are explicit and structured sessions consume live tokens', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.ts'), 'utf8');
   // Theme definitions live in the shared canonical list (src/shared/app-themes.ts) since the

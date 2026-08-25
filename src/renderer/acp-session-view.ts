@@ -199,7 +199,9 @@ export class AcpSessionView {
   private subagentToggleEl: HTMLButtonElement;
   private subagentDrawerEl: HTMLElement;
   private subagentListEl: HTMLElement;
+  private subagentCompletedToggleEl: HTMLButtonElement;
   private uncorrelatedActivity: UncorrelatedActivity[] = [];
+  private showCompletedSubagents = false;
 
   constructor(
     sessionId: string,
@@ -252,6 +254,7 @@ export class AcpSessionView {
         <div class="acp-subagents-drawer-header">
           <span>Subagents</span>
           <span class="acp-subagents-drawer-note">Inferred from ACP tool activity</span>
+          <button class="acp-subagents-completed-toggle" id="acp-subagents-completed-toggle-${sessionId}" type="button" hidden></button>
         </div>
         <div class="acp-subagents-list" id="acp-subagents-list-${sessionId}"></div>
       </section>
@@ -298,6 +301,7 @@ export class AcpSessionView {
     this.subagentToggleEl = this.requiredElement(`#acp-subagents-toggle-${sessionId}`);
     this.subagentDrawerEl = this.requiredElement(`#acp-subagents-${sessionId}`);
     this.subagentListEl = this.requiredElement(`#acp-subagents-list-${sessionId}`);
+    this.subagentCompletedToggleEl = this.requiredElement(`#acp-subagents-completed-toggle-${sessionId}`);
 
     this.setupEvents();
     this.messagesResizeObserver = new ResizeObserver(() => {
@@ -334,6 +338,10 @@ export class AcpSessionView {
       const open = this.subagentDrawerEl.hidden;
       this.subagentDrawerEl.hidden = !open;
       this.subagentToggleEl.setAttribute('aria-expanded', String(open));
+    });
+    this.subagentCompletedToggleEl.addEventListener('click', () => {
+      this.showCompletedSubagents = !this.showCompletedSubagents;
+      this.renderSubagentTimeline();
     });
     this.scrollEl.addEventListener('scroll', () => {
       this.followsLatest = this.isNearBottom();
@@ -1680,13 +1688,26 @@ export class AcpSessionView {
   }
 
   private renderSubagentTimeline(focusedSubagentToolId?: string): void {
-    const subagents = Array.from(this.toolCalls.values())
+    const allSubagents = Array.from(this.toolCalls.values())
       .filter(state => state.isDelegationLike)
       .sort((a, b) => a.timelineSequence - b.timelineSequence);
+    const completedSubagents = allSubagents.filter(state => this.isTerminalToolStatus(state.status));
+    const activeSubagents = allSubagents.filter(state => !this.isTerminalToolStatus(state.status));
+    const subagents = this.showCompletedSubagents ? allSubagents : activeSubagents;
+    // Badge reflects total subagents (active + completed), independent of the visibility toggle.
     const count = this.subagentToggleEl.querySelector<HTMLElement>('.acp-subagents-count');
-    if (count) count.textContent = String(subagents.length);
-    this.subagentToggleEl.hidden = subagents.length === 0 && this.uncorrelatedActivity.length === 0;
-    if (subagents.length === 0 && this.uncorrelatedActivity.length === 0) {
+    if (count) count.textContent = String(allSubagents.length);
+    this.subagentToggleEl.hidden = allSubagents.length === 0 && this.uncorrelatedActivity.length === 0;
+    if (completedSubagents.length > 0) {
+      this.subagentCompletedToggleEl.hidden = false;
+      this.subagentCompletedToggleEl.textContent = this.showCompletedSubagents
+        ? `${completedSubagents.length} completed — hide`
+        : `${completedSubagents.length} completed — show`;
+      this.subagentCompletedToggleEl.setAttribute('aria-expanded', String(this.showCompletedSubagents));
+    } else {
+      this.subagentCompletedToggleEl.hidden = true;
+    }
+    if (allSubagents.length === 0 && this.uncorrelatedActivity.length === 0) {
       this.subagentDrawerEl.hidden = true;
       this.subagentToggleEl.setAttribute('aria-expanded', 'false');
       return;
