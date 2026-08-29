@@ -44,6 +44,8 @@ const {
   preferredFullAccessConfig,
   preferredContextWindowConfig,
   preferredAllowPermission,
+  ACP_PROMPT_MAX_BYTES,
+  validateAcpPromptPayload,
 } = loadAcpClientModule();
 const acpClientSource = fs.readFileSync(path.join(__dirname, '..', 'src/main/acp-client.ts'), 'utf8');
 
@@ -216,4 +218,61 @@ test('app shutdown destroys ACP processes without reporting user-initiated close
   assert.match(managerSource, /destroyAll\(notify = true\)/);
   assert.match(managerSource, /this\.destroy\(id, notify\)/);
   assert.match(mainSource, /acpManager\.destroyAll\(false\)/);
+});
+
+test('ACP prompt validation accepts structured prompts with JSON-sensitive text', () => {
+  const result = validateAcpPromptPayload({
+    sessionId: 'session-1',
+    prompt: [{ type: 'text', text: 'slash \\ quote " line\nbreak\tcontrol \u0001 unicode 雪' }],
+  });
+  assert.equal(result.ok, true);
+});
+
+test('ACP prompt validation accepts lone surrogates using JSON well-formed escaping', () => {
+  const result = validateAcpPromptPayload({
+    sessionId: 'session-1',
+    prompt: [{ type: 'text', text: 'invalid UTF-16: \ud800' }],
+  });
+  assert.equal(result.ok, true);
+});
+
+test('ACP prompt validation rejects oversized payloads without exposing prompt content', () => {
+  const secret = 'provider-token-not-for-errors';
+  const result = validateAcpPromptPayload({
+    sessionId: 'session-1',
+    prompt: [{ type: 'text', text: 'x'.repeat(ACP_PROMPT_MAX_BYTES) + secret }],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /too large/);
+  assert.ok(!result.error.includes(secret));
+});
+
+test('ACP prompt validation accepts the maximum serialized request and rejects the next byte', () => {
+  const makePayload = (text) => ({
+    sessionId: 'session-1',
+    prompt: [{ type: 'text', text }],
+  });
+  let low = 0;
+  let high = ACP_PROMPT_MAX_BYTES;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const payload = makePayload('x'.repeat(middle));
+    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') <= ACP_PROMPT_MAX_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  assert.equal(validateAcpPromptPayload(makePayload('x'.repeat(low))).ok, true);
+  assert.equal(validateAcpPromptPayload(makePayload('x'.repeat(low + 1))).ok, false);
+});
+
+test('ACP prompt validation rejects unserializable payloads without serializing by hand', () => {
+  const circular = {};
+  circular.self = circular;
+  const result = validateAcpPromptPayload(circular);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /encoded as JSON/);
+});
+
+test('ACP prompt sends the validated structured payload directly to the ACP request method', () => {
+  assert.match(acpClientSource, /session\.context\.request\(acp\.methods\.agent\.session\.prompt, payload\)/);
+  assert.doesNotMatch(acpClientSource, /JSON\.stringify\(.*prompt/);
 });

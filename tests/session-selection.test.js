@@ -83,6 +83,14 @@ test('resuming a closed session redraws Recent after its persisted row is remove
   assert.ok(redrawAt > removeAt && redrawAt < returnAt, 'expected redraw after removal and before return');
 });
 
+test('ACP resume explains malformed or oversized history requests without suggesting retry', () => {
+  assert.match(appSource, /request body is not valid JSON/);
+  assert.match(appSource, /invalid \(\?:escaped character/);
+  assert.match(appSource, /invalid \(\?:escaped character\|json\)/);
+  assert.match(appSource, /maximum context length/);
+  assert.match(appSource, /Start a new conversation; the recent session was kept for reference/);
+});
+
 test('Active and Recent session rows share the compact sidebar grid', () => {
   const rowRule = stylesSource.match(/\.nav-session \{([\s\S]*?)\}/)?.[1] || '';
   const titleRule = stylesSource.match(/(?:^|\n)\.nav-session-title \{([\s\S]*?)\}/)?.[1] || '';

@@ -5810,6 +5810,18 @@ function mountLoadedAcpSessionView(
       return;
     }
 
+    // Claude can reject a resumed history after the adapter rebuilds its upstream API
+    // request. Retrying the same persisted history cannot repair malformed JSON or a
+    // request that has grown beyond the provider's limit, so tell the user how to recover.
+    const isInvalidHistoryRequest = /request body is not valid JSON|invalid (?:escaped character|json)|request (?:body )?(?:too large|exceeds? (?:the )?(?:maximum )?(?:allowed )?size)|payload too large|maximum context length/i.test(raw);
+    if (isInvalidHistoryRequest) {
+      view.handleStatus({
+        status: 'error',
+        errorMessage: 'This session history cannot be sent to the agent (the request is malformed or too large). Start a new conversation; the recent session was kept for reference.',
+      });
+      return;
+    }
+
     // Adapter-internal errors (bugs in the agent's ACP process) — the session MAY recover
     // on retry (e.g. after agent restarts), so keep it but show a clear message.
     const isAdapterInternal = /is not a function|is not defined|Cannot read propert|unexpected token/i.test(raw);

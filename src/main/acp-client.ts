@@ -28,6 +28,37 @@ import {
   type AcpStoredSession,
 } from './acp-session-store';
 
+// Keep the request below the observed Claude ACP adapter failure point (~208 KB).
+// This is a preflight limit only: prompts are never truncated or rewritten.
+export const ACP_PROMPT_MAX_BYTES = 192 * 1024;
+
+export type AcpPromptValidationResult =
+  | { ok: true; bytes: number }
+  | { ok: false; error: string };
+
+/** Validate a structured ACP request using the platform JSON serializer. */
+export function validateAcpPromptPayload(payload: unknown): AcpPromptValidationResult {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(payload);
+  } catch {
+    return { ok: false, error: 'Prompt cannot be encoded as JSON. Remove unsupported prompt content and retry.' };
+  }
+
+  if (typeof serialized !== 'string') {
+    return { ok: false, error: 'Prompt cannot be encoded as JSON. Remove unsupported prompt content and retry.' };
+  }
+
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  if (bytes > ACP_PROMPT_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `Prompt is too large for the Claude ACP adapter (${ACP_PROMPT_MAX_BYTES} bytes maximum). Summarize or send it in smaller messages.`,
+    };
+  }
+  return { ok: true, bytes };
+}
+
 // When Posse is launched from Finder/Dock, the app inherits macOS's minimal PATH
 // (/usr/bin:/bin:/usr/sbin:/sbin) — node/npx (homebrew) and user CLIs are missing.
 // Augment PATH with the standard install locations (same fix as pty-manager).
@@ -1060,6 +1091,20 @@ export class AcpManager {
       throw new Error(`ACP session ${id} not ready`);
     }
 
+    const blocks = typeof content === 'string'
+      ? [{ type: 'text' as const, text: content }]
+      : content;
+    const promptBlocks = session.browserInstructionsSent ? blocks
+      : [...buildBrowserInstructionBlocks(), ...blocks];
+    const payload = {
+      sessionId: session.info.sessionId,
+      prompt: promptBlocks,
+    };
+    const validation = validateAcpPromptPayload(payload);
+    if (!validation.ok) {
+      throw new Error(validation.error);
+    }
+
     session.info.status = 'prompting';
     this.fanoutStatus(id, { status: 'prompting' });
 
@@ -1071,16 +1116,8 @@ export class AcpManager {
       // ACP has no dedicated instructions field, so it is prepended to the first user
       // prompt as a leading text block. This only GUIDES the agent — availability is
       // determined by whether the browser MCP tool is actually registered.
-      const blocks = typeof content === 'string'
-        ? [{ type: 'text' as const, text: content }]
-        : content;
-      const promptBlocks = session.browserInstructionsSent ? blocks
-        : [...buildBrowserInstructionBlocks(), ...blocks];
       session.browserInstructionsSent = true;
-      const response = await session.context.request(acp.methods.agent.session.prompt, {
-        sessionId: session.info.sessionId,
-        prompt: promptBlocks,
-      });
+      const response = await session.context.request(acp.methods.agent.session.prompt, payload);
       session.info.status = 'idle';
       this.fanoutStatus(id, { status: 'idle' });
       // #124: only `end_turn` means the agent completed and returned control to the
