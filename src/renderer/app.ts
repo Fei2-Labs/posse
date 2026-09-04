@@ -197,6 +197,8 @@ declare global {
       // #124: local Electron notification + OS-managed sound preference.
       desktopAlertsGetEnabled: () => Promise<boolean>;
       desktopAlertsSetEnabled: (enabled: boolean) => Promise<boolean>;
+      acpModeGet: () => Promise<boolean>;
+      acpModeSet: (enabled: boolean) => Promise<boolean>;
       getCliProvider: (presetCommand: string) => Promise<string | null>;
       // Claude provider config
       claudeProvidersList: () => Promise<Array<{ id: string; name: string; baseUrl: string; apiKey: string; model?: string }>>;
@@ -254,6 +256,12 @@ const savedCwd = localStorage.getItem('posse_cwd') || '';
 let currentCwd = savedCwd;
 let lastPreset = localStorage.getItem('posse_preset') || '';
 let conversationPreferences = loadConversationPreferences();
+
+// ACP mode policy (server-side persisted). When false, ACP-eligible agents open as raw PTY
+// terminals on desktop. Loaded at startup; refreshed when the Settings toggle changes.
+// Mobile always uses ACP for eligible agents regardless of this setting.
+let useAcpForEligibleAgents = true;
+void window.posse.acpModeGet().then((v) => { useAcpForEligibleAgents = v; }).catch(() => { /* default true */ });
 // One-time cleanup: remove the stale legacy Loop config from previous versions.
 const LEGACY_LOOP_STORAGE_KEY = ['posse', 'auto', 'continue'].join('_');
 try { localStorage.removeItem(LEGACY_LOOP_STORAGE_KEY); } catch { /* ignore */ }
@@ -5599,8 +5607,8 @@ async function createSessionInProject(cwd: string, presetCommand: string): Promi
   if (!cwd) return;
   addRecentCwd(cwd);
 
-  // Check if this agent supports ACP (structured session view)
-  const isAcp = await window.posse.acpCheck(presetCommand);
+  // Check if this agent supports ACP (structured session view) and the user hasn't disabled it
+  const isAcp = useAcpForEligibleAgents && await window.posse.acpCheck(presetCommand);
 
   if (isAcp) {
     // Create an ACP session instead of a PTY session
@@ -5845,6 +5853,8 @@ async function tryResumeViaAcp(
 ): Promise<boolean> {
   // Only local connections support ACP
   if (activeConnectionIsRemote) return false;
+  // Respect the user's ACP/PTY preference — when disabled, never resume via ACP
+  if (!useAcpForEligibleAgents) return false;
   // Check if the preset command is ACP-eligible
   const isAcp = await window.posse.acpCheck(presetCommand);
   if (!isAcp) return false;
@@ -8497,6 +8507,10 @@ async function openSettingsDialog(): Promise<void> {
   let desktopAlertsEnabled = true;
   try { desktopAlertsEnabled = await window.posse.desktopAlertsGetEnabled(); }
   catch { /* Settings remains usable even if the policy read fails. */ }
+  // ACP mode policy (server-side persisted). Default ON.
+  let acpModeEnabled = true;
+  try { acpModeEnabled = await window.posse.acpModeGet(); }
+  catch { /* Settings remains usable even if the policy read fails. */ }
   // The async policy read may have raced another Settings open.
   if (document.getElementById('app-settings-overlay')) return;
 
@@ -8542,6 +8556,20 @@ async function openSettingsDialog(): Promise<void> {
           <span class="settings-toggle__control" aria-hidden="true"></span>
         </label>
       </section>
+      <section class="settings-section" aria-labelledby="settings-agent-sessions-title">
+        <div class="settings-section__heading">
+          <h3 id="settings-agent-sessions-title">Agent sessions</h3>
+          <p>Choose how supported agents (Claude, Codex, Copilot, Kiro, OpenCode) open.</p>
+        </div>
+        <label class="settings-toggle">
+          <span class="settings-toggle__copy">
+            <span class="settings-toggle__title">Use structured ACP view</span>
+            <span class="settings-toggle__description">When on, supported agents open in the structured session view. Turn off to always open them as raw terminals.</span>
+          </span>
+          <input type="checkbox" data-setting="use-acp" ${acpModeEnabled ? 'checked' : ''}>
+          <span class="settings-toggle__control" aria-hidden="true"></span>
+        </label>
+      </section>
       <section class="settings-section" aria-labelledby="settings-notifications-title">
         <div class="settings-section__heading">
           <h3 id="settings-notifications-title">Notifications</h3>
@@ -8564,6 +8592,7 @@ async function openSettingsDialog(): Promise<void> {
   const closeButton = dialog.querySelector<HTMLButtonElement>('.settings-dialog__close');
   const thoughtInput = dialog.querySelector<HTMLInputElement>('[data-setting="thoughts"]');
   const toolInput = dialog.querySelector<HTMLInputElement>('[data-setting="tools"]');
+  const useAcpInput = dialog.querySelector<HTMLInputElement>('[data-setting="use-acp"]');
   const desktopAlertsInput = dialog.querySelector<HTMLInputElement>('[data-setting="desktop-alerts"]');
 
   const cleanup = (): void => {
@@ -8586,6 +8615,15 @@ async function openSettingsDialog(): Promise<void> {
       ...conversationPreferences,
       expandToolsByDefault: toolInput.checked,
     });
+  });
+  useAcpInput?.addEventListener('change', async () => {
+    const requested = useAcpInput.checked;
+    const saved = await window.posse.acpModeSet(requested);
+    if (saved) {
+      useAcpForEligibleAgents = requested;
+    } else {
+      useAcpInput.checked = !requested;
+    }
   });
   desktopAlertsInput?.addEventListener('change', async () => {
     const requested = desktopAlertsInput.checked;

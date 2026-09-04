@@ -275,6 +275,9 @@ contextBridge.exposeInMainWorld('posse', {
   // #124: local Electron notification + OS-managed sound policy.
   desktopAlertsGetEnabled: () => ipcRenderer.invoke('desktop-alerts:get-enabled') as Promise<boolean>,
   desktopAlertsSetEnabled: (enabled: boolean) => ipcRenderer.invoke('desktop-alerts:set-enabled', enabled) as Promise<boolean>,
+  // ACP mode policy: when false, ACP-eligible agents open as raw PTY on desktop.
+  acpModeGet: () => ipcRenderer.invoke('acp-mode:get') as Promise<boolean>,
+  acpModeSet: (enabled: boolean) => ipcRenderer.invoke('acp-mode:set', enabled) as Promise<boolean>,
   // Get the model provider actually used by the CLI
   getCliProvider: (presetCommand: string) => ipcRenderer.invoke('cli:get-provider', presetCommand),
 

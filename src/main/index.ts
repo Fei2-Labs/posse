@@ -747,6 +747,32 @@ function saveDesktopAlertsPolicy(enabled: boolean): void {
   } catch { /* ignore */ }
 }
 
+// ACP mode policy: when false, ACP-eligible agents open as raw PTY terminals on desktop.
+// Mobile always uses ACP for eligible agents regardless of this setting.
+// Mirrors the desktop-alerts-policy.json pattern. Missing/malformed file defaults to true.
+function getAcpModePolicyPath(): string {
+  return path.join(app.getPath('userData'), 'acp-mode-policy.json');
+}
+
+let acpModePolicyCache: { useAcpForEligibleAgents: boolean } | null = null;
+function loadAcpModePolicy(): { useAcpForEligibleAgents: boolean } {
+  if (acpModePolicyCache) return acpModePolicyCache;
+  try {
+    const data = JSON.parse(fs.readFileSync(getAcpModePolicyPath(), 'utf-8'));
+    acpModePolicyCache = { useAcpForEligibleAgents: data.useAcpForEligibleAgents !== false };
+  } catch {
+    acpModePolicyCache = { useAcpForEligibleAgents: true };
+  }
+  return acpModePolicyCache;
+}
+
+function saveAcpModePolicy(enabled: boolean): void {
+  try {
+    fs.writeFileSync(getAcpModePolicyPath(), JSON.stringify({ useAcpForEligibleAgents: enabled }));
+    acpModePolicyCache = null;
+  } catch { /* ignore */ }
+}
+
 function expandUserPath(filePath: string): string {
   if (filePath === '~') return os.homedir();
   if (filePath.startsWith('~/') || filePath.startsWith('~\\')) {
@@ -4468,6 +4494,18 @@ function registerIPC(): void {
   ipcMain.handle('desktop-alerts:set-enabled', (_event, enabled: boolean): boolean => {
     if (typeof enabled !== 'boolean') return false;
     saveDesktopAlertsPolicy(enabled);
+    return true;
+  });
+
+  // ACP mode policy: controls whether ACP-eligible agents open the structured view or a
+  // raw PTY terminal on desktop. Mobile always uses ACP for eligible agents.
+  ipcMain.handle('acp-mode:get', (): boolean => {
+    return loadAcpModePolicy().useAcpForEligibleAgents;
+  });
+
+  ipcMain.handle('acp-mode:set', (_event, enabled: boolean): boolean => {
+    if (typeof enabled !== 'boolean') return false;
+    saveAcpModePolicy(enabled);
     return true;
   });
 
